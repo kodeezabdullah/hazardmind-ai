@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Add at bottom of .gitignore:
+
+# Node
+node_modules/
+.next/
+.vercel/
+frontend/.env.local
