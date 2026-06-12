@@ -1,0 +1,7 @@
+python-dotenv
+openai
+asyncpg
+httpx
+reportlab
+jinja2
+boto3

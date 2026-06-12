@@ -1,0 +1,6 @@
+python-dotenv
+openai
+httpx
+boto3
+sentinelsat
+rasterio
