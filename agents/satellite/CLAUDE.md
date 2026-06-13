@@ -34,7 +34,7 @@ Connects to the Band platform using the Anthropic adapter.
 - [x] Add Band env vars to `.env.example`
 - [x] Create `agent_config.yaml` (gitignored)
 - [x] Add `verify_setup.py` connectivity check
-- [ ] Register agent on Band platform and fill in real credentials
-- [ ] Run `verify_setup.py` against live Band to confirm connection
+- [x] Register agent on Band platform and fill in real credentials
+- [x] Run `verify_setup.py` against live Band to confirm connection (connects as "HazardMind Satellite")
 - [ ] Implement imagery processing pipeline (`processor.py`)
 - [ ] Wire agent into Band rooms and publish results
