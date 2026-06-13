@@ -1,5 +1,6 @@
 ﻿annotated-types==0.7.0
 anyio==4.13.0
+band-sdk[anthropic]
 certifi==2026.5.20
 charset-normalizer==3.4.7
 colorama==0.4.6
