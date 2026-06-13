@@ -41,6 +41,36 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 5: Cloudflare R2 upload (`r2_upload.py`) — DONE
+
+Pushes the `satellite.png` from `processor.export_png` to a Cloudflare R2
+bucket (S3-compatible) and returns a public URL for the frontend.
+
+- `get_r2_client()` — boto3 S3 client pointed at the R2 endpoint. The endpoint
+  is `CLOUDFLARE_R2_ENDPOINT` if set, else built from `CLOUDFLARE_ACCOUNT_ID`
+  (`https://<account_id>.r2.cloudflarestorage.com`). Access key from
+  `CLOUDFLARE_R2_KEY` (or `CLOUDFLARE_R2_ACCESS_KEY`), secret from
+  `CLOUDFLARE_R2_SECRET`. Uses `region_name="auto"` + SigV4.
+- `upload_to_r2(png_path, event_id)` — uploads to key
+  `events/<event_id>/satellite.png` in `CLOUDFLARE_R2_BUCKET` with
+  `ContentType=image/png` and a `public-read` ACL. Returns the public URL.
+- `check_demo_cache(event_id)` — for the three demo events (`peshawar`,
+  `dhaka`, `kathmandu`), `head_object`s the cached PNG; on a hit returns its
+  public URL so the caller can skip the live pipeline, otherwise `None`. Any
+  non-demo event returns `None` immediately without touching R2.
+
+Notes:
+- Public URL base is `CLOUDFLARE_R2_PUBLIC_URL` if set (an r2.dev or custom
+  domain bound to the bucket), else the account r2.dev domain
+  (`https://pub-<account_id>.r2.dev`).
+- The existing `.env.example` already pins the R2 vars; `boto3` was already in
+  `requirements.txt` (installed in the venv).
+- All functions log and return `None` on failure rather than raising.
+- `python r2_upload.py` builds a client and probes the demo cache. Verified
+  offline: the module imports, fails gracefully with no creds, non-demo events
+  short-circuit, and the object key is `events/<event_id>/satellite.png`. The
+  live upload/cache check needs real R2 credentials in `.env`.
+
 ### Step 4: Image download + processing (`processor.py`) — DONE
 
 Downloads the scene chosen by `sentinel.search_imagery`, clips it to the
