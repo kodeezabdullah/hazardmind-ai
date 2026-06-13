@@ -93,9 +93,14 @@ silhouette, not a rectangle.
   class_counts}` (`class_counts` = % of valid pixels per class label).
 
 **7F — `export_png(indices, clipped, event_id, disaster_type)`.** Writes three
-PNGs to `<temp>/<event_id>/`:
-- `true_color.png` — S2 TCI RGB (S1: VV greyscale).
-- `index_map.png` — NDWI Blues / NDVI RdYlGn / SAR grey, transparent nodata.
+PNGs to `<temp>/<event_id>/`. **All three are RGBA with the outside-polygon area
+fully transparent (alpha 0)** so any layer drops over the map as the risk-area
+silhouette, never a black/white box (the clip sets outside pixels to 0, so a
+plain RGB true_color would otherwise show a solid black background):
+- `true_color.png` — S2 TCI RGB (S1: VV greyscale), alpha from the clip mask
+  (and all-black TCI pixels treated as outside, so seams stay transparent).
+- `index_map.png` — NDWI Blues / NDVI RdYlGn / SAR grey, alpha = finite-index
+  AND inside-polygon (shares the true_color silhouette).
 - `classification.png` — graded hazard overlay (RGBA). **Only hazard classes
   (1..3) are painted**, deeper colour = higher severity; safe land (class 0)
   and outside-polygon (255) are fully transparent, so the layer drops cleanly

@@ -881,6 +881,10 @@ def export_png(
         index_map.png       - NDWI blues / NDVI RdYlGn / SAR greyscale
         classification.png  - semi-transparent affected-zone overlay (RGBA)
 
+    All three are RGBA with the outside-polygon area fully transparent (alpha
+    0), so any layer can be dropped over the map without a black/white box
+    around the risk-area silhouette.
+
     Returns {"true_color": path, "index_map": path, "classification": path}.
     """
     import matplotlib
@@ -895,6 +899,10 @@ def export_png(
     index_type = indices["index_type"]
     disaster = (disaster_type or "").strip().lower()
 
+    # Outside-polygon alpha: transparent where the clip mask is False so the
+    # true-colour layer carries the risk-area silhouette, not a black box.
+    mask = clipped.get("mask")
+
     try:
         # --- true_color.png -------------------------------------------------
         tci = clipped.get("tci")
@@ -902,6 +910,9 @@ def export_png(
             rgb = np.dstack([_decimate(tci[i]) for i in range(3)]).astype(
                 "uint8"
             )
+            # TCI nodata is also encoded as 0,0,0 inside clip_to_polygon; treat
+            # all-black pixels as outside so seams/fill are transparent too.
+            inside = rgb.any(axis=2)
         else:
             # Sentinel-1 (or no TCI): greyscale from the index source band.
             base = None
@@ -911,10 +922,19 @@ def export_png(
                     break
             if base is None:
                 base = next(iter(clipped["bands"].values()))
-            g = _stretch_uint8(_decimate(base))
+            base_dec = _decimate(base)
+            g = _stretch_uint8(base_dec)
             rgb = np.dstack([g, g, g])
+            inside = np.isfinite(base_dec)
+
+        if mask is not None:
+            inside = inside & _decimate(mask)
+        tc_alpha = np.where(inside, 255, 0).astype("uint8")
+        tc_rgba = np.dstack([rgb, tc_alpha])
         tc_path = os.path.join(out_dir, "true_color.png")
-        Image.fromarray(rgb, mode="RGB").save(tc_path, format="PNG", optimize=True)
+        Image.fromarray(tc_rgba, mode="RGBA").save(
+            tc_path, format="PNG", optimize=True
+        )
         paths["true_color"] = tc_path
 
         # --- index_map.png --------------------------------------------------
@@ -935,8 +955,12 @@ def export_png(
         else:
             cmap = colormaps["gray"]
         index_rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
-        # Transparent where there was no data.
-        alpha = np.where(np.isfinite(index), 255, 0).astype("uint8")
+        # Transparent where there was no data, and outside the risk polygon, so
+        # the index layer shares the same silhouette as the other layers.
+        idx_inside = np.isfinite(index)
+        if mask is not None:
+            idx_inside = idx_inside & _decimate(mask)
+        alpha = np.where(idx_inside, 255, 0).astype("uint8")
         index_rgba = np.dstack([index_rgb, alpha])
         idx_path = os.path.join(out_dir, "index_map.png")
         Image.fromarray(index_rgba, mode="RGBA").save(
