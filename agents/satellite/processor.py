@@ -121,6 +121,56 @@ SAR_WATER_THRESHOLD_DB = -15.0  # VV backscatter < this dB -> smooth water
 # Drop vectorized polygons smaller than this (km^2) as noise.
 MIN_ZONE_AREA_KM2 = 0.5
 
+# --------------------------------------------------------------------------- #
+# Classification scheme
+# --------------------------------------------------------------------------- #
+# Classification arrays use graded hazard classes so the output is a real risk
+# map, not a binary mask:
+#   0   = unaffected / safe land    -> NOT drawn on the overlay (transparent)
+#   1.. = increasing hazard severity-> drawn, deeper colour = worse
+#   255 = nodata / outside the polygon
+NODATA_CLASS = 255
+
+# Per-index class definitions, ordered low->high severity. Each entry is
+# (class_value, label, RGB colour, alpha). Pixels not matching any band stay 0.
+# Thresholds are applied as: NDWI/SAR ascending bands, NDVI descending bands
+# (low NDVI = more damage). See _classify().
+_CLASS_SCHEMES = {
+    "NDWI": {  # flood: more water = worse
+        "order": "asc",
+        "bands": [
+            # (lower_bound, class_value, label, rgb, alpha)
+            (0.0, 1, "wet_soil", (147, 197, 253), 150),    # light blue
+            (0.3, 2, "water", (37, 99, 235), 200),         # blue
+            (0.5, 3, "deep_water", (30, 58, 138), 220),    # dark blue
+        ],
+    },
+    "SAR": {  # flood (radar): lower backscatter = smoother = water
+        "order": "desc",
+        "bands": [
+            (-13.0, 1, "possible_water", (147, 197, 253), 150),
+            (-15.0, 2, "water", (37, 99, 235), 200),
+            (-18.0, 3, "deep_water", (30, 58, 138), 220),
+        ],
+    },
+    "NDVI_QUAKE": {  # earthquake: lower NDVI = more bare/damaged
+        "order": "desc",
+        "bands": [
+            (0.2, 1, "sparse_veg", (250, 204, 21), 150),   # yellow
+            (0.1, 2, "stressed", (249, 115, 22), 190),     # orange
+            (0.0, 3, "damage", (220, 38, 38), 220),        # red
+        ],
+    },
+    "NDVI_LANDSLIDE": {  # landslide: lower NDVI = exposed scar
+        "order": "desc",
+        "bands": [
+            (0.2, 1, "sparse_veg", (253, 224, 71), 150),   # pale yellow
+            (0.1, 2, "exposed", (251, 146, 60), 190),      # light orange
+            (0.0, 3, "scar", (234, 88, 12), 220),          # orange-red
+        ],
+    },
+}
+
 
 # --------------------------------------------------------------------------- #
 # Step 7B: download + extract the bands we actually need
@@ -582,6 +632,25 @@ def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     return out
 
 
+def _classify(index: np.ndarray, valid: np.ndarray, scheme: dict) -> np.ndarray:
+    """Map a continuous index to graded hazard classes per `scheme`.
+
+    Returns a uint8 array: 0 = safe land, 1..N = increasing severity,
+    NODATA_CLASS where invalid/outside. Bands are applied from least to most
+    severe so the highest matching class wins.
+    """
+    out = np.full(index.shape, NODATA_CLASS, dtype="uint8")
+    out[valid] = 0  # default: safe land
+    ascending = scheme["order"] == "asc"
+    for bound, value, _label, _rgb, _alpha in scheme["bands"]:
+        if ascending:
+            hit = valid & (index >= bound)
+        else:
+            hit = valid & (index <= bound)
+        out[hit] = value
+    return out
+
+
 def calculate_indices(
     clipped: dict, satellite_type: str, disaster_type: str
 ) -> Optional[dict]:
@@ -619,11 +688,11 @@ def calculate_indices(
             return None
         # GRD products are linear power; convert to dB. Guard non-positive.
         index = np.full_like(vv, np.nan, dtype="float32")
-        valid = np.isfinite(vv) & (vv > 0)
-        index[valid] = 10.0 * np.log10(vv[valid])
+        finite = np.isfinite(vv) & (vv > 0)
+        index[finite] = 10.0 * np.log10(vv[finite])
         index_type = "SAR"
+        scheme_key = "SAR"
         threshold = SAR_WATER_THRESHOLD_DB
-        affected = np.isfinite(index) & (index < threshold)
     elif disaster == "flood":
         b03, b08 = bands.get("B03"), bands.get("B08")
         if b03 is None or b08 is None:
@@ -631,8 +700,8 @@ def calculate_indices(
             return None
         index = _safe_ratio(b03 - b08, b03 + b08)
         index_type = "NDWI"
+        scheme_key = "NDWI"
         threshold = NDWI_WATER_THRESHOLD
-        affected = np.isfinite(index) & (index > threshold)
     else:
         b08, b04 = bands.get("B08"), bands.get("B04")
         if b08 is None or b04 is None:
@@ -640,19 +709,19 @@ def calculate_indices(
             return None
         index = _safe_ratio(b08 - b04, b08 + b04)
         index_type = "NDVI"
+        scheme_key = "NDVI_LANDSLIDE" if disaster == "landslide" else "NDVI_QUAKE"
         threshold = NDVI_DAMAGE_THRESHOLD
-        affected = np.isfinite(index) & (index < threshold)
 
-    # Classification: 1 affected, 0 unaffected, 255 nodata/outside polygon.
-    classification = np.full(index.shape, 255, dtype="uint8")
+    # Graded classification: 0 safe, 1..N severity, 255 nodata/outside polygon.
     valid = np.isfinite(index)
     if mask is not None:
         valid = valid & mask
-    classification[valid] = 0
-    classification[valid & affected] = 1
+    scheme = _CLASS_SCHEMES[scheme_key]
+    classification = _classify(index, valid, scheme)
 
     valid_count = int(valid.sum())
-    affected_count = int((classification == 1).sum())
+    affected_mask = (classification >= 1) & (classification != NODATA_CLASS)
+    affected_count = int(affected_mask.sum())
     water_percent = (
         round(100.0 * affected_count / valid_count, 2) if valid_count else 0.0
     )
@@ -660,20 +729,29 @@ def calculate_indices(
         round(float(np.nanmean(index[valid])), 4) if valid_count else 0.0
     )
 
+    # Per-class pixel counts (skip class 0 / nodata) for reporting.
+    class_counts = {}
+    for _bound, value, label, _rgb, _alpha in scheme["bands"]:
+        n = int((classification == value).sum())
+        if n:
+            class_counts[label] = round(100.0 * n / valid_count, 2) if valid_count else 0.0
+
     logger.info(
-        "%s: %.2f%% affected, mean=%.4f, threshold=%s",
+        "%s: %.2f%% affected, mean=%.4f, classes=%s",
         index_type,
         water_percent,
         mean_value,
-        threshold,
+        class_counts,
     )
     return {
         "index_type": index_type,
+        "scheme_key": scheme_key,
         "array": index,
         "classification_array": classification,
         "water_percent": water_percent,
         "mean_value": mean_value,
         "threshold_used": threshold,
+        "class_counts": class_counts,
     }
 
 
@@ -775,26 +853,19 @@ def export_png(
         )
         paths["index_map"] = idx_path
 
-        # --- classification.png (semi-transparent overlay) ------------------
+        # --- classification.png (graded hazard overlay) --------------------
+        # Only hazard classes (1..N) are painted; safe land (0) and nodata
+        # (255) stay fully transparent so this drops cleanly over the map /
+        # true_color image. Deeper colour = higher severity.
         cls = _decimate(indices["classification_array"])
-        # Colours per disaster: affected vs unaffected.
-        if disaster == "flood" or index_type in ("NDWI", "SAR"):
-            affected_rgb = (37, 99, 235)    # blue = water
-            ok_rgb = (255, 255, 255)        # white = land
-        elif disaster == "landslide":
-            affected_rgb = (234, 88, 12)    # orange = scar
-            ok_rgb = (34, 197, 94)          # green = ok
-        else:  # earthquake / default
-            affected_rgb = (220, 38, 38)    # red = damage
-            ok_rgb = (34, 197, 94)          # green = ok
+        scheme = _CLASS_SCHEMES[indices["scheme_key"]]
 
         h, w = cls.shape
         rgba = np.zeros((h, w, 4), dtype="uint8")
-        ok = cls == 0
-        aff = cls == 1
-        rgba[ok] = (*ok_rgb, 110)        # ~43% opacity
-        rgba[aff] = (*affected_rgb, 180)  # ~70% opacity
-        # cls == 255 stays fully transparent.
+        for _bound, value, _label, rgb, alpha in scheme["bands"]:
+            sel = cls == value
+            rgba[sel] = (*rgb, alpha)
+        # class 0 (safe) and 255 (nodata) remain (0,0,0,0) -> transparent.
         cls_path = os.path.join(out_dir, "classification.png")
         Image.fromarray(rgba, mode="RGBA").save(
             cls_path, format="PNG", optimize=True
@@ -830,61 +901,75 @@ def _polygon_area_km2(geom, crs) -> float:
         return geom.area  # degrees^2 fallback; only used for relative size
 
 
+# Hazard class value -> severity label (class 1 lowest, 3 highest).
+_SEVERITY_BY_CLASS = {1: "low", 2: "medium", 3: "high"}
+
+
 def vectorize_classification(
     classification_array: np.ndarray,
     transform,
     crs,
     disaster_type: str,
+    scheme_key: Optional[str] = None,
 ) -> dict:
-    """Turn the affected-pixel mask into a GeoJSON FeatureCollection.
+    """Turn the graded hazard classes into a GeoJSON FeatureCollection.
 
-    Polygonizes pixels classified as affected (value 1), reprojects to WGS84,
+    Polygonizes each hazard class (1..N) separately, reprojects to WGS84,
     simplifies (tolerance 0.001 deg), and drops polygons smaller than
-    MIN_ZONE_AREA_KM2. Each feature carries risk_type, area_km2 and a severity
-    derived from the polygon's size. Returns a FeatureCollection with an added
-    `total_area` (km^2) member.
+    MIN_ZONE_AREA_KM2. Each feature carries risk_type, hazard_class (the class
+    label, e.g. "water"/"damage"), area_km2 and a severity derived from the
+    class level. Returns a FeatureCollection with an added `total_area` (km^2).
     """
     disaster = (disaster_type or "").strip().lower() or "unknown"
-    affected = (classification_array == 1).astype("uint8")
+    scheme = _CLASS_SCHEMES.get(scheme_key) if scheme_key else None
+    labels = (
+        {value: label for _b, value, label, _rgb, _a in scheme["bands"]}
+        if scheme
+        else {}
+    )
+    arr = classification_array
 
     features = []
     total_area = 0.0
     try:
-        for geom, value in shapes(affected, mask=affected.astype(bool),
-                                  transform=transform):
-            if value != 1:
-                continue
-            poly = shape(geom)
-            # Reproject geometry to WGS84 for the output and area threshold.
-            if crs is not None and crs.to_epsg() != 4326:
-                poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
-            poly = poly.simplify(0.001, preserve_topology=True)
-            if poly.is_empty:
-                continue
+        # Vectorize each hazard class (skip 0 safe and 255 nodata).
+        hazard_values = sorted(
+            v for v in np.unique(arr)
+            if v != 0 and v != NODATA_CLASS
+        )
+        for value in hazard_values:
+            sel = (arr == value).astype("uint8")
+            label = labels.get(int(value), f"class_{int(value)}")
+            severity = _SEVERITY_BY_CLASS.get(int(value), "low")
+            for geom, gval in shapes(sel, mask=sel.astype(bool),
+                                     transform=transform):
+                if gval != 1:
+                    continue
+                poly = shape(geom)
+                if crs is not None and crs.to_epsg() != 4326:
+                    poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
+                poly = poly.simplify(0.001, preserve_topology=True)
+                if poly.is_empty:
+                    continue
 
-            area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
-            if area_km2 < MIN_ZONE_AREA_KM2:
-                continue
+                area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
+                if area_km2 < MIN_ZONE_AREA_KM2:
+                    continue
 
-            if area_km2 >= 25:
-                severity = "high"
-            elif area_km2 >= 5:
-                severity = "medium"
-            else:
-                severity = "low"
-
-            total_area += area_km2
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": mapping(poly),
-                    "properties": {
-                        "risk_type": disaster,
-                        "area_km2": area_km2,
-                        "severity": severity,
-                    },
-                }
-            )
+                total_area += area_km2
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": mapping(poly),
+                        "properties": {
+                            "risk_type": disaster,
+                            "hazard_class": label,
+                            "class_level": int(value),
+                            "area_km2": area_km2,
+                            "severity": severity,
+                        },
+                    }
+                )
     except (ValueError, rasterio.errors.RasterioError) as exc:
         logger.error("Vectorization failed: %s", exc)
 
@@ -965,6 +1050,7 @@ def process_satellite_imagery(
         clipped["transform"],
         clipped["crs"],
         disaster_type,
+        scheme_key=indices["scheme_key"],
     )
 
     logger.info("Satellite imagery pipeline complete for %s", event_id)
@@ -973,6 +1059,7 @@ def process_satellite_imagery(
         "index_type": indices["index_type"],
         "water_percent": indices["water_percent"],
         "mean_index": indices["mean_value"],
+        "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         "png_paths": pngs,
         "geojson": geojson,

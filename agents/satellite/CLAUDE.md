@@ -81,26 +81,35 @@ transparent). Verified to produce the true Peshawar+Nowshera+Charsadda polygon
 silhouette, not a rectangle.
 
 **7E — `calculate_indices(clipped, satellite_type, disaster_type)`.**
-- S2 flood → NDWI `(B03−B08)/(B03+B08)`, water where `> 0.3`.
-- S2 earthquake/landslide → NDVI `(B08−B04)/(B08+B04)`, damage where `< 0.2`.
-- S1 → VV backscatter in dB, smooth water where `< −15 dB`.
-- Builds a `classification_array` (1 affected / 0 unaffected / 255 nodata) and
-  returns `{index_type, array, classification_array, water_percent,
-  mean_value, threshold_used}`.
+- S2 flood → NDWI `(B03−B08)/(B03+B08)`.
+- S2 earthquake/landslide → NDVI `(B08−B04)/(B08+B04)`.
+- S1 → VV backscatter in dB.
+- Produces a **graded** `classification_array` via `_CLASS_SCHEMES`/`_classify`:
+  `0` = safe land, `1..3` = increasing severity, `255` = nodata/outside polygon.
+  Schemes: NDWI `wet_soil → water → deep_water`; SAR `possible_water → water →
+  deep_water`; NDVI(quake) `sparse_veg → stressed → damage`; NDVI(landslide)
+  `sparse_veg → exposed → scar`. Returns `{index_type, scheme_key, array,
+  classification_array, water_percent, mean_value, threshold_used,
+  class_counts}` (`class_counts` = % of valid pixels per class label).
 
 **7F — `export_png(indices, clipped, event_id, disaster_type)`.** Writes three
 PNGs to `<temp>/<event_id>/`:
 - `true_color.png` — S2 TCI RGB (S1: VV greyscale).
 - `index_map.png` — NDWI Blues / NDVI RdYlGn / SAR grey, transparent nodata.
-- `classification.png` — semi-transparent RGBA overlay for the map (flood
-  blue=water/white=land; earthquake red=damage/green=ok; landslide
-  orange=scar/green=ok).
+- `classification.png` — graded hazard overlay (RGBA). **Only hazard classes
+  (1..3) are painted**, deeper colour = higher severity; safe land (class 0)
+  and outside-polygon (255) are fully transparent, so the layer drops cleanly
+  over the map / true_color without a white "background" rectangle. (This
+  replaced the earlier binary overlay that filled all land translucent white
+  and rendered as an invisible blob when nothing was affected.)
 
 **7G — `vectorize_classification(classification_array, transform, crs,
-disaster_type)`.** `rasterio.features.shapes` over the affected mask →
-reproject to WGS84 → `shapely` simplify (0.001°) → drop polygons
-`< 0.5 km²` (area measured via EPSG:6933). Each feature carries
-`risk_type/area_km2/severity`; the FeatureCollection adds `total_area`.
+disaster_type, scheme_key)`.** Polygonizes **each hazard class separately**
+(`rasterio.features.shapes`) → reproject to WGS84 → `shapely` simplify
+(0.001°) → drop polygons `< 0.5 km²` (area via EPSG:6933). Each feature
+carries `risk_type/hazard_class/class_level/area_km2/severity`
+(severity from the class level: 1=low, 2=medium, 3=high); the
+FeatureCollection adds `total_area`.
 
 **7H — `r2_upload.upload_all_results(event_id, files_dict)`.** Uploads
 `true_color.png`, `index_map.png`, `classification.png` and `zones.geojson`

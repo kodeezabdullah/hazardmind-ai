@@ -235,6 +235,7 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 "index_type": result["index_type"],
                 "water_percent": result["water_percent"],
                 "mean_index": result["mean_index"],
+                "class_counts": result.get("class_counts"),
                 "affected_area_km2": result["affected_area_km2"],
                 "bbox": list(bbox),
                 "region_boundary": region.get("geojson"),
