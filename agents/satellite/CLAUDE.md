@@ -41,32 +41,113 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
-### Step 7: End-to-end testing — DONE
+### Step 7: Full remote-sensing pipeline — DONE
 
-Ran the pipeline against the live APIs with real locations. Results:
+Major restructure of `processor.py` and the modules around it: the agent now
+produces real analysis layers (true-colour, spectral index, classification
+overlay) and vector zones clipped to the **actual risk polygon**, not a bbox.
 
-- **boundary.py** — `get_region_boundary` resolves both `"Punjab, Pakistan"`
-  (bbox ≈ 69.26,27.71,75.38,34.02) and `"Khyber Pakhtunkhwa, Pakistan"`
-  (bbox ≈ 69.24,31.07,74.12,36.91). Risk-city + merge + analysis-bbox for
-  Peshawar yields ≈ (71.37,33.92,71.63,34.08). **PASS.**
-- **sentinel.py** — `authenticate_copernicus` returns a token;
-  `search_imagery` over the Peshawar bbox (Sentinel-2) finds a recent 0%-cloud
-  scene. **PASS.**
-- **processor.py** — downloads that scene (~834 MB `.SAFE` zip), clips the TCI
-  band to the Peshawar bbox, exports a valid 1024×784 RGB PNG showing the
-  Peshawar urban area. **PASS** (after the download fix below).
-- **r2_upload.py** — **BLOCKED:** no `CLOUDFLARE_*` credentials in `.env`, so
-  the live upload / public-URL / demo-cache-hit checks could not run. Offline
-  behavior verified: missing creds → graceful `None` (no raise) from
-  `get_r2_client`/`upload_to_r2`/`check_demo_cache`; non-demo events
-  short-circuit without touching R2; object key is `events/<id>/satellite.png`.
-  Needs real R2 creds to complete.
-- **agent.py** — `get_custom_tool_name(ProcessDisasterInput)` resolves to
-  `processdisaster` (the SDK strips the trailing `Input` suffix before
-  lowercasing), matching the system prompt; schema requires
-  `event_id`/`location`/`disaster_type` with `magnitude` optional;
-  `detect_risk_cities` returns curated cities for demo keys and the headline
-  token otherwise. Live Band run still needs the platform.
+**7A — Smart satellite selection (`sentinel.py:select_satellite`).** Now
+returns a dict and is cloud-aware:
+- `_peek_cloud_cover(bbox, token)` runs a lightweight, metadata-only S2
+  catalogue query and reads the lowest cloud cover of recent scenes.
+- Priority: cloud cover decides (> `CLOUD_COVER_THRESHOLD` 30% → Sentinel-1,
+  else Sentinel-2). The user hint (flood/cyclone/tsunami → SAR;
+  earthquake/landslide/wildfire → optical) is only a fallback when no cloud
+  metadata is available. **Cloud cover always wins** (physics over assumption).
+- Returns `{satellite_type, reason, cloud_cover, user_hint}`.
+
+**7B — `download_imagery(selection, scene, event_id, token, disaster_type)`.**
+CDSE only serves the whole `.SAFE` zip, so we download it once (resumable; the
+`_CDSESession` + Range logic from the old code is kept and a completed zip is
+reused) and **extract only the bands we need** into
+`<temp>/<event_id>/bands/`:
+- Sentinel-1 → `VV` + `VH` measurement TIFFs.
+- Sentinel-2 → disaster-specific: flood `B03,B08,B11,TCI`; earthquake
+  `B02,B04,B08,TCI`; landslide `B03,B04,B08,TCI`. The 10 m variant of a band is
+  preferred when several resolutions exist.
+- Returns `{satellite_type, band_paths}`.
+
+**7C — `stack_bands(band_paths, satellite_type)`.** Reads each band onto the
+highest-resolution band's grid, bilinearly resampling coarser bands (S2 B11 is
+20 m → 10 m). TCI (RGB) is kept separately for the true-colour export. Returns
+`{bands, tci, transform, crs, shape}`.
+
+**7D — `clip_to_polygon(stacked, merged_polygon)`.** Replaces the old
+`clip_to_bbox`. Reprojects the WGS84 merged risk geometry into the raster CRS,
+builds an inside-polygon mask with `rasterio.mask` (`crop=True`), crops every
+band to that window, and sets outside-polygon pixels to NaN (PNG nodata →
+transparent). Verified to produce the true Peshawar+Nowshera+Charsadda polygon
+silhouette, not a rectangle.
+
+**7E — `calculate_indices(clipped, satellite_type, disaster_type)`.**
+- S2 flood → NDWI `(B03−B08)/(B03+B08)`, water where `> 0.3`.
+- S2 earthquake/landslide → NDVI `(B08−B04)/(B08+B04)`, damage where `< 0.2`.
+- S1 → VV backscatter in dB, smooth water where `< −15 dB`.
+- Builds a `classification_array` (1 affected / 0 unaffected / 255 nodata) and
+  returns `{index_type, array, classification_array, water_percent,
+  mean_value, threshold_used}`.
+
+**7F — `export_png(indices, clipped, event_id, disaster_type)`.** Writes three
+PNGs to `<temp>/<event_id>/`:
+- `true_color.png` — S2 TCI RGB (S1: VV greyscale).
+- `index_map.png` — NDWI Blues / NDVI RdYlGn / SAR grey, transparent nodata.
+- `classification.png` — semi-transparent RGBA overlay for the map (flood
+  blue=water/white=land; earthquake red=damage/green=ok; landslide
+  orange=scar/green=ok).
+
+**7G — `vectorize_classification(classification_array, transform, crs,
+disaster_type)`.** `rasterio.features.shapes` over the affected mask →
+reproject to WGS84 → `shapely` simplify (0.001°) → drop polygons
+`< 0.5 km²` (area measured via EPSG:6933). Each feature carries
+`risk_type/area_km2/severity`; the FeatureCollection adds `total_area`.
+
+**7H — `r2_upload.upload_all_results(event_id, files_dict)`.** Uploads
+`true_color.png`, `index_map.png`, `classification.png` and `zones.geojson`
+(serialised from the in-memory dict) under `events/<event_id>/`, returning
+`{true_color_url, index_url, classification_url, geojson_url}`. The single-file
+`upload_to_r2` is retained for the demo-cache path.
+
+**7I — `processor.process_satellite_imagery(selection, scene, bbox,
+merged_polygon, event_id, token, disaster_type)`.** Chains
+download → stack → clip → indices → export → vectorize and returns
+`{satellite_type, index_type, water_percent, mean_index, affected_area_km2,
+png_paths, geojson}`.
+
+**7J — `agent.py`.** `run_pipeline` resolves region + risk-city boundaries
+first (so they're reported even on a demo-cache hit), authenticates to CDSE,
+calls the cloud-aware `select_satellite(disaster_type, bbox, token)`, runs the
+full pipeline over the merged polygon, then `upload_all_results`. The reply to
+`@hazardmind-hazard` now carries `satellite_type, cloud_cover, index_type,
+affected_area_km2, water_percent` and all four artifact URLs.
+
+#### End-to-end test (Peshawar flood) — PASS
+
+Ran `run_pipeline(event_id="e2e-peshawar", location="Peshawar, Pakistan",
+disaster_type="flood")` against live CDSE + R2:
+- Smart selection peeked a recent S2 scene at **0% cloud** → Sentinel-2
+  (`reason=clear_sky_cloud_cover_0_percent`), correctly overriding the flood
+  hint's SAR default because the sky was clear.
+- Downloaded the scene, extracted `B03/B08/B11/TCI`, stacked to 10980², clipped
+  to the merged risk polygon (2661×5668, true silhouette).
+- NDWI mean −0.146, 0% water — physically correct for dry-season June (no
+  flood), so the GeoJSON is an empty FeatureCollection.
+- All three PNGs + `zones.geojson` uploaded to R2 and are publicly fetchable
+  (HTTP 200) at `pub-<id>.r2.dev/events/e2e-peshawar/…`.
+- Index/classification/vectorization proven on a synthetic NDWI water block:
+  36% water → one 1.474 km² `high/medium/low`-tagged GeoJSON polygon.
+
+R2 credentials (account/endpoint/key/secret/bucket/public-URL) are now in
+`.env`; `public-read` uploads and public reads both confirmed working.
+
+#### Notes
+- `select_satellite` signature changed to `(disaster_type, bbox=None,
+  token=None, cloud_cover=None)` and returns a **dict** (was a string).
+- `matplotlib` (colormaps), `shapely` and `pyproj` are now imported directly
+  and pinned in `requirements.txt`. matplotlib 3.9+ dropped `cm.get_cmap`; we
+  use `matplotlib.colormaps[...]`.
+- Earlier per-module status (boundary/sentinel auth/search) from prior steps
+  still holds; see below.
 
 #### Fix: CDSE download auth + resumable transfer (`processor.py`)
 
@@ -160,7 +241,12 @@ Notes:
   short-circuit, and the object key is `events/<event_id>/satellite.png`. The
   live upload/cache check needs real R2 credentials in `.env`.
 
-### Step 4: Image download + processing (`processor.py`) — DONE
+### Step 4: Image download + processing (`processor.py`) — SUPERSEDED by Step 7
+
+The original single-band download → bbox-clip → single PNG flow described below
+was replaced by the multi-band remote-sensing pipeline in Step 7
+(`clip_to_bbox` → `clip_to_polygon`, single PNG → three PNGs + GeoJSON). Kept
+for history.
 
 Downloads the scene chosen by `sentinel.search_imagery`, clips it to the
 analysis bbox from `boundary.get_analysis_bbox`, and exports a web-ready PNG.
@@ -197,10 +283,9 @@ Notes:
 Picks the Sentinel mission for a disaster, authenticates to the Copernicus Data
 Space Ecosystem (CDSE), and finds the best scene over a bbox.
 
-- `select_satellite(disaster_type, cloud_cover=None)` — flood → Sentinel-1
-  (SAR, weather-independent); earthquake/landslide → Sentinel-2 (optical).
-  If `cloud_cover > 30%`, an optical choice is switched to Sentinel-1. Unknown
-  disaster types default to optical. Pure logic, no network.
+- `select_satellite(...)` — **superseded by Step 7A** (now cloud-aware and
+  returns a dict). Originally: flood → Sentinel-1; earthquake/landslide →
+  Sentinel-2; optical switched to SAR if `cloud_cover > 30%`.
 - `authenticate_copernicus()` — password-grant token from the CDSE Keycloak
   endpoint using `COPERNICUS_USERNAME`/`COPERNICUS_PASSWORD` (client_id
   `cdse-public`). Returns the access token, or `None` on missing creds/failure.

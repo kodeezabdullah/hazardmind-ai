@@ -1,15 +1,25 @@
-"""Image download and processing for the satellite agent.
+"""Remote-sensing pipeline for the satellite agent.
 
-Takes a scene chosen by `sentinel.search_imagery`, downloads the product from
-the Copernicus Data Space Ecosystem (CDSE), clips it to the analysis bbox from
-`boundary.get_analysis_bbox`, and exports an optimized PNG for display.
+Turns a CDSE scene (chosen by `sentinel.search_imagery`) plus a risk-area
+polygon (from `boundary.py`) into web-ready map layers and vector zones for a
+disaster. The full pipeline lives in `process_satellite_imagery`:
 
-Pipeline (see `process_satellite_imagery`):
-    download_imagery -> clip_to_bbox -> export_png
+    download_imagery        # fetch + extract the bands we need
+        -> stack_bands      # align bands into one numpy cube (resample to 10 m)
+        -> clip_to_polygon  # mask to the actual risk geometry (not a rectangle)
+        -> calculate_indices# NDWI / NDVI / SAR ratio + a classification mask
+        -> export_png       # true_color, index_map, classification overlays
+        -> vectorize_classification  # GeoJSON polygons of the affected zones
 
-CDSE products are delivered as zipped `.SAFE` directories. Sentinel-2 holds the
-optical bands as JP2 files; Sentinel-1 holds GeoTIFF measurements. We locate a
-visualisable raster inside the archive, clip it to the bbox, and write a PNG.
+Mission-specific behaviour:
+- Sentinel-2 (optical): downloads disaster-specific bands. Flood -> NDWI water
+  detection; earthquake/landslide -> NDVI damage detection.
+- Sentinel-1 (SAR): downloads VV+VH polarizations; flood detection from the
+  backscatter (low VV -> smooth water).
+
+CDSE delivers products as zipped `.SAFE` directories; the `$value` endpoint only
+serves the whole archive, so we download it once (resumably) and extract the
+specific band rasters into `<temp>/<event_id>/bands/`.
 
 Every function logs and returns None on failure rather than raising, so a single
 bad scene does not abort an analysis.
@@ -27,8 +37,12 @@ from typing import Optional
 import numpy as np
 import rasterio
 import requests
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
+from rasterio.enums import Resampling
+from rasterio.features import shapes
+from rasterio.mask import mask as rio_mask
+from rasterio.warp import transform_geom
+from shapely.geometry import mapping, shape
+from shapely.ops import transform as shapely_transform
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +53,29 @@ DOWNLOAD_URL = (
     "$value"
 )
 
-# Where downloaded/clipped/exported files live. A dedicated subdirectory under
+# Where downloaded/extracted/exported files live. A dedicated subdirectory under
 # the system temp dir keeps intermediate artifacts out of the repo.
 TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
 
-# Raster file extensions we can open with rasterio, in preference order. JP2 is
-# Sentinel-2 optical; TIFF is Sentinel-1 SAR.
-_RASTER_EXTENSIONS = (".jp2", ".tif", ".tiff")
+# Sentinel-2 bands to download per disaster type. TCI (true-colour image) is
+# always included for the true_color export. Keys are the band tokens that
+# appear in JP2 filenames inside the .SAFE archive (e.g. "..._B03_10m.jp2").
+_S2_BANDS = {
+    "flood": ["B03", "B08", "B11", "TCI"],
+    "earthquake": ["B02", "B04", "B08", "TCI"],
+    "landslide": ["B03", "B04", "B08", "TCI"],
+}
+_S2_DEFAULT_BANDS = ["B04", "B03", "B02", "TCI"]
+
+# Native resolution (m) of each Sentinel-2 band we touch. 20 m bands (B11) are
+# resampled to 10 m during stacking.
+_S2_BAND_RES = {
+    "B02": 10, "B03": 10, "B04": 10, "B08": 10,
+    "B11": 20, "TCI": 10,
+}
+
+# Sentinel-1 polarizations.
+_S1_POLARIZATIONS = ["VV", "VH"]
 
 # CDSE serves the product bytes from a different host
 # (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
@@ -79,43 +109,38 @@ class _CDSESession(requests.Session):
             return  # keep the Authorization header as-is
         super().rebuild_auth(prepared_request, response)
 
-# Cap the exported PNG's longest side (pixels) to keep file size reasonable for
-# web display. Larger rasters are downsampled on read.
+
+# Cap exported PNG longest side (pixels) to keep file size reasonable for web.
 _MAX_PNG_DIMENSION = 1024
 
+# Index thresholds (see calculate_indices).
+NDWI_WATER_THRESHOLD = 0.3      # NDWI > this -> open water
+NDVI_DAMAGE_THRESHOLD = 0.2     # NDVI < this -> bare/damaged ground
+SAR_WATER_THRESHOLD_DB = -15.0  # VV backscatter < this dB -> smooth water
 
-def download_imagery(
+# Drop vectorized polygons smaller than this (km^2) as noise.
+MIN_ZONE_AREA_KM2 = 0.5
+
+
+# --------------------------------------------------------------------------- #
+# Step 7B: download + extract the bands we actually need
+# --------------------------------------------------------------------------- #
+def _download_product_zip(
     scene_metadata: dict,
     token: str,
     timeout: int = 600,
     max_retries: int = 4,
 ) -> Optional[str]:
-    """Download a scene's product archive from CDSE to a local file.
-
-    Args:
-        scene_metadata: a scene dict from `sentinel.search_imagery` (must carry
-            an `Id` and ideally a `Name`).
-        token: a CDSE access token from `sentinel.authenticate_copernicus`.
-        timeout: per-request timeout in seconds (products are large).
-        max_retries: how many times to resume after a dropped connection.
+    """Download a scene's full product archive from CDSE (resumable).
 
     CDSE products are large (often hundreds of MB) and the stream can drop
     mid-transfer. The download is resumable: on a connection error we re-issue
     the request with an HTTP Range header and append from where we left off,
-    rather than restarting from zero. Returns the path to the downloaded
-    `.zip`, or None on failure.
+    rather than restarting. Returns the path to the downloaded `.zip`, or None.
     """
-    if not scene_metadata:
-        logger.error("No scene metadata provided to download_imagery")
-        return None
-
     product_id = scene_metadata.get("Id")
     if not product_id:
         logger.error("Scene metadata has no 'Id'; cannot download")
-        return None
-
-    if not token:
-        logger.error("No access token provided; cannot download imagery")
         return None
 
     name = scene_metadata.get("Name", product_id)
@@ -123,11 +148,16 @@ def download_imagery(
     dest_path = os.path.join(TEMP_ROOT, f"{product_id}.zip")
     part_path = f"{dest_path}.part"
 
+    # A previously completed download can be reused as-is.
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        logger.info("Reusing cached product archive %s", dest_path)
+        return dest_path
+
     url = DOWNLOAD_URL.format(product_id=product_id)
     auth_header = {"Authorization": f"Bearer {token}"}
 
-    # Start fresh: a stale partial from a previous run could be from a different
-    # scene or a server that doesn't honor Range, so don't trust it.
+    # Start fresh: a stale partial could be from a different scene or a server
+    # that doesn't honor Range, so don't trust it.
     if os.path.exists(part_path):
         try:
             os.remove(part_path)
@@ -157,7 +187,6 @@ def download_imagery(
                     ) as response:
                         response.raise_for_status()
 
-                        # Determine the expected total size once.
                         if total_size is None:
                             length = response.headers.get("Content-Length")
                             content_range = response.headers.get("Content-Range")
@@ -171,8 +200,7 @@ def download_imagery(
                             elif length is not None and not downloaded:
                                 total_size = int(length)
 
-                        # If we asked for a Range but the server replied 200
-                        # (full body), it doesn't support resume: rewrite.
+                        # Server ignored our Range (replied 200): rewrite.
                         if downloaded and response.status_code == 200:
                             mode = "wb"
                             downloaded = 0
@@ -192,9 +220,7 @@ def download_imagery(
 
                     os.replace(part_path, dest_path)
                     logger.info(
-                        "Downloaded scene to %s (%d bytes)",
-                        dest_path,
-                        final_size,
+                        "Downloaded scene to %s (%d bytes)", dest_path, final_size
                     )
                     return dest_path
 
@@ -235,213 +261,722 @@ def download_imagery(
     return None
 
 
-def _find_raster_in_archive(zip_path: str) -> Optional[str]:
-    """Return a rasterio-openable URI for a band inside a downloaded zip.
+def _extract_bands(
+    zip_path: str,
+    event_id: str,
+    band_tokens: list,
+    satellite_type: str,
+) -> dict:
+    """Extract the requested band rasters from the product archive.
 
-    Picks the first member with a known raster extension. The returned URI uses
-    rasterio's `zip://` scheme so the band is read without extracting the whole
-    archive.
+    Looks inside the .SAFE zip for members matching each band token and copies
+    them to `<temp>/<event_id>/bands/`. For Sentinel-2, prefers the 10 m variant
+    of a band when several resolutions exist. Returns {band_token: local_path}
+    for the bands that were found (missing bands are logged and skipped).
     """
+    bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
+    os.makedirs(bands_dir, exist_ok=True)
+
     try:
         with zipfile.ZipFile(zip_path) as archive:
-            members = archive.namelist()
-    except (zipfile.BadZipFile, OSError) as exc:
-        logger.error("Could not open archive %s: %s", zip_path, exc)
-        return None
+            members = [m for m in archive.namelist() if not m.endswith("/")]
 
-    candidates = [
+            band_paths: dict = {}
+            for token in band_tokens:
+                matches = _match_band_members(members, token, satellite_type)
+                if not matches:
+                    logger.warning("Band %s not found in %s", token, zip_path)
+                    continue
+
+                member = matches[0]
+                ext = os.path.splitext(member)[1] or ".bin"
+                out_path = os.path.join(bands_dir, f"{token}{ext}")
+                if not (os.path.exists(out_path) and os.path.getsize(out_path) > 0):
+                    with archive.open(member) as src, open(out_path, "wb") as dst:
+                        dst.write(src.read())
+                band_paths[token] = out_path
+                logger.info("Extracted band %s -> %s", token, out_path)
+    except (zipfile.BadZipFile, OSError) as exc:
+        logger.error("Could not extract bands from %s: %s", zip_path, exc)
+        return {}
+
+    return band_paths
+
+
+def _match_band_members(
+    members: list, token: str, satellite_type: str
+) -> list:
+    """Return archive members for a band token, best (highest-res) first."""
+    upper = token.upper()
+    if satellite_type == "sentinel-1":
+        # SAR measurement tiffs carry the polarization in the filename, e.g.
+        # s1a-iw-grd-vv-...tiff
+        cand = [
+            m
+            for m in members
+            if m.lower().endswith((".tiff", ".tif"))
+            and f"-{token.lower()}-" in m.lower()
+        ]
+        return cand
+
+    # Sentinel-2: JP2 files like R10m/..._B03_10m.jp2 or .../TCI.jp2.
+    cand = [
         m
         for m in members
-        if m.lower().endswith(_RASTER_EXTENSIONS) and not m.endswith("/")
+        if m.lower().endswith(".jp2") and f"_{upper}_" in m.upper()
     ]
-    if not candidates:
-        logger.error("No raster bands found inside %s", zip_path)
-        return None
+    if not cand:
+        # TCI in some products is named ..._TCI_10m.jp2 or ..._TCI.jp2
+        cand = [
+            m for m in members
+            if m.lower().endswith(".jp2") and upper in m.upper()
+        ]
 
-    # Prefer true-colour previews when present, otherwise the first raster.
-    preferred = next(
-        (m for m in candidates if "TCI" in m.upper() or "PREVIEW" in m.upper()),
-        candidates[0],
-    )
-    logger.info("Using band %s from archive", preferred)
-    return f"zip://{zip_path}!/{preferred}"
+    # Prefer the 10 m variant when resolution suffixes are present.
+    def res_rank(path: str) -> int:
+        low = path.lower()
+        if "10m" in low or "_10" in low:
+            return 0
+        if "20m" in low:
+            return 1
+        if "60m" in low:
+            return 2
+        return 3
+
+    return sorted(cand, key=res_rank)
 
 
-def clip_to_bbox(image_path: str, bbox: tuple) -> Optional[str]:
-    """Clip a downloaded scene to the analysis bbox.
+def download_imagery(
+    selection: dict,
+    scene_metadata: dict,
+    event_id: str,
+    token: str,
+    disaster_type: str,
+) -> Optional[dict]:
+    """Download the product and extract the bands needed for this disaster.
 
     Args:
-        image_path: path to the downloaded product `.zip` (from
-            `download_imagery`) or a raster file directly.
-        bbox: (minx, miny, maxx, maxy) in WGS84 lon/lat — the analysis bbox from
-            `boundary.get_analysis_bbox`.
+        selection: dict from `sentinel.select_satellite` (carries
+            "satellite_type").
+        scene_metadata: scene dict from `sentinel.search_imagery`.
+        event_id: namespaces extracted bands under <temp>/<event_id>/bands/.
+        token: CDSE access token.
+        disaster_type: drives which Sentinel-2 bands are pulled.
 
-    Reads only the windowed region intersecting the bbox and writes a clipped
-    GeoTIFF alongside the input. Returns the clipped raster path, or None on
-    failure.
+    Returns {"satellite_type": ..., "band_paths": {token: path, ...}} or None.
     """
-    if not image_path or not os.path.exists(image_path):
-        logger.error("Image path %r does not exist", image_path)
+    if not scene_metadata:
+        logger.error("No scene metadata provided to download_imagery")
+        return None
+    if not token:
+        logger.error("No access token provided; cannot download imagery")
         return None
 
-    try:
-        minx, miny, maxx, maxy = bbox
-    except (TypeError, ValueError) as exc:
-        logger.error("Invalid bbox %r: %s", bbox, exc)
-        return None
+    satellite_type = selection.get("satellite_type", "sentinel-2")
+    disaster = (disaster_type or "").strip().lower()
 
-    if image_path.lower().endswith(".zip"):
-        raster_uri = _find_raster_in_archive(image_path)
-        if raster_uri is None:
-            return None
-        base = os.path.splitext(image_path)[0]
+    if satellite_type == "sentinel-1":
+        band_tokens = _S1_POLARIZATIONS
     else:
-        raster_uri = image_path
-        base = os.path.splitext(image_path)[0]
+        band_tokens = _S2_BANDS.get(disaster, _S2_DEFAULT_BANDS)
 
-    clipped_path = f"{base}_clipped.tif"
-
-    try:
-        with rasterio.open(raster_uri) as src:
-            # The bbox is in lon/lat; reproject it to the raster's CRS so the
-            # read window lines up with the pixels.
-            if src.crs is not None and src.crs.to_epsg() != 4326:
-                dst_bounds = transform_bounds(
-                    "EPSG:4326", src.crs, minx, miny, maxx, maxy
-                )
-            else:
-                dst_bounds = (minx, miny, maxx, maxy)
-
-            window = from_bounds(*dst_bounds, transform=src.transform)
-            window = window.round_offsets().round_lengths()
-
-            data = src.read(window=window)
-            if data.size == 0:
-                logger.error("Clip window does not overlap the scene")
-                return None
-
-            profile = src.profile.copy()
-            profile.update(
-                driver="GTiff",
-                height=data.shape[1],
-                width=data.shape[2],
-                transform=src.window_transform(window),
-            )
-
-            with rasterio.open(clipped_path, "w", **profile) as dst:
-                dst.write(data)
-    except rasterio.errors.RasterioError as exc:
-        logger.error("Failed to clip %s: %s", image_path, exc)
+    zip_path = _download_product_zip(scene_metadata, token)
+    if zip_path is None:
         return None
 
-    logger.info("Clipped scene to %s", clipped_path)
-    return clipped_path
+    band_paths = _extract_bands(zip_path, event_id, band_tokens, satellite_type)
+    if not band_paths:
+        logger.error("No bands extracted for %s", event_id)
+        return None
+
+    return {"satellite_type": satellite_type, "band_paths": band_paths}
 
 
-def _to_uint8(band: np.ndarray) -> np.ndarray:
-    """Scale a single band to 0-255 using a 2-98 percentile stretch."""
+# --------------------------------------------------------------------------- #
+# Step 7C: stack bands into one aligned cube
+# --------------------------------------------------------------------------- #
+def stack_bands(band_paths: dict, satellite_type: str) -> Optional[dict]:
+    """Stack per-band rasters into one aligned numpy cube.
+
+    Uses the first 10 m band as the reference grid; coarser bands (e.g. the
+    Sentinel-2 20 m SWIR B11) are resampled to that grid on read. TCI, which is
+    a 3-band RGB JP2, is kept separately for the true-colour export.
+
+    Returns:
+        {
+            "bands": {token: 2-D float32 array, ...},  # single-band data
+            "tci": (3, H, W) uint8 array or None,       # RGB preview
+            "transform": affine,                        # reference grid
+            "crs": CRS,
+            "shape": (H, W),
+        }
+    """
+    if not band_paths:
+        logger.error("No band paths to stack")
+        return None
+
+    # Pick the reference grid: the highest-resolution single band available.
+    single_tokens = [t for t in band_paths if t.upper() != "TCI"]
+    if not single_tokens:
+        single_tokens = list(band_paths)
+
+    try:
+        ref_token = min(
+            single_tokens,
+            key=lambda t: _S2_BAND_RES.get(t.upper(), 10)
+            if satellite_type == "sentinel-2"
+            else 10,
+        )
+        with rasterio.open(band_paths[ref_token]) as ref:
+            ref_h, ref_w = ref.height, ref.width
+            ref_transform = ref.transform
+            ref_crs = ref.crs
+
+        bands: dict = {}
+        for token, path in band_paths.items():
+            if token.upper() == "TCI":
+                continue
+            with rasterio.open(path) as src:
+                arr = src.read(
+                    1,
+                    out_shape=(ref_h, ref_w),
+                    resampling=Resampling.bilinear,
+                ).astype("float32")
+                bands[token] = arr
+
+        tci = None
+        if "TCI" in band_paths:
+            with rasterio.open(band_paths["TCI"]) as src:
+                count = min(src.count, 3)
+                tci = src.read(
+                    indexes=list(range(1, count + 1)),
+                    out_shape=(count, ref_h, ref_w),
+                    resampling=Resampling.bilinear,
+                ).astype("uint8")
+    except rasterio.errors.RasterioError as exc:
+        logger.error("Failed to stack bands: %s", exc)
+        return None
+
+    logger.info(
+        "Stacked %d band(s) onto %dx%d grid (ref=%s)",
+        len(bands),
+        ref_h,
+        ref_w,
+        ref_token,
+    )
+    return {
+        "bands": bands,
+        "tci": tci,
+        "transform": ref_transform,
+        "crs": ref_crs,
+        "shape": (ref_h, ref_w),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Step 7D: clip to the actual risk polygon (not a rectangle)
+# --------------------------------------------------------------------------- #
+def clip_to_polygon(
+    stacked: dict, merged_polygon: dict
+) -> Optional[dict]:
+    """Mask the stacked cube to the real risk geometry.
+
+    `merged_polygon` is the GeoJSON geometry from
+    `boundary.merge_risk_boundaries` (WGS84). It is reprojected into the
+    raster CRS and applied with `rasterio.mask` so pixels outside the polygon
+    become nodata. Returns a copy of `stacked` with masked arrays plus a
+    boolean `mask` (True = inside polygon) and an updated transform/shape.
+    """
+    if not stacked:
+        logger.error("No stacked data to clip")
+        return None
+    if not merged_polygon:
+        logger.warning("No polygon provided; returning unclipped stack")
+        stacked = dict(stacked)
+        h, w = stacked["shape"]
+        stacked["mask"] = np.ones((h, w), dtype=bool)
+        return stacked
+
+    crs = stacked["crs"]
+    transform = stacked["transform"]
+    h, w = stacked["shape"]
+
+    # Reproject the WGS84 polygon to the raster CRS.
+    try:
+        if crs is not None and crs.to_epsg() != 4326:
+            geom = transform_geom("EPSG:4326", crs, merged_polygon)
+        else:
+            geom = merged_polygon
+    except (rasterio.errors.RasterioError, ValueError) as exc:
+        logger.error("Failed to reproject clip polygon: %s", exc)
+        return None
+
+    # Build the inside-polygon boolean mask using rasterio.features against an
+    # in-memory single-band dataset describing the reference grid.
+    from rasterio.io import MemoryFile
+
+    try:
+        profile = {
+            "driver": "GTiff",
+            "height": h,
+            "width": w,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": crs,
+            "transform": transform,
+        }
+        with MemoryFile() as mem:
+            with mem.open(**profile) as tmp:
+                tmp.write(np.ones((1, h, w), dtype="uint8"))
+            with mem.open() as tmp:
+                clipped, clip_transform = rio_mask(
+                    tmp, [geom], crop=True, nodata=0, filled=True
+                )
+        inside = clipped[0] > 0
+    except (rasterio.errors.RasterioError, ValueError) as exc:
+        logger.error("Failed to build clip mask: %s", exc)
+        return None
+
+    # Apply the same crop window to every band by reprojecting the crop bounds
+    # back into pixel offsets relative to the original transform.
+    new_h, new_w = inside.shape
+    col_off = round((clip_transform.c - transform.c) / transform.a)
+    row_off = round((clip_transform.f - transform.f) / transform.e)
+
+    def crop(arr: np.ndarray) -> np.ndarray:
+        sub = arr[row_off:row_off + new_h, col_off:col_off + new_w]
+        # Guard against off-by-one from rounding.
+        return sub[:new_h, :new_w]
+
+    out_bands = {}
+    for token, arr in stacked["bands"].items():
+        sub = crop(arr).astype("float32").copy()
+        sub[~inside] = np.nan
+        out_bands[token] = sub
+
+    out_tci = None
+    if stacked.get("tci") is not None:
+        tci = stacked["tci"]
+        cropped = np.stack([crop(tci[i]) for i in range(tci.shape[0])])
+        cropped[:, ~inside] = 0
+        out_tci = cropped
+
+    logger.info("Clipped to polygon: %dx%d (was %dx%d)", new_h, new_w, h, w)
+    return {
+        "bands": out_bands,
+        "tci": out_tci,
+        "transform": clip_transform,
+        "crs": crs,
+        "shape": (new_h, new_w),
+        "mask": inside,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Step 7E: spectral / backscatter indices + classification
+# --------------------------------------------------------------------------- #
+def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    """Element-wise num/den, with 0 where the denominator is ~0."""
+    out = np.full_like(num, np.nan, dtype="float32")
+    np.divide(num, den, out=out, where=np.abs(den) > 1e-9)
+    return out
+
+
+def calculate_indices(
+    clipped: dict, satellite_type: str, disaster_type: str
+) -> Optional[dict]:
+    """Compute the disaster-appropriate index and a classification mask.
+
+    Sentinel-2:
+        flood              -> NDWI = (B03-B08)/(B03+B08); water where > 0.3
+        earthquake/landslide -> NDVI = (B08-B04)/(B08+B04); damage where < 0.2
+    Sentinel-1:
+        flood/any          -> VV backscatter in dB; smooth water where < -15 dB
+
+    Returns:
+        {
+            "index_type": "NDWI" | "NDVI" | "SAR",
+            "array": 2-D float32 index,
+            "classification_array": uint8 (1 = affected, 0 = unaffected,
+                255 = outside polygon / nodata),
+            "water_percent": float,         # % of valid pixels classed affected
+            "mean_value": float,            # mean index over valid pixels
+            "threshold_used": float,
+        }
+    """
+    if not clipped:
+        logger.error("No clipped data for index calculation")
+        return None
+
+    bands = clipped["bands"]
+    mask = clipped.get("mask")
+    disaster = (disaster_type or "").strip().lower()
+
+    if satellite_type == "sentinel-1":
+        vv = bands.get("VV")
+        if vv is None:
+            logger.error("Sentinel-1 VV band missing; cannot compute SAR index")
+            return None
+        # GRD products are linear power; convert to dB. Guard non-positive.
+        index = np.full_like(vv, np.nan, dtype="float32")
+        valid = np.isfinite(vv) & (vv > 0)
+        index[valid] = 10.0 * np.log10(vv[valid])
+        index_type = "SAR"
+        threshold = SAR_WATER_THRESHOLD_DB
+        affected = np.isfinite(index) & (index < threshold)
+    elif disaster == "flood":
+        b03, b08 = bands.get("B03"), bands.get("B08")
+        if b03 is None or b08 is None:
+            logger.error("NDWI needs B03 and B08; one is missing")
+            return None
+        index = _safe_ratio(b03 - b08, b03 + b08)
+        index_type = "NDWI"
+        threshold = NDWI_WATER_THRESHOLD
+        affected = np.isfinite(index) & (index > threshold)
+    else:
+        b08, b04 = bands.get("B08"), bands.get("B04")
+        if b08 is None or b04 is None:
+            logger.error("NDVI needs B08 and B04; one is missing")
+            return None
+        index = _safe_ratio(b08 - b04, b08 + b04)
+        index_type = "NDVI"
+        threshold = NDVI_DAMAGE_THRESHOLD
+        affected = np.isfinite(index) & (index < threshold)
+
+    # Classification: 1 affected, 0 unaffected, 255 nodata/outside polygon.
+    classification = np.full(index.shape, 255, dtype="uint8")
+    valid = np.isfinite(index)
+    if mask is not None:
+        valid = valid & mask
+    classification[valid] = 0
+    classification[valid & affected] = 1
+
+    valid_count = int(valid.sum())
+    affected_count = int((classification == 1).sum())
+    water_percent = (
+        round(100.0 * affected_count / valid_count, 2) if valid_count else 0.0
+    )
+    mean_value = (
+        round(float(np.nanmean(index[valid])), 4) if valid_count else 0.0
+    )
+
+    logger.info(
+        "%s: %.2f%% affected, mean=%.4f, threshold=%s",
+        index_type,
+        water_percent,
+        mean_value,
+        threshold,
+    )
+    return {
+        "index_type": index_type,
+        "array": index,
+        "classification_array": classification,
+        "water_percent": water_percent,
+        "mean_value": mean_value,
+        "threshold_used": threshold,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Step 7F: PNG exports (true colour, index map, classification overlay)
+# --------------------------------------------------------------------------- #
+def _decimate(arr: np.ndarray) -> np.ndarray:
+    """Downsample a 2-D array so its longest side is <= _MAX_PNG_DIMENSION."""
+    h, w = arr.shape[-2:]
+    scale = max(h, w) / _MAX_PNG_DIMENSION
+    if scale <= 1:
+        return arr
+    step = int(np.ceil(scale))
+    return arr[..., ::step, ::step]
+
+
+def _stretch_uint8(band: np.ndarray) -> np.ndarray:
+    """2-98 percentile stretch of a band to 0-255 uint8 (NaN -> 0)."""
     valid = band[np.isfinite(band)]
     if valid.size == 0:
-        return np.zeros_like(band, dtype=np.uint8)
-
+        return np.zeros(band.shape, dtype=np.uint8)
     lo, hi = np.percentile(valid, (2, 98))
     if hi <= lo:
         hi = lo + 1.0
+    out = np.clip((np.nan_to_num(band, nan=lo) - lo) / (hi - lo), 0, 1)
+    return (out * 255).astype(np.uint8)
 
-    stretched = np.clip((band.astype("float32") - lo) / (hi - lo), 0, 1)
-    return (stretched * 255).astype(np.uint8)
 
+def export_png(
+    indices: dict, clipped: dict, event_id: str, disaster_type: str
+) -> Optional[dict]:
+    """Export the three display PNGs for an event.
 
-def export_png(clipped_path: str, event_id: str) -> Optional[str]:
-    """Convert a clipped raster to an optimized PNG for display.
+    Writes to `<temp>/<event_id>/`:
+        true_color.png      - natural colour (S2 TCI/RGB; S1 VV greyscale)
+        index_map.png       - NDWI blues / NDVI RdYlGn / SAR greyscale
+        classification.png  - semi-transparent affected-zone overlay (RGBA)
 
-    Writes to `<TEMP_ROOT>/<event_id>/satellite.png`. Multi-band rasters are
-    rendered as RGB (first three bands); single-band rasters (e.g. SAR) are
-    rendered as greyscale. The longest side is capped at `_MAX_PNG_DIMENSION`
-    via decimated reads to keep the file small. Returns the PNG path, or None on
-    failure.
+    Returns {"true_color": path, "index_map": path, "classification": path}.
     """
-    if not clipped_path or not os.path.exists(clipped_path):
-        logger.error("Clipped path %r does not exist", clipped_path)
-        return None
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import colormaps
+    from PIL import Image
 
     out_dir = os.path.join(TEMP_ROOT, str(event_id))
     os.makedirs(out_dir, exist_ok=True)
-    png_path = os.path.join(out_dir, "satellite.png")
+    paths = {}
+
+    index_type = indices["index_type"]
+    disaster = (disaster_type or "").strip().lower()
 
     try:
-        with rasterio.open(clipped_path) as src:
-            # Decimate on read so large scenes downsample to <= _MAX_PNG_DIMENSION.
-            scale = max(src.height, src.width) / _MAX_PNG_DIMENSION
-            if scale > 1:
-                out_h = max(1, int(src.height / scale))
-                out_w = max(1, int(src.width / scale))
-            else:
-                out_h, out_w = src.height, src.width
-
-            band_count = min(src.count, 3)
-            data = src.read(
-                indexes=list(range(1, band_count + 1)),
-                out_shape=(band_count, out_h, out_w),
+        # --- true_color.png -------------------------------------------------
+        tci = clipped.get("tci")
+        if tci is not None and tci.shape[0] >= 3:
+            rgb = np.dstack([_decimate(tci[i]) for i in range(3)]).astype(
+                "uint8"
             )
+        else:
+            # Sentinel-1 (or no TCI): greyscale from the index source band.
+            base = None
+            for tok in ("B04", "VV", "B08", "B03"):
+                if tok in clipped["bands"]:
+                    base = clipped["bands"][tok]
+                    break
+            if base is None:
+                base = next(iter(clipped["bands"].values()))
+            g = _stretch_uint8(_decimate(base))
+            rgb = np.dstack([g, g, g])
+        tc_path = os.path.join(out_dir, "true_color.png")
+        Image.fromarray(rgb, mode="RGB").save(tc_path, format="PNG", optimize=True)
+        paths["true_color"] = tc_path
 
-            channels = [_to_uint8(data[i]) for i in range(band_count)]
-            if band_count >= 3:
-                rgb = np.dstack(channels[:3])
-            else:
-                # Greyscale -> replicate to 3 channels for a standard PNG.
-                rgb = np.dstack([channels[0]] * 3)
+        # --- index_map.png --------------------------------------------------
+        index = _decimate(indices["array"])
+        finite = index[np.isfinite(index)]
+        if finite.size:
+            lo, hi = np.percentile(finite, (2, 98))
+            if hi <= lo:
+                hi = lo + 1.0
+        else:
+            lo, hi = 0.0, 1.0
+        norm = np.clip((np.nan_to_num(index, nan=lo) - lo) / (hi - lo), 0, 1)
 
-        from PIL import Image
-
-        Image.fromarray(rgb, mode="RGB").save(
-            png_path, format="PNG", optimize=True
+        if index_type == "NDWI":
+            cmap = colormaps["Blues"]
+        elif index_type == "NDVI":
+            cmap = colormaps["RdYlGn"]
+        else:
+            cmap = colormaps["gray"]
+        index_rgb = (cmap(norm)[..., :3] * 255).astype("uint8")
+        # Transparent where there was no data.
+        alpha = np.where(np.isfinite(index), 255, 0).astype("uint8")
+        index_rgba = np.dstack([index_rgb, alpha])
+        idx_path = os.path.join(out_dir, "index_map.png")
+        Image.fromarray(index_rgba, mode="RGBA").save(
+            idx_path, format="PNG", optimize=True
         )
-    except rasterio.errors.RasterioError as exc:
-        logger.error("Failed to read clipped raster %s: %s", clipped_path, exc)
-        return None
+        paths["index_map"] = idx_path
+
+        # --- classification.png (semi-transparent overlay) ------------------
+        cls = _decimate(indices["classification_array"])
+        # Colours per disaster: affected vs unaffected.
+        if disaster == "flood" or index_type in ("NDWI", "SAR"):
+            affected_rgb = (37, 99, 235)    # blue = water
+            ok_rgb = (255, 255, 255)        # white = land
+        elif disaster == "landslide":
+            affected_rgb = (234, 88, 12)    # orange = scar
+            ok_rgb = (34, 197, 94)          # green = ok
+        else:  # earthquake / default
+            affected_rgb = (220, 38, 38)    # red = damage
+            ok_rgb = (34, 197, 94)          # green = ok
+
+        h, w = cls.shape
+        rgba = np.zeros((h, w, 4), dtype="uint8")
+        ok = cls == 0
+        aff = cls == 1
+        rgba[ok] = (*ok_rgb, 110)        # ~43% opacity
+        rgba[aff] = (*affected_rgb, 180)  # ~70% opacity
+        # cls == 255 stays fully transparent.
+        cls_path = os.path.join(out_dir, "classification.png")
+        Image.fromarray(rgba, mode="RGBA").save(
+            cls_path, format="PNG", optimize=True
+        )
+        paths["classification"] = cls_path
     except (OSError, ValueError) as exc:
-        logger.error("Failed to export PNG to %s: %s", png_path, exc)
+        logger.error("Failed to export PNGs for %s: %s", event_id, exc)
         return None
 
-    logger.info("Exported PNG to %s", png_path)
-    return png_path
+    logger.info("Exported PNGs for %s: %s", event_id, list(paths))
+    return paths
 
 
+# --------------------------------------------------------------------------- #
+# Step 7G: vectorize the classification into GeoJSON zones
+# --------------------------------------------------------------------------- #
+def _polygon_area_km2(geom, crs) -> float:
+    """Approximate a WGS84/geographic polygon's area in km^2.
+
+    Reprojects to a world equal-area projection (EPSG:6933) for the measure.
+    """
+    try:
+        from pyproj import Transformer
+
+        transformer = Transformer.from_crs(
+            crs if crs else "EPSG:4326", "EPSG:6933", always_xy=True
+        )
+        projected = shapely_transform(
+            lambda x, y, z=None: transformer.transform(x, y), geom
+        )
+        return projected.area / 1e6
+    except Exception:  # noqa: BLE001 - area is best-effort
+        return geom.area  # degrees^2 fallback; only used for relative size
+
+
+def vectorize_classification(
+    classification_array: np.ndarray,
+    transform,
+    crs,
+    disaster_type: str,
+) -> dict:
+    """Turn the affected-pixel mask into a GeoJSON FeatureCollection.
+
+    Polygonizes pixels classified as affected (value 1), reprojects to WGS84,
+    simplifies (tolerance 0.001 deg), and drops polygons smaller than
+    MIN_ZONE_AREA_KM2. Each feature carries risk_type, area_km2 and a severity
+    derived from the polygon's size. Returns a FeatureCollection with an added
+    `total_area` (km^2) member.
+    """
+    disaster = (disaster_type or "").strip().lower() or "unknown"
+    affected = (classification_array == 1).astype("uint8")
+
+    features = []
+    total_area = 0.0
+    try:
+        for geom, value in shapes(affected, mask=affected.astype(bool),
+                                  transform=transform):
+            if value != 1:
+                continue
+            poly = shape(geom)
+            # Reproject geometry to WGS84 for the output and area threshold.
+            if crs is not None and crs.to_epsg() != 4326:
+                poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
+            poly = poly.simplify(0.001, preserve_topology=True)
+            if poly.is_empty:
+                continue
+
+            area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
+            if area_km2 < MIN_ZONE_AREA_KM2:
+                continue
+
+            if area_km2 >= 25:
+                severity = "high"
+            elif area_km2 >= 5:
+                severity = "medium"
+            else:
+                severity = "low"
+
+            total_area += area_km2
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": mapping(poly),
+                    "properties": {
+                        "risk_type": disaster,
+                        "area_km2": area_km2,
+                        "severity": severity,
+                    },
+                }
+            )
+    except (ValueError, rasterio.errors.RasterioError) as exc:
+        logger.error("Vectorization failed: %s", exc)
+
+    logger.info(
+        "Vectorized %d zone(s), total %.2f km^2", len(features), total_area
+    )
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "total_area": round(total_area, 3),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Step 7I: master pipeline
+# --------------------------------------------------------------------------- #
 def process_satellite_imagery(
+    selection: dict,
     scene_metadata: dict,
     bbox: tuple,
+    merged_polygon: dict,
     event_id: str,
     token: str,
-) -> Optional[str]:
-    """Run the full download -> clip -> export pipeline for a scene.
+    disaster_type: str,
+) -> Optional[dict]:
+    """Run the full remote-sensing pipeline for a scene.
+
+    download_imagery -> stack_bands -> clip_to_polygon -> calculate_indices
+        -> export_png -> vectorize_classification
 
     Args:
+        selection: dict from `sentinel.select_satellite`.
         scene_metadata: scene dict from `sentinel.search_imagery`.
-        bbox: analysis bbox (minx, miny, maxx, maxy) from
-            `boundary.get_analysis_bbox`.
-        event_id: identifier used to namespace the output PNG.
-        token: CDSE access token from `sentinel.authenticate_copernicus`.
+        bbox: analysis bbox (unused for clipping; kept for the result payload).
+        merged_polygon: merged risk geometry from `boundary.merge_risk_boundaries`.
+        event_id: namespaces all artifacts.
+        token: CDSE access token.
+        disaster_type: drives band selection, indices and styling.
 
-    Returns the final PNG path, or None if any stage fails.
+    Returns a dict of local artifact paths and analysis stats, or None if any
+    stage fails:
+        {
+            "satellite_type", "index_type", "water_percent", "mean_index",
+            "affected_area_km2", "png_paths": {...}, "geojson": {...},
+        }
     """
-    image_path = download_imagery(scene_metadata, token)
-    if image_path is None:
-        logger.error("Aborting pipeline: download failed")
+    satellite_type = selection.get("satellite_type", "sentinel-2")
+
+    imagery = download_imagery(
+        selection, scene_metadata, event_id, token, disaster_type
+    )
+    if imagery is None:
+        logger.error("Aborting pipeline: download/extract failed")
         return None
 
-    clipped_path = clip_to_bbox(image_path, bbox)
-    if clipped_path is None:
-        logger.error("Aborting pipeline: clip failed")
+    stacked = stack_bands(imagery["band_paths"], satellite_type)
+    if stacked is None:
+        logger.error("Aborting pipeline: band stacking failed")
         return None
 
-    png_path = export_png(clipped_path, event_id)
-    if png_path is None:
+    clipped = clip_to_polygon(stacked, merged_polygon)
+    if clipped is None:
+        logger.error("Aborting pipeline: polygon clip failed")
+        return None
+
+    indices = calculate_indices(clipped, satellite_type, disaster_type)
+    if indices is None:
+        logger.error("Aborting pipeline: index calculation failed")
+        return None
+
+    pngs = export_png(indices, clipped, event_id, disaster_type)
+    if pngs is None:
         logger.error("Aborting pipeline: PNG export failed")
         return None
 
-    logger.info("Satellite imagery pipeline complete: %s", png_path)
-    return png_path
+    geojson = vectorize_classification(
+        indices["classification_array"],
+        clipped["transform"],
+        clipped["crs"],
+        disaster_type,
+    )
+
+    logger.info("Satellite imagery pipeline complete for %s", event_id)
+    return {
+        "satellite_type": satellite_type,
+        "index_type": indices["index_type"],
+        "water_percent": indices["water_percent"],
+        "mean_index": indices["mean_value"],
+        "affected_area_km2": geojson["total_area"],
+        "png_paths": pngs,
+        "geojson": geojson,
+    }
 
 
 if __name__ == "__main__":
@@ -450,29 +985,36 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # Live smoke test: authenticate, find a recent scene over a small Lahore
-    # bbox, then run the full pipeline. Needs valid Copernicus credentials.
-    from sentinel import (
-        SENTINEL_2,
-        authenticate_copernicus,
-        search_imagery,
+    # Live smoke test: Peshawar flood scenario end-to-end.
+    from boundary import (
+        get_analysis_bbox,
+        get_risk_city_boundaries,
+        merge_risk_boundaries,
     )
-
-    lahore_bbox = (74.2, 31.4, 74.5, 31.7)
+    from sentinel import authenticate_copernicus, search_imagery, select_satellite
 
     token = authenticate_copernicus()
     if not token:
         print("Authentication failed; skipping pipeline smoke test")
-    else:
-        scene = search_imagery(lahore_bbox, SENTINEL_2, date_range=30)
-        if not scene:
-            print("No scene found; skipping pipeline smoke test")
-        else:
-            print(f"Found scene: {scene.get('Name')}")
-            png = process_satellite_imagery(
-                scene, lahore_bbox, event_id="smoke-test", token=token
-            )
-            if png:
-                print(f"Pipeline produced PNG: {png}")
-            else:
-                print("Pipeline failed")
+        raise SystemExit(0)
+
+    cities = get_risk_city_boundaries(
+        "Khyber Pakhtunkhwa, Pakistan", ["Peshawar", "Nowshera", "Charsadda"]
+    )
+    merged = merge_risk_boundaries(cities)
+    bbox = get_analysis_bbox(merged)
+    print("Analysis bbox:", bbox)
+
+    selection = select_satellite("flood", bbox=bbox, token=token)
+    print("Selection:", selection)
+
+    scene = search_imagery(bbox, selection["satellite_type"], date_range=30)
+    if not scene:
+        print("No scene found; skipping pipeline smoke test")
+        raise SystemExit(0)
+
+    print("Scene:", scene.get("Name"))
+    result = process_satellite_imagery(
+        selection, scene, bbox, merged, "smoke-peshawar", token, "flood"
+    )
+    print("Result:", {k: v for k, v in result.items() if k != "geojson"} if result else None)

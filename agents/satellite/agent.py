@@ -44,7 +44,7 @@ from boundary import (
     merge_risk_boundaries,
 )
 from processor import process_satellite_imagery
-from r2_upload import check_demo_cache, upload_to_r2
+from r2_upload import check_demo_cache, upload_all_results
 from sentinel import authenticate_copernicus, search_imagery, select_satellite
 
 logger = logging.getLogger(__name__)
@@ -140,64 +140,58 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
     )
 
     try:
-        # (a) Demo cache short-circuit.
-        cached_url = check_demo_cache(event_id)
-        if cached_url:
-            logger.info("Demo cache hit for %s", event_id)
-            # We still resolve boundaries for the map overlay, but skip the
-            # expensive download/clip/export + upload.
-            region = get_region_boundary(location)
-            cities = detect_risk_cities(location, disaster_type)
-            city_polys = get_risk_city_boundaries(location, cities)
-            merged = merge_risk_boundaries(city_polys)
-            bbox = get_analysis_bbox(merged) if merged else None
-            return json.dumps(
-                {
-                    "event_id": event_id,
-                    "status": "complete",
-                    "image_url": cached_url,
-                    "bbox": list(bbox) if bbox else None,
-                    "satellite_type": select_satellite(disaster_type),
-                    "region_boundary": region.get("geojson") if region else None,
-                    "risk_cities": [c["name"] for c in city_polys],
-                    "cached": True,
-                }
-            )
-
-        # (b) Region boundary (faded map background).
+        # (a) Region boundary (faded map background) — always resolved so the
+        # frontend can draw the regional context, demo cache or not.
         region = get_region_boundary(location)
         if region is None:
             return _error(event_id, f"Could not resolve region boundary for {location!r}")
 
-        # (c) Detect at-risk cities.
+        # (b) Detect at-risk cities and resolve their boundaries.
         cities = detect_risk_cities(location, disaster_type)
         if not cities:
             return _error(event_id, f"No risk cities detected for {location!r}")
 
-        # (d) Risk-city boundaries (highlighted overlay).
         city_polys = get_risk_city_boundaries(location, cities)
         if not city_polys:
             return _error(event_id, "Could not resolve any risk-city boundaries")
 
-        # (e) Merge risk boundaries.
         merged = merge_risk_boundaries(city_polys)
         if merged is None:
             return _error(event_id, "Failed to merge risk-city boundaries")
 
-        # (f) Analysis bbox (the clip extent).
         bbox = get_analysis_bbox(merged)
         if bbox is None:
             return _error(event_id, "Failed to compute analysis bbox")
 
-        # (g) Copernicus authentication.
+        # (c) Demo cache short-circuit: reuse the pre-rendered classification PNG
+        # but still report the boundaries resolved above for the map.
+        cached_url = check_demo_cache(event_id)
+        if cached_url:
+            logger.info("Demo cache hit for %s", event_id)
+            return json.dumps(
+                {
+                    "event_id": event_id,
+                    "status": "complete",
+                    "satellite_type": select_satellite(disaster_type)["satellite_type"],
+                    "bbox": list(bbox),
+                    "region_boundary": region.get("geojson"),
+                    "risk_cities": [c["name"] for c in city_polys],
+                    "classification_url": cached_url,
+                    "image_url": cached_url,
+                    "cached": True,
+                }
+            )
+
+        # (d) Copernicus authentication (needed by select_satellite's cloud peek).
         token = authenticate_copernicus()
         if token is None:
             return _error(event_id, "Copernicus authentication failed")
 
-        # (h) Select the Sentinel mission.
-        satellite_type = select_satellite(disaster_type)
+        # (e) Smart, cloud-aware Sentinel selection.
+        selection = select_satellite(disaster_type, bbox=bbox, token=token)
+        satellite_type = selection["satellite_type"]
 
-        # (i) Find the best scene over the bbox.
+        # (f) Find the best scene over the bbox.
         scene = search_imagery(bbox, satellite_type)
         if scene is None:
             return _error(
@@ -205,27 +199,51 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 f"No {satellite_type} imagery found over bbox {bbox}",
             )
 
-        # (j) Download, clip, and export the PNG.
-        png_path = process_satellite_imagery(scene, bbox, event_id, token)
-        if png_path is None:
+        # (g) Full remote-sensing pipeline (download -> stack -> clip ->
+        # indices -> PNGs -> vectorize) over the real risk polygon.
+        result = process_satellite_imagery(
+            selection, scene, bbox, merged, event_id, token, disaster_type
+        )
+        if result is None:
             return _error(event_id, "Satellite imagery processing failed")
 
-        # (k) Upload to Cloudflare R2.
-        image_url = upload_to_r2(png_path, event_id)
-        if image_url is None:
-            return _error(event_id, "Upload to Cloudflare R2 failed")
+        # (h) Upload all artifacts to Cloudflare R2.
+        urls = upload_all_results(
+            event_id,
+            {
+                "true_color": result["png_paths"].get("true_color"),
+                "index_map": result["png_paths"].get("index_map"),
+                "classification": result["png_paths"].get("classification"),
+                "geojson": result["geojson"],
+            },
+        )
 
-        # (l) Structured result for the hazard agent.
-        logger.info("Pipeline complete for %s -> %s", event_id, image_url)
+        # (i) Structured result for the hazard agent.
+        logger.info(
+            "Pipeline complete for %s (%s, %.2f km^2 affected)",
+            event_id,
+            satellite_type,
+            result["affected_area_km2"],
+        )
         return json.dumps(
             {
                 "event_id": event_id,
                 "status": "complete",
-                "image_url": image_url,
-                "bbox": list(bbox),
                 "satellite_type": satellite_type,
+                "cloud_cover": selection.get("cloud_cover"),
+                "selection_reason": selection.get("reason"),
+                "index_type": result["index_type"],
+                "water_percent": result["water_percent"],
+                "mean_index": result["mean_index"],
+                "affected_area_km2": result["affected_area_km2"],
+                "bbox": list(bbox),
                 "region_boundary": region.get("geojson"),
                 "risk_cities": [c["name"] for c in city_polys],
+                "true_color_url": urls["true_color_url"],
+                "index_url": urls["index_url"],
+                "classification_url": urls["classification_url"],
+                "geojson_url": urls["geojson_url"],
+                "image_url": urls["classification_url"] or urls["true_color_url"],
                 "cached": False,
             }
         )
@@ -254,9 +272,16 @@ this format (substituting the tool's values):
 
 {HAZARD_AGENT} satellite processing complete.
 event_id: <event_id>
-image_url: <image_url>
-bbox: <bbox>
 satellite_type: <satellite_type>
+cloud_cover: <cloud_cover>
+index_type: <index_type>
+affected_area_km2: <affected_area_km2>
+water_percent: <water_percent>
+true_color_url: <true_color_url>
+index_url: <index_url>
+classification_url: <classification_url>
+geojson_url: <geojson_url>
+bbox: <bbox>
 region_boundary: <region_boundary>
 risk_cities: <risk_cities>
 status: complete
