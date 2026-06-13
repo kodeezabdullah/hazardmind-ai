@@ -118,6 +118,9 @@ activemq-data/
 .env
 .env.local
 .envrc
+
+# Band SDK agent credentials
+agent_config.yaml
 .venv
 venv/
 env/
