@@ -1,0 +1,13 @@
+agent:
+  name: hazardmind-report
+  role: executive_report
+  uuid: "cef0ed62-6539-4677-b7c1-0feebfb91c97"
+
+band:
+  api_key_env: BAND_API_KEY
+  communication_mode: remote
+
+project:
+  name: HazardMind AI
+  component: report_agent
+  event_id_required: true
