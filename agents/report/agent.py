@@ -6,7 +6,7 @@ from generator import generate_report
 
 
 async def main():
-    event_id = sys.argv[1] if len(sys.argv) > 1 else "demo-dhaka-flood"
+    event_id = sys.argv[1] if len(sys.argv) > 1 else "demo-peshawar-flood"
     report = await generate_report(event_id)
     print(json.dumps(report, indent=2))
 
