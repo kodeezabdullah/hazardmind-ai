@@ -41,6 +41,51 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 7: End-to-end testing — DONE
+
+Ran the pipeline against the live APIs with real locations. Results:
+
+- **boundary.py** — `get_region_boundary` resolves both `"Punjab, Pakistan"`
+  (bbox ≈ 69.26,27.71,75.38,34.02) and `"Khyber Pakhtunkhwa, Pakistan"`
+  (bbox ≈ 69.24,31.07,74.12,36.91). Risk-city + merge + analysis-bbox for
+  Peshawar yields ≈ (71.37,33.92,71.63,34.08). **PASS.**
+- **sentinel.py** — `authenticate_copernicus` returns a token;
+  `search_imagery` over the Peshawar bbox (Sentinel-2) finds a recent 0%-cloud
+  scene. **PASS.**
+- **processor.py** — downloads that scene (~834 MB `.SAFE` zip), clips the TCI
+  band to the Peshawar bbox, exports a valid 1024×784 RGB PNG showing the
+  Peshawar urban area. **PASS** (after the download fix below).
+- **r2_upload.py** — **BLOCKED:** no `CLOUDFLARE_*` credentials in `.env`, so
+  the live upload / public-URL / demo-cache-hit checks could not run. Offline
+  behavior verified: missing creds → graceful `None` (no raise) from
+  `get_r2_client`/`upload_to_r2`/`check_demo_cache`; non-demo events
+  short-circuit without touching R2; object key is `events/<id>/satellite.png`.
+  Needs real R2 creds to complete.
+- **agent.py** — `get_custom_tool_name(ProcessDisasterInput)` resolves to
+  `processdisaster` (the SDK strips the trailing `Input` suffix before
+  lowercasing), matching the system prompt; schema requires
+  `event_id`/`location`/`disaster_type` with `magnitude` optional;
+  `detect_risk_cities` returns curated cities for demo keys and the headline
+  token otherwise. Live Band run still needs the platform.
+
+#### Fix: CDSE download auth + resumable transfer (`processor.py`)
+
+Testing surfaced two real download failures, both now fixed in
+`download_imagery`:
+
+1. **401 on cross-host redirect.** The product `$value` endpoint 301-redirects
+   from `catalogue.dataspace.copernicus.eu` to
+   `download.dataspace.copernicus.eu`. `requests` strips the `Authorization`
+   header on host changes, so the download host returned 401. Added
+   `_CDSESession(requests.Session)` whose `rebuild_auth` keeps the Bearer token
+   when both source and destination are trusted CDSE hosts (`_CDSE_AUTH_HOSTS`).
+2. **`IncompleteRead` mid-transfer.** Products are large (the Peshawar scene was
+   834 MB) and the stream can drop. The download now streams to a `.part` file
+   and, on a connection/timeout error, **resumes** via an HTTP `Range` header
+   (up to `max_retries=4`) instead of restarting; it verifies the final size
+   against `Content-Length`/`Content-Range` before `os.replace`-ing the
+   `.part` into place.
+
 ### Step 6: Band message send (`agent.py`) — DONE
 
 The agent entry point. Connects to Band with the Anthropic adapter and waits for
@@ -144,7 +189,8 @@ Notes:
 - All functions log and return `None` on failure rather than raising.
 - `clip_to_bbox` and `export_png` are verified against a synthetic GeoTIFF
   (clip reduces extent exactly; PNG downsamples to 1024 px). `download_imagery`
-  and the `python processor.py` end-to-end smoke test need live CDSE creds.
+  and the full pipeline are verified live against CDSE in Step 7 (after the
+  auth-redirect + resumable-download fix).
 
 ### Step 3: Sentinel selection + Copernicus auth (`sentinel.py`) — DONE
 

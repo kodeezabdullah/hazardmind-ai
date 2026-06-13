@@ -47,6 +47,38 @@ TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
 # Sentinel-2 optical; TIFF is Sentinel-1 SAR.
 _RASTER_EXTENSIONS = (".jp2", ".tif", ".tiff")
 
+# CDSE serves the product bytes from a different host
+# (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
+# requests strips the Authorization header on cross-host redirects for safety,
+# which makes the download endpoint return 401. Hosts we trust to keep carrying
+# the Bearer token across that redirect.
+_CDSE_AUTH_HOSTS = frozenset(
+    {
+        "catalogue.dataspace.copernicus.eu",
+        "download.dataspace.copernicus.eu",
+        "zipper.dataspace.copernicus.eu",
+    }
+)
+
+
+class _CDSESession(requests.Session):
+    """A requests Session that keeps the Bearer token across CDSE redirects.
+
+    The product `$value` endpoint 301-redirects from the catalogue host to a
+    download host. requests' default `rebuild_auth` drops the Authorization
+    header on any host change, so we re-allow it when both the source and
+    destination are trusted CDSE hosts.
+    """
+
+    def rebuild_auth(self, prepared_request, response):
+        from urllib.parse import urlparse
+
+        original = urlparse(response.request.url).hostname
+        redirect = urlparse(prepared_request.url).hostname
+        if original in _CDSE_AUTH_HOSTS and redirect in _CDSE_AUTH_HOSTS:
+            return  # keep the Authorization header as-is
+        super().rebuild_auth(prepared_request, response)
+
 # Cap the exported PNG's longest side (pixels) to keep file size reasonable for
 # web display. Larger rasters are downsampled on read.
 _MAX_PNG_DIMENSION = 1024
@@ -56,6 +88,7 @@ def download_imagery(
     scene_metadata: dict,
     token: str,
     timeout: int = 600,
+    max_retries: int = 4,
 ) -> Optional[str]:
     """Download a scene's product archive from CDSE to a local file.
 
@@ -64,8 +97,13 @@ def download_imagery(
             an `Id` and ideally a `Name`).
         token: a CDSE access token from `sentinel.authenticate_copernicus`.
         timeout: per-request timeout in seconds (products are large).
+        max_retries: how many times to resume after a dropped connection.
 
-    Returns the path to the downloaded `.zip`, or None on failure.
+    CDSE products are large (often hundreds of MB) and the stream can drop
+    mid-transfer. The download is resumable: on a connection error we re-issue
+    the request with an HTTP Range header and append from where we left off,
+    rather than restarting from zero. Returns the path to the downloaded
+    `.zip`, or None on failure.
     """
     if not scene_metadata:
         logger.error("No scene metadata provided to download_imagery")
@@ -83,20 +121,110 @@ def download_imagery(
     name = scene_metadata.get("Name", product_id)
     os.makedirs(TEMP_ROOT, exist_ok=True)
     dest_path = os.path.join(TEMP_ROOT, f"{product_id}.zip")
+    part_path = f"{dest_path}.part"
 
     url = DOWNLOAD_URL.format(product_id=product_id)
-    headers = {"Authorization": f"Bearer {token}"}
+    auth_header = {"Authorization": f"Bearer {token}"}
+
+    # Start fresh: a stale partial from a previous run could be from a different
+    # scene or a server that doesn't honor Range, so don't trust it.
+    if os.path.exists(part_path):
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
 
     logger.info("Downloading scene %s from CDSE", name)
+    total_size: Optional[int] = None
+
     try:
-        with requests.get(
-            url, headers=headers, stream=True, timeout=timeout
-        ) as response:
-            response.raise_for_status()
-            with open(dest_path, "wb") as out:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        out.write(chunk)
+        with _CDSESession() as session:
+            for attempt in range(max_retries + 1):
+                downloaded = (
+                    os.path.getsize(part_path)
+                    if os.path.exists(part_path)
+                    else 0
+                )
+                headers = dict(auth_header)
+                mode = "wb"
+                if downloaded:
+                    headers["Range"] = f"bytes={downloaded}-"
+                    mode = "ab"
+
+                try:
+                    with session.get(
+                        url, headers=headers, stream=True, timeout=timeout
+                    ) as response:
+                        response.raise_for_status()
+
+                        # Determine the expected total size once.
+                        if total_size is None:
+                            length = response.headers.get("Content-Length")
+                            content_range = response.headers.get("Content-Range")
+                            if content_range and "/" in content_range:
+                                try:
+                                    total_size = int(
+                                        content_range.rsplit("/", 1)[1]
+                                    )
+                                except ValueError:
+                                    total_size = None
+                            elif length is not None and not downloaded:
+                                total_size = int(length)
+
+                        # If we asked for a Range but the server replied 200
+                        # (full body), it doesn't support resume: rewrite.
+                        if downloaded and response.status_code == 200:
+                            mode = "wb"
+                            downloaded = 0
+
+                        with open(part_path, mode) as out:
+                            for chunk in response.iter_content(
+                                chunk_size=1024 * 1024
+                            ):
+                                if chunk:
+                                    out.write(chunk)
+
+                    final_size = os.path.getsize(part_path)
+                    if total_size is not None and final_size < total_size:
+                        raise requests.exceptions.ChunkedEncodingError(
+                            f"incomplete: {final_size}/{total_size} bytes"
+                        )
+
+                    os.replace(part_path, dest_path)
+                    logger.info(
+                        "Downloaded scene to %s (%d bytes)",
+                        dest_path,
+                        final_size,
+                    )
+                    return dest_path
+
+                except (
+                    requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                ) as exc:
+                    if attempt >= max_retries:
+                        logger.error(
+                            "Giving up on scene %s after %d attempts: %s",
+                            name,
+                            attempt + 1,
+                            exc,
+                        )
+                        raise
+                    resumed = (
+                        os.path.getsize(part_path)
+                        if os.path.exists(part_path)
+                        else 0
+                    )
+                    logger.warning(
+                        "Download of %s interrupted (%s); resuming from "
+                        "%d bytes (attempt %d/%d)",
+                        name,
+                        exc,
+                        resumed,
+                        attempt + 1,
+                        max_retries,
+                    )
     except requests.RequestException as exc:
         logger.error("Failed to download scene %s: %s", name, exc)
         return None
@@ -104,8 +232,7 @@ def download_imagery(
         logger.error("Failed to write downloaded scene to %s: %s", dest_path, exc)
         return None
 
-    logger.info("Downloaded scene to %s", dest_path)
-    return dest_path
+    return None
 
 
 def _find_raster_in_archive(zip_path: str) -> Optional[str]:
