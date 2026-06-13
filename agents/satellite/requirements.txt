@@ -5,3 +5,5 @@ requests
 boto3
 sentinelsat
 rasterio
+numpy
+pillow

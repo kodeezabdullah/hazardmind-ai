@@ -36,10 +36,41 @@ Connects to the Band platform using the Anthropic adapter.
 - [x] Add `verify_setup.py` connectivity check
 - [x] Register agent on Band platform and fill in real credentials
 - [x] Run `verify_setup.py` against live Band to confirm connection (connects as "HazardMind Satellite")
-- [ ] Implement imagery processing pipeline (`processor.py`)
+- [x] Implement imagery processing pipeline (`processor.py`)
 - [ ] Wire agent into Band rooms and publish results
 
 ## Core Logic
+
+### Step 4: Image download + processing (`processor.py`) — DONE
+
+Downloads the scene chosen by `sentinel.search_imagery`, clips it to the
+analysis bbox from `boundary.get_analysis_bbox`, and exports a web-ready PNG.
+
+- `download_imagery(scene_metadata, token)` — streams the product archive from
+  the CDSE OData download endpoint (`/Products(<Id>)/$value`) using the Bearer
+  token from `authenticate_copernicus`. Saves `<temp>/<Id>.zip` and returns its
+  path.
+- `clip_to_bbox(image_path, bbox)` — opens a band inside the downloaded `.zip`
+  via rasterio's `zip://` scheme (prefers a TCI/preview band), reprojects the
+  WGS84 bbox into the raster CRS, reads only the intersecting window, and writes
+  a clipped GeoTIFF. Returns the clipped path.
+- `export_png(clipped_path, event_id)` — renders the clip to RGB (first 3 bands;
+  greyscale replicated for single-band SAR), applies a 2–98 percentile stretch,
+  decimates so the longest side is ≤ 1024 px, and writes an optimized
+  `<temp>/<event_id>/satellite.png`.
+- `process_satellite_imagery(scene_metadata, bbox, event_id, token)` — master
+  function chaining the three stages; returns the final PNG path.
+
+Notes:
+- Intermediate files live under `<system-temp>/hazardmind-satellite/` to keep
+  artifacts out of the repo.
+- Added `numpy` and `pillow` to `requirements.txt` (imported directly; numpy was
+  previously only transitive via rasterio). Pillow had to be installed into the
+  venv.
+- All functions log and return `None` on failure rather than raising.
+- `clip_to_bbox` and `export_png` are verified against a synthetic GeoTIFF
+  (clip reduces extent exactly; PNG downsamples to 1024 px). `download_imagery`
+  and the `python processor.py` end-to-end smoke test need live CDSE creds.
 
 ### Step 3: Sentinel selection + Copernicus auth (`sentinel.py`) — DONE
 
