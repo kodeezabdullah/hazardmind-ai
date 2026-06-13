@@ -24,6 +24,7 @@ from typing import Optional
 
 import requests
 from dotenv import load_dotenv
+from shapely.geometry import box, shape
 
 load_dotenv()
 
@@ -39,6 +40,10 @@ CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 # Optical imagery above this cloud percentage is treated as unusable; we then
 # fall back to SAR (Sentinel-1).
 CLOUD_COVER_THRESHOLD = 30.0
+
+# A single scene whose footprint covers less than this percentage of the AOI is
+# not enough on its own; the processor mosaics the top-ranked scenes instead.
+COVERAGE_MOSAIC_THRESHOLD = 60.0
 
 SENTINEL_1 = "sentinel-1"
 SENTINEL_2 = "sentinel-2"
@@ -234,24 +239,96 @@ def authenticate_copernicus(timeout: int = 30) -> Optional[str]:
     return token
 
 
+def _aoi_geometry(bbox: tuple, aoi_geom: Optional[dict]):
+    """Build the shapely geometry coverage is measured against.
+
+    Prefers the actual risk polygon (`aoi_geom`, the merged risk-city geometry
+    in WGS84) when supplied, falling back to the bbox rectangle. Using the real
+    polygon matters: a wide bbox around scattered cities is mostly empty, so a
+    tile can overlap the *bbox* heavily while covering *none* of the cities.
+    Returns None if neither can be built.
+    """
+    if aoi_geom:
+        try:
+            return shape(aoi_geom)
+        except (ValueError, AttributeError, TypeError):
+            pass
+    try:
+        minx, miny, maxx, maxy = bbox
+        return box(minx, miny, maxx, maxy)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scene_aoi_overlap(scene: dict, aoi) -> float:
+    """Return the fraction (0..1) of the AOI covered by a scene footprint.
+
+    `aoi` is a shapely geometry (the risk polygon, or the bbox as a fallback).
+    Uses the scene's `GeoFootprint` (a WGS84 GeoJSON polygon). A single Sentinel
+    tile only covers part of a wide AOI, so this is what tells coverage-aware
+    selection how useful a scene actually is. Returns 0.0 if the footprint is
+    missing or unparseable.
+    """
+    footprint = scene.get("GeoFootprint")
+    if not footprint or aoi is None:
+        return 0.0
+    try:
+        aoi_area = aoi.area
+        if aoi_area <= 0:
+            return 0.0
+        geom = shape(footprint)
+        return max(0.0, min(1.0, aoi.intersection(geom).area / aoi_area))
+    except (ValueError, AttributeError, TypeError) as exc:
+        logger.debug("Could not compute AOI overlap: %s", exc)
+        return 0.0
+
+
+def _scene_score(scene: dict, aoi) -> float:
+    """Coverage-aware score for a scene: overlap% * (1 - cloud_cover/100).
+
+    A scene that covers more of the AOI and is less cloudy scores higher. Cloud
+    cover is treated as 0 when unknown (Sentinel-1 has none). The score is in
+    0..1; higher is better.
+    """
+    overlap = _scene_aoi_overlap(scene, aoi)
+    cc = _scene_cloud_cover(scene)
+    if cc == float("inf"):
+        cc = 0.0
+    cc = max(0.0, min(100.0, cc))
+    return overlap * (1.0 - cc / 100.0)
+
+
 def search_imagery(
     bbox: tuple,
     satellite_type: str,
     date_range: int = 7,
     timeout: int = 60,
-) -> Optional[dict]:
-    """Search the CDSE catalogue for the best scene over a bbox.
+    return_ranked: bool = False,
+    aoi_geom: Optional[dict] = None,
+):
+    """Search the CDSE catalogue for the best scene(s) over a bbox.
 
     Args:
         bbox: (minx, miny, maxx, maxy) in WGS84 lon/lat.
         satellite_type: "sentinel-1" or "sentinel-2".
         date_range: how many days back from now to search.
         timeout: per-request timeout in seconds.
+        return_ranked: when True, return the full candidate list sorted by score
+            (best first) instead of just the single best scene.
+        aoi_geom: the merged risk geometry (WGS84 GeoJSON). When provided,
+            coverage is scored against this polygon instead of the bbox — which
+            is what actually matters when the cities are scattered across a wide,
+            mostly-empty bounding box.
 
-    For Sentinel-1, any acquisition is acceptable (SAR is weather-independent)
-    and the most recent scene wins. For Sentinel-2, scenes are filtered to
-    cloud cover below CLOUD_COVER_THRESHOLD and the least-cloudy recent scene
-    wins. Returns the chosen scene's metadata dict, or None if none is found.
+    Scenes are ranked coverage-aware (FIX 1): each candidate is scored
+    `aoi_overlap% * (1 - cloud_cover/100)`, so a scene that covers more of the
+    risk area and is less cloudy wins. This avoids picking a low-cloud tile that
+    overlaps only the empty part of the bbox. For Sentinel-2 the catalogue is
+    still pre-filtered to cloud cover below CLOUD_COVER_THRESHOLD.
+
+    Each returned scene is annotated with `_score`, `_overlap` (0..1) and
+    `_cloud` (percent). Returns the best scene dict (or None) by default, or the
+    ranked list when `return_ranked` is True.
     """
     collection = _COLLECTION_NAMES.get(satellite_type)
     if collection is None:
@@ -287,14 +364,18 @@ def search_imagery(
             "'cloudCover' and att/OData.CSC.DoubleAttribute/Value lt "
             f"{CLOUD_COVER_THRESHOLD})"
         )
-        order_by = "ContentDate/Start desc"
-    else:
-        order_by = "ContentDate/Start desc"
+        # Restrict to a single processing level (L1C). The catalogue returns
+        # both L1C and L2A for the same tile; mixing them in a mosaic is unsafe
+        # (different band naming/scaling), and the extractor targets L1C.
+        filters.append("contains(Name,'MSIL1C')")
+    order_by = "ContentDate/Start desc"
 
     params = {
         "$filter": " and ".join(filters),
         "$orderby": order_by,
-        "$top": "10",
+        # Large enough to capture every tile intersecting the AOI in the window
+        # so coverage-aware ranking is not defeated by date-ordered truncation.
+        "$top": "100",
         "$expand": "Attributes",
     }
 
@@ -326,18 +407,30 @@ def search_imagery(
         )
         return None
 
-    if satellite_type == SENTINEL_2:
-        best = min(results, key=_scene_cloud_cover)
-        logger.info(
-            "Best Sentinel-2 scene: %s (cloud cover %.1f%%)",
-            best.get("Name"),
-            _scene_cloud_cover(best),
-        )
-    else:
-        # Already ordered most-recent-first.
-        best = results[0]
-        logger.info("Best Sentinel-1 scene: %s", best.get("Name"))
+    # Coverage-aware ranking: score every candidate by AOI overlap and cloud
+    # cover, then sort best-first. Annotate each scene so downstream code (the
+    # mosaic decision) can read coverage without recomputing it. Coverage is
+    # measured against the risk polygon when available, else the bbox.
+    aoi = _aoi_geometry(bbox, aoi_geom)
+    for scene in results:
+        scene["_overlap"] = _scene_aoi_overlap(scene, aoi)
+        scene["_cloud"] = _scene_cloud_cover(scene)
+        scene["_score"] = _scene_score(scene, aoi)
 
+    ranked = sorted(results, key=lambda s: s["_score"], reverse=True)
+
+    best = ranked[0]
+    logger.info(
+        "Best %s scene: %s (score=%.3f, overlap=%.0f%%, cloud=%.1f%%)",
+        satellite_type,
+        best.get("Name"),
+        best["_score"],
+        best["_overlap"] * 100,
+        best["_cloud"] if best["_cloud"] != float("inf") else 0.0,
+    )
+
+    if return_ranked:
+        return ranked
     return best
 
 

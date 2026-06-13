@@ -191,9 +191,13 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
         selection = select_satellite(disaster_type, bbox=bbox, token=token)
         satellite_type = selection["satellite_type"]
 
-        # (f) Find the best scene over the bbox.
-        scene = search_imagery(bbox, satellite_type)
-        if scene is None:
+        # (f) Find candidate scenes over the bbox, ranked coverage-aware against
+        # the actual risk polygon, so the pipeline can mosaic / fall back if the
+        # best single tile is too sparse.
+        scenes = search_imagery(
+            bbox, satellite_type, return_ranked=True, aoi_geom=merged
+        )
+        if not scenes:
             return _error(
                 event_id,
                 f"No {satellite_type} imagery found over bbox {bbox}",
@@ -202,10 +206,17 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
         # (g) Full remote-sensing pipeline (download -> stack -> clip ->
         # indices -> PNGs -> vectorize) over the real risk polygon.
         result = process_satellite_imagery(
-            selection, scene, bbox, merged, event_id, token, disaster_type
+            selection, scenes, bbox, merged, event_id, token, disaster_type
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")
+        if result.get("status") == "coverage_insufficient":
+            return _error(
+                event_id,
+                "coverage_insufficient: no scene covers enough of the risk "
+                f"area (best {result.get('best_valid_percent')}% valid pixels, "
+                f"need >= {result.get('min_required_percent')}%)",
+            )
 
         # (h) Upload all artifacts to Cloudflare R2.
         urls = upload_all_results(

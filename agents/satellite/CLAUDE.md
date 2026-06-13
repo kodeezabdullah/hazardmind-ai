@@ -130,6 +130,84 @@ full pipeline over the merged polygon, then `upload_all_results`. The reply to
 `@hazardmind-hazard` now carries `satellite_type, cloud_cover, index_type,
 affected_area_km2, water_percent` and all four artifact URLs.
 
+### Step 8: Coverage-aware scene selection + mosaic + nodata guard — DONE
+
+Testing a real disaster (Mindanao M7.8 earthquake, 2026-06-08) exposed a
+selection failure: the three risk cities (Davao, Cotabato, Cagayan de Oro) are
+scattered across a wide, mostly-empty bbox spanning **6+ Sentinel-2 tiles**. The
+old `search_imagery` picked the single least-cloudy *intersecting* scene, which
+turned out to be an edge tile (`T51NYJ`) overlapping only the empty corner of
+the bbox. After clipping to the real risk polygon the result was **99.6% nodata**
+→ NDVI 0, 0 zones, empty 64-byte GeoJSON. The pipeline ran to completion on
+garbage. Three fixes, spanning `sentinel.py`, `processor.py` and `agent.py`:
+
+**FIX 1 — coverage-aware ranking (`sentinel.py`).** `search_imagery` now scores
+every candidate `score = aoi_overlap * (1 - cloud_cover/100)` and sorts
+best-first. Crucially, overlap is measured against the **merged risk polygon**
+(`aoi_geom`), not the bbox — a wide bbox around scattered cities is mostly empty,
+so a tile can cover 30% of the *bbox* while covering 0% of the *cities* (exactly
+the `T51NYJ` trap). Helpers: `_aoi_geometry(bbox, aoi_geom)` (polygon if given,
+else bbox rectangle), `_scene_aoi_overlap(scene, aoi)` (intersect the scene's
+`GeoFootprint` with the AOI), `_scene_score(scene, aoi)`. Each returned scene is
+annotated with `_score`, `_overlap` (0..1), `_cloud` (%). New params:
+`return_ranked` (return the full sorted list, not just the best) and `aoi_geom`.
+Two supporting catalogue-query changes were required for ranking to work:
+- **`$top` raised 10 → 100.** The catalogue is date-ordered, so with `$top=10`
+  the high-coverage tile was truncated away before scoring ever saw it. The
+  Mindanao 77%-coverage `T51PXK` tile only appeared once all intersecting scenes
+  in the window were returned.
+- **L1C-only filter (`contains(Name,'MSIL1C')`).** The catalogue returns both
+  L1C and L2A for each tile; mixing processing levels in a mosaic is unsafe
+  (different band naming/scaling) and the extractor targets L1C names. Filtering
+  to one level keeps the candidate set and any mosaic consistent.
+
+**FIX 2 — multi-tile mosaic (`processor.py`).** When the best scene covers less
+than `COVERAGE_MOSAIC_THRESHOLD` (60%) of the AOI, `process_satellite_imagery`
+mosaics the top `MOSAIC_MAX_SCENES` (3) scenes before clipping.
+`_mosaic_bands(per_scene_paths, event_id)` merges each band token across scenes
+with `rasterio.merge` (later scenes fill nodata gaps) into
+`<temp>/<event_id>/bands/<token>.tif`. `download_imagery` now accepts a single
+scene **or a list**, extracting each scene's bands into its own
+`scene_<n>/` subdir (so same-named JP2s from different tiles don't clobber) then
+mosaicking. When ≥60% is covered by one scene the mosaic is skipped (Mindanao:
+`T51PXK` alone covers 77%, so a single download was used).
+
+**FIX 3 — nodata guard with fallback (`processor.py`).** After clipping,
+`_valid_pixel_percent(clipped)` measures the share of in-polygon pixels that are
+finite and non-zero. `process_satellite_imagery` is now candidate-driven: it
+builds an ordered attempt list (a mosaic first if coverage < 60%, then each
+scene individually for fallback) via `_attempt_clip(...)`, and a candidate whose
+valid share is below `MIN_VALID_PIXEL_PERCENT` (5%) is **rejected and the next
+best is tried**. If every candidate is too sparse it returns
+`{"status": "coverage_insufficient", "best_valid_percent", "min_required_percent"}`
+instead of silently producing an empty result. On success the result dict gains
+a `valid_percent` field. `agent.py` passes the ranked list + `merged` polygon to
+the pipeline and surfaces `coverage_insufficient` as an error to the room.
+
+New constants: `sentinel.COVERAGE_MOSAIC_THRESHOLD`,
+`processor.{COVERAGE_MOSAIC_THRESHOLD, MOSAIC_MAX_SCENES, MIN_VALID_PIXEL_PERCENT}`.
+`process_satellite_imagery`'s `scene_metadata` arg now accepts a single scene
+(legacy) or the ranked list.
+
+#### End-to-end test (Mindanao M7.8 earthquake, 2026-06-08) — PASS
+
+Ran the full pipeline (`mindanao-eq-20260608`, "Mindanao, Philippines",
+earthquake) against live CDSE + R2 over the merged Davao/Cotabato/Cagayan de Oro
+polygon:
+- Boundary: 3/4 cities resolved ("General Santos" had no Nominatim polygon and
+  was skipped, not fatal). Merged-polygon area is only ~2.6% of the bbox area —
+  the reason bbox-overlap was a bad proxy.
+- Selection: polygon-aware ranking put `T51PXK` first (**score 0.636, 77%
+  overlap, 17.8% cloud**), correctly above the old date/cloud winner `T51NYJ`
+  (30% *bbox* overlap but **0% polygon** overlap). 9 L1C candidates ranked.
+- 77% > 60% → single-scene path (no mosaic). Clip came back **100% valid
+  pixels** (vs 0% before the fix).
+- NDVI mean 0.242, **41.6% affected**; classes sparse_veg 8.7% / stressed 8.6% /
+  **damage 24.3%**; **22 hazard zones, 153.37 km²**.
+- All four artifacts uploaded and publicly fetchable (HTTP 200): true_color
+  148 KB, index_map 189 KB, classification 21 KB, zones.geojson **901 KB** with
+  22 graded features (cf. the pre-fix run: 614/1053/792/64 bytes).
+
 #### End-to-end test (Peshawar flood) — PASS
 
 Ran `run_pipeline(event_id="e2e-peshawar", location="Peshawar, Pakistan",

@@ -40,6 +40,7 @@ import requests
 from rasterio.enums import Resampling
 from rasterio.features import shapes
 from rasterio.mask import mask as rio_mask
+from rasterio.merge import merge as rio_merge
 from rasterio.warp import transform_geom
 from shapely.geometry import mapping, shape
 from shapely.ops import transform as shapely_transform
@@ -56,6 +57,16 @@ DOWNLOAD_URL = (
 # Where downloaded/extracted/exported files live. A dedicated subdirectory under
 # the system temp dir keeps intermediate artifacts out of the repo.
 TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
+
+# A single scene covering less than this percentage of the AOI triggers a
+# multi-tile mosaic of the top-ranked scenes (FIX 2).
+COVERAGE_MOSAIC_THRESHOLD = 60.0
+# How many top-scored scenes to mosaic when one scene is not enough.
+MOSAIC_MAX_SCENES = 3
+# After clipping, a result with fewer than this percentage of valid (non-nodata)
+# pixels inside the risk polygon is rejected and the next scene is tried
+# (FIX 3).
+MIN_VALID_PIXEL_PERCENT = 5.0
 
 # Sentinel-2 bands to download per disaster type. TCI (true-colour image) is
 # always included for the true_color export. Keys are the band tokens that
@@ -396,24 +407,87 @@ def _match_band_members(
     return sorted(cand, key=res_rank)
 
 
+def _mosaic_bands(per_scene_paths: list, event_id: str) -> dict:
+    """Mosaic per-band rasters from several scenes into single rasters.
+
+    `per_scene_paths` is a list of {band_token: path} dicts (one per scene). For
+    each band token present in any scene, the matching rasters are merged with
+    `rasterio.merge` (which fills nodata gaps from later scenes) and written to
+    `<temp>/<event_id>/bands/<token>.tif`. Returns {band_token: mosaic_path}.
+    """
+    bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
+    os.makedirs(bands_dir, exist_ok=True)
+
+    tokens: list = []
+    for paths in per_scene_paths:
+        for tok in paths:
+            if tok not in tokens:
+                tokens.append(tok)
+
+    mosaicked: dict = {}
+    for token in tokens:
+        sources = [p[token] for p in per_scene_paths if token in p]
+        if len(sources) == 1:
+            mosaicked[token] = sources[0]
+            continue
+
+        datasets = []
+        try:
+            for src in sources:
+                datasets.append(rasterio.open(src))
+            arr, transform = rio_merge(datasets)
+            profile = datasets[0].profile.copy()
+            profile.update(
+                driver="GTiff",
+                height=arr.shape[1],
+                width=arr.shape[2],
+                count=arr.shape[0],
+                transform=transform,
+            )
+            out_path = os.path.join(bands_dir, f"{token}.tif")
+            with rasterio.open(out_path, "w", **profile) as dst:
+                dst.write(arr)
+            mosaicked[token] = out_path
+            logger.info(
+                "Mosaicked band %s from %d scenes -> %s",
+                token,
+                len(sources),
+                out_path,
+            )
+        except (rasterio.errors.RasterioError, ValueError) as exc:
+            logger.warning(
+                "Mosaic of band %s failed (%s); using first scene only",
+                token,
+                exc,
+            )
+            mosaicked[token] = sources[0]
+        finally:
+            for ds in datasets:
+                ds.close()
+
+    return mosaicked
+
+
 def download_imagery(
     selection: dict,
-    scene_metadata: dict,
+    scene_metadata,
     event_id: str,
     token: str,
     disaster_type: str,
 ) -> Optional[dict]:
-    """Download the product and extract the bands needed for this disaster.
+    """Download the product(s) and extract the bands needed for this disaster.
 
     Args:
         selection: dict from `sentinel.select_satellite` (carries
             "satellite_type").
-        scene_metadata: scene dict from `sentinel.search_imagery`.
+        scene_metadata: a single scene dict from `sentinel.search_imagery`, or a
+            list of scene dicts to mosaic into one coverage (FIX 2).
         event_id: namespaces extracted bands under <temp>/<event_id>/bands/.
         token: CDSE access token.
         disaster_type: drives which Sentinel-2 bands are pulled.
 
     Returns {"satellite_type": ..., "band_paths": {token: path, ...}} or None.
+    When several scenes are supplied, the per-band rasters are mosaicked first.
     """
     if not scene_metadata:
         logger.error("No scene metadata provided to download_imagery")
@@ -421,6 +495,8 @@ def download_imagery(
     if not token:
         logger.error("No access token provided; cannot download imagery")
         return None
+
+    scenes = scene_metadata if isinstance(scene_metadata, list) else [scene_metadata]
 
     satellite_type = selection.get("satellite_type", "sentinel-2")
     disaster = (disaster_type or "").strip().lower()
@@ -430,14 +506,29 @@ def download_imagery(
     else:
         band_tokens = _S2_BANDS.get(disaster, _S2_DEFAULT_BANDS)
 
-    zip_path = _download_product_zip(scene_metadata, token)
-    if zip_path is None:
-        return None
+    per_scene_paths = []
+    for idx, scene in enumerate(scenes):
+        zip_path = _download_product_zip(scene, token)
+        if zip_path is None:
+            logger.warning("Skipping scene %d: download failed", idx)
+            continue
+        # Each scene's bands go in their own subdir so same-named JP2s from
+        # different tiles don't clobber each other before mosaicking.
+        scene_event = f"{event_id}/scene_{idx}" if len(scenes) > 1 else event_id
+        paths = _extract_bands(
+            zip_path, scene_event, band_tokens, satellite_type
+        )
+        if paths:
+            per_scene_paths.append(paths)
 
-    band_paths = _extract_bands(zip_path, event_id, band_tokens, satellite_type)
-    if not band_paths:
+    if not per_scene_paths:
         logger.error("No bands extracted for %s", event_id)
         return None
+
+    if len(per_scene_paths) == 1:
+        band_paths = per_scene_paths[0]
+    else:
+        band_paths = _mosaic_bands(per_scene_paths, event_id)
 
     return {"satellite_type": satellite_type, "band_paths": band_paths}
 
@@ -986,83 +1077,208 @@ def vectorize_classification(
 # --------------------------------------------------------------------------- #
 # Step 7I: master pipeline
 # --------------------------------------------------------------------------- #
+def _valid_pixel_percent(clipped: dict) -> float:
+    """Percentage of in-polygon pixels that carry real (non-nodata) data.
+
+    Looks at one source band inside the clip mask: pixels that are finite and
+    non-zero count as valid. A scene that barely overlaps the AOI produces a
+    clip that is almost entirely nodata, which this catches (FIX 3).
+    """
+    bands = clipped.get("bands") or {}
+    if not bands:
+        return 0.0
+    mask = clipped.get("mask")
+    band = next(iter(bands.values()))
+    if mask is None:
+        inside = np.ones(band.shape, dtype=bool)
+    else:
+        inside = mask
+    inside_count = int(np.count_nonzero(inside))
+    if inside_count == 0:
+        return 0.0
+    valid = np.isfinite(band) & (band != 0) & inside
+    return 100.0 * int(np.count_nonzero(valid)) / inside_count
+
+
+def _attempt_clip(
+    selection: dict,
+    scenes,
+    merged_polygon: dict,
+    event_id: str,
+    token: str,
+    disaster_type: str,
+) -> Optional[dict]:
+    """Download -> stack -> clip for one candidate (single scene or mosaic).
+
+    Returns the clipped cube (with a `valid_percent` field) or None if any of
+    the download/stack/clip stages fails.
+    """
+    satellite_type = selection.get("satellite_type", "sentinel-2")
+
+    imagery = download_imagery(
+        selection, scenes, event_id, token, disaster_type
+    )
+    if imagery is None:
+        return None
+
+    stacked = stack_bands(imagery["band_paths"], satellite_type)
+    if stacked is None:
+        return None
+
+    clipped = clip_to_polygon(stacked, merged_polygon)
+    if clipped is None:
+        return None
+
+    clipped["valid_percent"] = _valid_pixel_percent(clipped)
+    return clipped
+
+
 def process_satellite_imagery(
     selection: dict,
-    scene_metadata: dict,
+    scene_metadata,
     bbox: tuple,
     merged_polygon: dict,
     event_id: str,
     token: str,
     disaster_type: str,
 ) -> Optional[dict]:
-    """Run the full remote-sensing pipeline for a scene.
+    """Run the full remote-sensing pipeline, coverage-aware with fallback.
 
     download_imagery -> stack_bands -> clip_to_polygon -> calculate_indices
         -> export_png -> vectorize_classification
 
+    `scene_metadata` may be a single scene dict (legacy) or the ranked list from
+    `sentinel.search_imagery(..., return_ranked=True)`. With a ranked list:
+
+    - FIX 2: if the best scene covers < COVERAGE_MOSAIC_THRESHOLD of the AOI, the
+      top MOSAIC_MAX_SCENES scenes are mosaicked before clipping.
+    - FIX 3: after clipping, if fewer than MIN_VALID_PIXEL_PERCENT of in-polygon
+      pixels carry data, the result is rejected and the next-best scene is
+      tried. If every candidate is too sparse, returns a
+      `{"status": "coverage_insufficient", ...}` marker instead of None.
+
     Args:
         selection: dict from `sentinel.select_satellite`.
-        scene_metadata: scene dict from `sentinel.search_imagery`.
-        bbox: analysis bbox (unused for clipping; kept for the result payload).
+        scene_metadata: scene dict or ranked list of scenes.
+        bbox: analysis bbox (kept for the result payload).
         merged_polygon: merged risk geometry from `boundary.merge_risk_boundaries`.
         event_id: namespaces all artifacts.
         token: CDSE access token.
         disaster_type: drives band selection, indices and styling.
 
-    Returns a dict of local artifact paths and analysis stats, or None if any
-    stage fails:
-        {
-            "satellite_type", "index_type", "water_percent", "mean_index",
-            "affected_area_km2", "png_paths": {...}, "geojson": {...},
-        }
+    Returns the result dict on success, a `coverage_insufficient` marker if no
+    candidate has enough valid data, or None if a stage hard-fails.
     """
     satellite_type = selection.get("satellite_type", "sentinel-2")
 
-    imagery = download_imagery(
-        selection, scene_metadata, event_id, token, disaster_type
+    scenes = (
+        list(scene_metadata)
+        if isinstance(scene_metadata, list)
+        else [scene_metadata]
     )
-    if imagery is None:
-        logger.error("Aborting pipeline: download/extract failed")
+    if not scenes:
+        logger.error("No scenes provided to process_satellite_imagery")
         return None
 
-    stacked = stack_bands(imagery["band_paths"], satellite_type)
-    if stacked is None:
-        logger.error("Aborting pipeline: band stacking failed")
-        return None
+    # Build the ordered list of candidate attempts. The first candidate is a
+    # mosaic of the top scenes when the single best does not cover enough of the
+    # AOI (FIX 2); the remaining candidates are individual scenes for fallback.
+    best_overlap = scenes[0].get("_overlap")
+    candidates = []
+    if (
+        best_overlap is not None
+        and best_overlap * 100 < COVERAGE_MOSAIC_THRESHOLD
+        and len(scenes) > 1
+    ):
+        mosaic_set = scenes[:MOSAIC_MAX_SCENES]
+        logger.info(
+            "Best scene covers only %.0f%% of AOI (< %.0f%%); mosaicking top "
+            "%d scenes",
+            best_overlap * 100,
+            COVERAGE_MOSAIC_THRESHOLD,
+            len(mosaic_set),
+        )
+        candidates.append(("mosaic", mosaic_set))
+    candidates.extend(("single", [s]) for s in scenes)
 
-    clipped = clip_to_polygon(stacked, merged_polygon)
-    if clipped is None:
-        logger.error("Aborting pipeline: polygon clip failed")
-        return None
+    best_seen = -1.0
+    for kind, scene_set in candidates:
+        attempt_id = (
+            f"{event_id}/mosaic" if kind == "mosaic" else event_id
+        )
+        clipped = _attempt_clip(
+            selection,
+            scene_set,
+            merged_polygon,
+            attempt_id,
+            token,
+            disaster_type,
+        )
+        if clipped is None:
+            continue
 
-    indices = calculate_indices(clipped, satellite_type, disaster_type)
-    if indices is None:
-        logger.error("Aborting pipeline: index calculation failed")
-        return None
+        valid = clipped.get("valid_percent", 0.0)
+        best_seen = max(best_seen, valid)
+        if valid < MIN_VALID_PIXEL_PERCENT:
+            names = [s.get("Name") for s in scene_set]
+            logger.warning(
+                "Candidate (%s) has only %.2f%% valid pixels (< %.1f%%); "
+                "trying next best. Scenes: %s",
+                kind,
+                valid,
+                MIN_VALID_PIXEL_PERCENT,
+                names,
+            )
+            continue
 
-    pngs = export_png(indices, clipped, event_id, disaster_type)
-    if pngs is None:
-        logger.error("Aborting pipeline: PNG export failed")
-        return None
+        logger.info(
+            "Candidate (%s) accepted with %.2f%% valid pixels", kind, valid
+        )
 
-    geojson = vectorize_classification(
-        indices["classification_array"],
-        clipped["transform"],
-        clipped["crs"],
-        disaster_type,
-        scheme_key=indices["scheme_key"],
+        indices = calculate_indices(clipped, satellite_type, disaster_type)
+        if indices is None:
+            logger.error("Aborting pipeline: index calculation failed")
+            return None
+
+        pngs = export_png(indices, clipped, event_id, disaster_type)
+        if pngs is None:
+            logger.error("Aborting pipeline: PNG export failed")
+            return None
+
+        geojson = vectorize_classification(
+            indices["classification_array"],
+            clipped["transform"],
+            clipped["crs"],
+            disaster_type,
+            scheme_key=indices["scheme_key"],
+        )
+
+        logger.info("Satellite imagery pipeline complete for %s", event_id)
+        return {
+            "satellite_type": satellite_type,
+            "index_type": indices["index_type"],
+            "water_percent": indices["water_percent"],
+            "mean_index": indices["mean_value"],
+            "class_counts": indices["class_counts"],
+            "affected_area_km2": geojson["total_area"],
+            "valid_percent": round(valid, 2),
+            "png_paths": pngs,
+            "geojson": geojson,
+        }
+
+    # Every candidate was too sparse to be usable.
+    logger.error(
+        "Coverage insufficient for %s: best candidate had only %.2f%% valid "
+        "pixels (need >= %.1f%%)",
+        event_id,
+        max(best_seen, 0.0),
+        MIN_VALID_PIXEL_PERCENT,
     )
-
-    logger.info("Satellite imagery pipeline complete for %s", event_id)
     return {
+        "status": "coverage_insufficient",
         "satellite_type": satellite_type,
-        "index_type": indices["index_type"],
-        "water_percent": indices["water_percent"],
-        "mean_index": indices["mean_value"],
-        "class_counts": indices["class_counts"],
-        "affected_area_km2": geojson["total_area"],
-        "png_paths": pngs,
-        "geojson": geojson,
+        "best_valid_percent": round(max(best_seen, 0.0), 2),
+        "min_required_percent": MIN_VALID_PIXEL_PERCENT,
     }
 
 
