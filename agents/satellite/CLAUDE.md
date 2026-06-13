@@ -37,9 +37,53 @@ Connects to the Band platform using the Anthropic adapter.
 - [x] Register agent on Band platform and fill in real credentials
 - [x] Run `verify_setup.py` against live Band to confirm connection (connects as "HazardMind Satellite")
 - [x] Implement imagery processing pipeline (`processor.py`)
-- [ ] Wire agent into Band rooms and publish results
+- [x] Wire agent into Band rooms and publish results (`agent.py`)
 
 ## Core Logic
+
+### Step 6: Band message send (`agent.py`) — DONE
+
+The agent entry point. Connects to Band with the Anthropic adapter and waits for
+the orchestrator to @mention it with a disaster, then runs the full pipeline and
+relays the result to `@hazardmind-hazard`.
+
+The Band Anthropic adapter is LLM-driven (it runs a tool loop and sends the
+model's reply to the room), so the deterministic pipeline is exposed as a
+**custom tool** rather than a hand-written message handler:
+
+- `ProcessDisasterInput` — Pydantic model (`event_id`, `location`,
+  `disaster_type`, optional `magnitude`). Its class name yields the tool name
+  `processdisaster`; its docstring is the tool description.
+- `run_pipeline(params)` — the tool callable. Chains the pipeline in order:
+  `check_demo_cache` → `get_region_boundary` → `detect_risk_cities` →
+  `get_risk_city_boundaries` → `merge_risk_boundaries` → `get_analysis_bbox` →
+  `authenticate_copernicus` → `select_satellite` → `search_imagery` →
+  `process_satellite_imagery` → `upload_to_r2`. Returns a JSON string with
+  `status: complete` (image_url, bbox, satellite_type, region_boundary,
+  risk_cities) or `status: error` (error message). Never raises — any failure
+  (including a caught `Exception`) becomes an error payload so it surfaces to the
+  room instead of killing the agent.
+- `PROCESS_DISASTER_TOOL = (ProcessDisasterInput, run_pipeline)` — the
+  `CustomToolDef` passed to `AnthropicAdapter(additional_tools=[...])`.
+- `detect_risk_cities(location, disaster_type)` — infers at-risk cities from a
+  small curated map (the three demo regions); unknown inputs fall back to the
+  headline location token so a boundary can still resolve.
+- `SYSTEM_PROMPT` — instructs the model to call `processdisaster` once per
+  disaster mention and reply to `@hazardmind-hazard` in the exact required
+  format, using only tool-returned values.
+
+Demo cache short-circuit: on a `check_demo_cache` hit the agent still resolves
+boundaries for the map overlay but skips the download/clip/export + upload.
+
+Connection mirrors the (verified) `verify_setup.py`: `BAND_AGENT_ID` /
+`BAND_API_KEY` / `ANTHROPIC_API_KEY` from `.env`, `THENVOI_REST_URL` /
+`THENVOI_WS_URL` with Band defaults, `Agent.create(...)` → `await agent.start()`
+→ `await agent.run_forever()` → `await agent.stop()`.
+
+Notes:
+- `python agent.py` runs the long-lived agent (needs live Band creds). Imports,
+  tool-name resolution (`processdisaster`), schema/description, and
+  `detect_risk_cities` are verified offline.
 
 ### Step 5: Cloudflare R2 upload (`r2_upload.py`) — DONE
 
