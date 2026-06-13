@@ -41,6 +41,31 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 3: Sentinel selection + Copernicus auth (`sentinel.py`) — DONE
+
+Picks the Sentinel mission for a disaster, authenticates to the Copernicus Data
+Space Ecosystem (CDSE), and finds the best scene over a bbox.
+
+- `select_satellite(disaster_type, cloud_cover=None)` — flood → Sentinel-1
+  (SAR, weather-independent); earthquake/landslide → Sentinel-2 (optical).
+  If `cloud_cover > 30%`, an optical choice is switched to Sentinel-1. Unknown
+  disaster types default to optical. Pure logic, no network.
+- `authenticate_copernicus()` — password-grant token from the CDSE Keycloak
+  endpoint using `COPERNICUS_USERNAME`/`COPERNICUS_PASSWORD` (client_id
+  `cdse-public`). Returns the access token, or `None` on missing creds/failure.
+- `search_imagery(bbox, satellite_type, date_range=7)` — queries the CDSE OData
+  catalogue (`/odata/v1/Products`) intersecting the bbox over the last
+  `date_range` days. Sentinel-1: most recent scene. Sentinel-2: filtered to
+  cloud cover < 30%, least-cloudy scene wins. Returns the scene metadata dict.
+
+Notes:
+- `CLOUD_COVER_THRESHOLD = 30.0` is shared by both selection and the S2 filter.
+- Added `requests` to `requirements.txt` (sentinel.py imports it directly;
+  boundary.py had relied on it being transitively present).
+- All functions log and return `None`/skip on failure rather than raising.
+- `python sentinel.py` runs an offline selection demo plus a live auth +
+  catalogue smoke test (small Lahore bbox); confirmed working against CDSE.
+
 ### Step 2: Boundary fetching (`boundary.py`) — DONE
 
 Fetches administrative boundaries from the Nominatim (OpenStreetMap) API to

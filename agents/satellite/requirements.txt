@@ -1,6 +1,7 @@
 python-dotenv
 openai
 httpx
+requests
 boto3
 sentinelsat
 rasterio
