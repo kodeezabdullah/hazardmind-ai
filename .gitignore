@@ -156,6 +156,11 @@ cython_debug/
 .idea/
 .vscode/
 *.swp
+.pytest_cache/
+.mypy_cache/
+coverage/
+.coverage
+.claude/
 tempCodeRunnerFile.py
 
 # Ruff
