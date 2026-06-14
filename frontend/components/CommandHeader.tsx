@@ -3,9 +3,10 @@ import type { HazardMindResult } from "../lib/types";
 
 type CommandHeaderProps = {
   result: HazardMindResult;
+  dataSource: "Report Agent JSON" | "Local fallback";
 };
 
-export function CommandHeader({ result }: CommandHeaderProps) {
+export function CommandHeader({ result, dataSource }: CommandHeaderProps) {
   return (
     <header className="glass-panel flex shrink-0 flex-col gap-2 px-3.5 py-2.5 lg:flex-row lg:items-center lg:justify-between">
       <div className="flex min-w-0 items-center gap-2.5">
@@ -23,6 +24,9 @@ export function CommandHeader({ result }: CommandHeaderProps) {
           </div>
           <p className="mt-0.5 truncate text-xs text-slate-400">
             {result.location} / {result.event_id}
+          </p>
+          <p className="mt-0.5 text-[10px] uppercase tracking-[0.14em] text-cyan-200/80">
+            Data source: {dataSource}
           </p>
         </div>
       </div>
