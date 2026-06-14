@@ -1,5 +1,6 @@
 .env
 .env.local
+agent_config.yaml
 __pycache__/
 *.pyc
 *.pyo

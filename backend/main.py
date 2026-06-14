@@ -1,27 +1,23 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from router import router
 
-app = FastAPI(title="HazardMind AI API")
+app = FastAPI(
+    title="HazardMind AI Backend",
+    description="Multi-agent disaster response system",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
-@app.get("/")
-async def root():
-    return {"message": "HazardMind AI API Running"}
+app.include_router(router)
 
-@app.post("/analyze")
-async def analyze(disaster_type: str, location: str):
-    return {"status": "processing", "job_id": "placeholder"}
 
-@app.get("/status/{job_id}")
-async def get_status(job_id: str):
-    return {"job_id": job_id, "status": "processing"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "hazardmind-backend"}
