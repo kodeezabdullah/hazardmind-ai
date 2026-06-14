@@ -102,6 +102,7 @@ async def featherless_call(prompt: str, system: str = "", timeout: int = 30) -> 
                 return text
         except Exception as exc:
             print(f"Featherless model failed: {model} ({exc})")
+            await asyncio.sleep(1.5)
 
     return None
 
