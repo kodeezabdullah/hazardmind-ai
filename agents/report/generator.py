@@ -1,13 +1,15 @@
-import os
 import json
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
+from llm_clients import (
+    generate_detailed_report_with_aiml_fallback,
+    generate_detailed_report_with_featherless,
+    generate_executive_summary_with_aiml,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_NAME = "claude-opus-4-8"
 
 MOCK_EVENT_DATA = {
     "event_id": "demo-peshawar-flood",
@@ -192,15 +194,61 @@ RECOMMENDATIONS = [
     "Monitor flood expansion using updated satellite imagery.",
 ]
 
+RESPONSE_PRIORITIES = [
+    "Activate evacuation support for FZ-01 and FZ-02.",
+    "Protect hospital access and stage medical surge teams near high-risk facilities.",
+    "Clear blocked road corridors needed for rescue and logistics movement.",
+]
 
-def build_prompt(data: dict) -> str:
+ASSUMPTIONS = [
+    "Satellite, hazard, and impact values are local demo data until upstream agents publish live outputs.",
+    "Risk zone geometries are simplified mock polygons for dashboard and report demonstration.",
+    "Facility and route coordinates are approximate and intended for prototype visualization.",
+]
+
+LIMITATIONS = [
+    "No live Band messages are consumed in this local demo run.",
+    "No field validation, hydrologic model, or live basemap tiles are used for artifact generation.",
+    "Impact estimates should be treated as decision-support indicators, not official counts.",
+]
+
+
+def build_detailed_report_prompt(data: dict) -> str:
     scenario_json = json.dumps(data, indent=2)
     return f"""
-Create a concise executive disaster response summary for decision makers.
-Return only the summary text in 3 to 5 sentences, with no markdown.
+Generate the detailed operational report body for a disaster response dashboard.
+Return strict JSON only. Do not include markdown or commentary.
+
+Required JSON shape:
+{{
+  "detailed_body": "string",
+  "recommendations": ["string"],
+  "response_priorities": ["string"],
+  "assumptions": ["string"],
+  "limitations": ["string"]
+}}
+
+Focus on detailed incident analysis, operational risk interpretation, recommendations,
+response priorities, assumptions, and limitations.
 
 Use this full scenario data:
 {scenario_json}
+""".strip()
+
+
+def build_executive_summary_prompt(data: dict, detailed_report: dict) -> str:
+    scenario_json = json.dumps(data, indent=2)
+    detailed_json = json.dumps(detailed_report, indent=2)
+    return f"""
+Write a short executive summary for senior emergency decision makers.
+Return only 3 to 5 polished sentences, with no markdown.
+Use concise language suitable for the dashboard and PDF.
+
+Base event data:
+{scenario_json}
+
+Detailed operational report:
+{detailed_json}
 """.strip()
 
 
@@ -212,41 +260,49 @@ async def generate_report(event_id: str):
 
     load_dotenv(BASE_DIR / ".env")
 
-    api_key = os.getenv("AIML_API_KEY")
-    if not api_key:
-        raise RuntimeError("AIML_API_KEY is not set")
+    result = json.loads(json.dumps(MOCK_EVENT_DATA))
+    agent_log = [
+        _report_log("Report Agent received event context", "2026-06-13T18:03:00Z"),
+    ]
 
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url="https://api.aimlapi.com/v1",
+    detailed_report, detailed_source, featherless_fallback_used, featherless_model = await generate_detailed_report(result)
+    if detailed_source == "featherless:kimi-k2.6":
+        agent_log.append(
+            _report_log("Featherless Kimi K2.6 generated detailed disaster report", "2026-06-13T18:03:20Z")
+        )
+    else:
+        agent_log.append(
+            _report_log("Featherless Kimi K2.6 unavailable, AI/ML fallback used", "2026-06-13T18:03:20Z")
+        )
+
+    summary, summary_source, summary_fallback_used = await generate_executive_summary(
+        result,
+        detailed_report,
+    )
+    agent_log.append(
+        _report_log("AI/ML generated executive summary", "2026-06-13T18:03:40Z")
+        if summary_source == "aiml"
+        else _report_log("AI/ML unavailable, deterministic executive summary used", "2026-06-13T18:03:40Z")
     )
 
-    try:
-        response = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You write clear, fast executive disaster response reports.",
-                },
-                {
-                    "role": "user",
-                    "content": build_prompt(MOCK_EVENT_DATA),
-                },
-            ],
-        )
-    finally:
-        await client.close()
-
-    summary = response.choices[0].message.content.strip()
-
-    result = json.loads(json.dumps(MOCK_EVENT_DATA))
     result["report"] = {
         "summary": summary,
-        "recommendations": RECOMMENDATIONS,
+        "detailed_body": detailed_report["detailed_body"],
+        "technical_analysis": detailed_report["technical_analysis"],
+        "recommendations": detailed_report["recommendations"],
+        "response_priorities": detailed_report["response_priorities"],
+        "assumptions": detailed_report["assumptions"],
+        "limitations": detailed_report["limitations"],
         "pdf_url": "",
         "map_url": "",
     }
+    result["model_sources"] = {
+        "detailed_report": detailed_source,
+        "executive_summary": summary_source,
+        "fallback_used": featherless_fallback_used or summary_fallback_used,
+        "featherless_model": featherless_model,
+    }
+    result["agent_log"] = agent_log
 
     return {
         key: result[key]
@@ -263,6 +319,101 @@ async def generate_report(event_id: str):
             "impact",
             "routes",
             "report",
+            "model_sources",
             "agent_log",
         )
+    }
+
+
+async def generate_detailed_report(data: dict) -> tuple[dict, str, bool, str]:
+    featherless_result = await generate_detailed_report_with_featherless(data)
+    if featherless_result["ok"]:
+        return (
+            featherless_result["data"],
+            "featherless:kimi-k2.6",
+            False,
+            featherless_result["featherless_model"],
+        )
+
+    fallback_result = await generate_detailed_report_with_aiml_fallback(data)
+    return (
+        fallback_result["data"],
+        "aiml_fallback",
+        True,
+        fallback_result["featherless_model"],
+    )
+
+
+async def generate_executive_summary(data: dict, detailed_report: dict) -> tuple[str, str, bool]:
+    response = await generate_executive_summary_with_aiml(data, detailed_report)
+    return response["summary"], response["source"], not response["ok"]
+
+
+def normalize_detailed_report(text: str) -> dict:
+    try:
+        parsed = json.loads(extract_json(text))
+    except json.JSONDecodeError:
+        parsed = {"detailed_body": text}
+
+    return {
+        "detailed_body": str(parsed.get("detailed_body") or text or deterministic_detailed_report(MOCK_EVENT_DATA)["detailed_body"]),
+        "recommendations": list_or_default(parsed.get("recommendations"), RECOMMENDATIONS),
+        "response_priorities": list_or_default(parsed.get("response_priorities"), RESPONSE_PRIORITIES),
+        "assumptions": list_or_default(parsed.get("assumptions"), ASSUMPTIONS),
+        "limitations": list_or_default(parsed.get("limitations"), LIMITATIONS),
+    }
+
+
+def extract_json(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def list_or_default(value, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if cleaned:
+            return cleaned
+    return default
+
+
+def deterministic_detailed_report(data: dict) -> dict:
+    return {
+        "detailed_body": (
+            f"{data['location']} is experiencing a {data['overall_severity']} {data['hazard_type'].lower()} "
+            f"scenario with {data['analysis']['affected_area_km2']} km2 affected and "
+            f"{data['impact']['population_affected']:,} people exposed. Flood risk is classified as "
+            f"{data['hazard']['flood_risk']} with hospitals, roads, and schools requiring immediate operational attention."
+        ),
+        "recommendations": RECOMMENDATIONS,
+        "response_priorities": RESPONSE_PRIORITIES,
+        "assumptions": ASSUMPTIONS,
+        "limitations": LIMITATIONS,
+    }
+
+
+def deterministic_summary(data: dict) -> str:
+    return (
+        f"Critical flood risk has been detected across high-density areas of {data['location']}. "
+        f"Satellite-derived classification identifies {data['analysis']['total_zones']} zones and "
+        f"{data['analysis']['affected_area_km2']} km2 of affected area, with "
+        f"{data['impact']['population_affected']:,} people exposed. Immediate evacuation, hospital support, "
+        "road clearance, and shelter activation are recommended."
+    )
+
+
+def _report_log(message: str, timestamp: str) -> dict:
+    return {
+        "agent": "hazardmind-report",
+        "status": "complete",
+        "message": message,
+        "timestamp": timestamp,
     }

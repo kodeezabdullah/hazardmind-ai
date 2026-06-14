@@ -5,3 +5,4 @@ httpx
 reportlab
 jinja2
 boto3
+pillow

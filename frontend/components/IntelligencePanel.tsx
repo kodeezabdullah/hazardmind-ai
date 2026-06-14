@@ -61,8 +61,75 @@ export function IntelligencePanel({ result }: IntelligencePanelProps) {
         </ul>
       </section>
 
+      {result.report.detailed_body ? (
+        <section className="panel-section mt-2.5 border-cyan-300/16 bg-cyan-300/[0.035] p-2.5">
+          <h3 className="text-sm font-semibold text-cyan-50">Operational Analysis</h3>
+          <p className="mt-1.5 text-[13px] leading-5 text-slate-300">{result.report.detailed_body}</p>
+        </section>
+      ) : null}
+
+      {result.report.technical_analysis ? (
+        <section className="panel-section mt-2.5 p-2.5">
+          <h3 className="text-sm font-semibold text-cyan-50">Technical Analysis</h3>
+          <p className="mt-1.5 text-[13px] leading-5 text-slate-300">{result.report.technical_analysis}</p>
+        </section>
+      ) : null}
+
+      <InsightList title="Response Priorities" items={result.report.response_priorities} />
+      <InsightList title="Assumptions" items={result.report.assumptions} compact />
+      <InsightList title="Limitations" items={result.report.limitations} compact />
+
+      {result.model_sources ? (
+        <section className="panel-section mt-2.5 p-2.5">
+          <h3 className="text-sm font-semibold text-cyan-50">Model Sources</h3>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-slate-300">
+            <SourceRow label="Detailed" value={result.model_sources.detailed_report} />
+            <SourceRow label="Summary" value={result.model_sources.executive_summary} />
+            <SourceRow label="Fallback" value={result.model_sources.fallback_used ? "used" : "not used"} />
+            <SourceRow label="Model" value={result.model_sources.featherless_model ?? "n/a"} />
+          </div>
+        </section>
+      ) : null}
+
       <ReportActions result={result} />
     </aside>
+  );
+}
+
+function InsightList({
+  title,
+  items,
+  compact = false,
+}: {
+  title: string;
+  items?: string[];
+  compact?: boolean;
+}) {
+  if (!items?.length) {
+    return null;
+  }
+
+  return (
+    <section className="panel-section mt-2.5 p-2.5">
+      <h3 className="text-sm font-semibold text-cyan-50">{title}</h3>
+      <ul className="mt-2 space-y-1.5">
+        {items.map((item) => (
+          <li key={item} className={`flex gap-2 ${compact ? "text-xs" : "text-[13px]"} leading-5 text-slate-300`}>
+            <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-violet-300 shadow-[0_0_12px_rgba(167,139,250,0.65)]" />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SourceRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-white/10 bg-white/[0.03] px-2 py-1">
+      <span className="block text-[9px] uppercase tracking-[0.12em] text-slate-500">{label}</span>
+      <span className="mt-0.5 block truncate font-mono text-cyan-100">{value}</span>
+    </div>
   );
 }
 

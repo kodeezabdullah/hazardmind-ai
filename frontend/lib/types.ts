@@ -82,9 +82,20 @@ export type HazardMindResult = {
   };
   report: {
     summary: string;
+    detailed_body?: string;
+    technical_analysis?: string;
     recommendations: string[];
+    response_priorities?: string[];
+    assumptions?: string[];
+    limitations?: string[];
     pdf_url: string;
     map_url: string;
+  };
+  model_sources?: {
+    detailed_report: string;
+    executive_summary: string;
+    fallback_used: boolean;
+    featherless_model?: string;
   };
   agent_log: AgentLogEntry[];
 };
