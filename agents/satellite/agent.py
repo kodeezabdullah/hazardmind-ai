@@ -45,7 +45,12 @@ from boundary import (
 )
 from processor import process_satellite_imagery
 from r2_upload import check_demo_cache, upload_all_results
-from sentinel import authenticate_copernicus, search_imagery, select_satellite
+from sentinel import (
+    authenticate_copernicus,
+    backfill_uncovered_cities,
+    search_imagery,
+    select_satellite,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,10 +208,29 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 f"No {satellite_type} imagery found over bbox {bbox}",
             )
 
+        # Backfill: a scattered city can be left uncovered when its only recent
+        # tile is a partial acquisition that doesn't actually reach it. Re-query
+        # a wider window per uncovered city so the mosaic can cover everyone.
+        scenes = backfill_uncovered_cities(
+            scenes, city_polys, satellite_type, aoi_geom=merged
+        )
+
         # (g) Full remote-sensing pipeline (download -> stack -> clip ->
-        # indices -> PNGs -> vectorize) over the real risk polygon.
+        # indices -> PNGs -> vectorize) over the real risk polygon. Pass the
+        # per-city geometries so a mosaic spreads scenes across all scattered
+        # cities (greedy set-cover) instead of bunching on the best-covered one.
+        from shapely.geometry import shape as _shape
+
+        city_geoms = []
+        for cp in city_polys:
+            try:
+                city_geoms.append(_shape(cp["geojson"]))
+            except (KeyError, ValueError, AttributeError, TypeError):
+                continue
+
         result = process_satellite_imagery(
-            selection, scenes, bbox, merged, event_id, token, disaster_type
+            selection, scenes, bbox, merged, event_id, token, disaster_type,
+            city_geoms=city_geoms,
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")

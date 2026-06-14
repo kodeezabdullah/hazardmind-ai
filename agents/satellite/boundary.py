@@ -113,6 +113,37 @@ def get_region_boundary(location_name: str) -> Optional[dict]:
     }
 
 
+# When Nominatim returns a non-areal geometry for a city (a Point for the city
+# centre, or a MultiLineString of roads/rivers), it has zero area and can never
+# be "covered" by a scene — it silently drops the city from coverage scoring and
+# the merged AOI. Buffer such geometries into a small disk (~this many degrees,
+# roughly 5.5 km) so the city still contributes a sensible footprint.
+_CITY_POINT_BUFFER_DEG = 0.05
+
+
+def _ensure_areal(geometry, label: str):
+    """Return an areal (Polygon/MultiPolygon) version of `geometry`.
+
+    Nominatim sometimes returns a Point (city centre) or a MultiLineString
+    (streets) instead of an admin polygon. Those have zero area, so downstream
+    coverage maths (`intersection.area / geom.area`) divides by zero and the
+    city is effectively invisible. Buffer any zero-area geometry into a small
+    disk around it; polygons pass through unchanged.
+    """
+    try:
+        if geometry.area > 0:
+            return geometry
+        logger.warning(
+            "City %r resolved to a zero-area %s; buffering to a ~%.0f km disk",
+            label,
+            geometry.geom_type,
+            _CITY_POINT_BUFFER_DEG * 111,
+        )
+        return geometry.buffer(_CITY_POINT_BUFFER_DEG)
+    except (AttributeError, ValueError, TypeError):
+        return geometry
+
+
 def get_risk_city_boundaries(region_name: str, city_list: list) -> list:
     """Fetch a boundary polygon for each risk city.
 
@@ -142,6 +173,11 @@ def get_risk_city_boundaries(region_name: str, city_list: list) -> list:
         except (ValueError, AttributeError) as exc:
             logger.error("Invalid geometry for city %r: %s", city, exc)
             continue
+
+        # Guarantee an areal footprint so the city is usable for coverage
+        # scoring and the merged AOI (Nominatim may return a Point/line).
+        geometry = _ensure_areal(geometry, city)
+        geojson = mapping(geometry)
 
         boundaries.append(
             {

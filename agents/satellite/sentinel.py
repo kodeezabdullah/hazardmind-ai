@@ -19,6 +19,7 @@ Run this file directly for a small smoke test:
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -43,7 +44,9 @@ CLOUD_COVER_THRESHOLD = 30.0
 
 # A single scene whose footprint covers less than this percentage of the AOI is
 # not enough on its own; the processor mosaics the top-ranked scenes instead.
-COVERAGE_MOSAIC_THRESHOLD = 60.0
+# Raised 60 -> 85 so scattered multi-city AOIs (where the best single tile still
+# leaves cities uncovered) reliably trigger the mosaic path.
+COVERAGE_MOSAIC_THRESHOLD = 85.0
 
 SENTINEL_1 = "sentinel-1"
 SENTINEL_2 = "sentinel-2"
@@ -296,6 +299,233 @@ def _scene_score(scene: dict, aoi) -> float:
         cc = 0.0
     cc = max(0.0, min(100.0, cc))
     return overlap * (1.0 - cc / 100.0)
+
+
+def _scene_covers_geom(scene: dict, geom, min_fraction: float = 0.10) -> bool:
+    """True if a scene's footprint covers at least `min_fraction` of `geom`.
+
+    Used by greedy mosaic selection to decide whether a candidate scene
+    meaningfully covers a given city polygon (a tiny sliver doesn't count).
+    """
+    footprint = scene.get("GeoFootprint")
+    if not footprint or geom is None:
+        return False
+    try:
+        area = geom.area
+        if area <= 0:
+            return False
+        covered = geom.intersection(shape(footprint)).area / area
+        return covered >= min_fraction
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+_MGRS_TILE_RE = re.compile(r"_T(\d{2}[A-Z]{3})_")
+
+
+def _scene_tile_id(scene: dict) -> Optional[str]:
+    """Extract the MGRS tile id (e.g. '51PXK') from a scene Name, or None."""
+    match = _MGRS_TILE_RE.search(scene.get("Name", "") or "")
+    return match.group(1) if match else None
+
+
+def backfill_uncovered_cities(
+    ranked,
+    city_entries,
+    satellite_type: str,
+    aoi_geom: Optional[dict] = None,
+    initial_date_range: int = 7,
+    widen_date_ranges=(14, 30),
+    min_covering_scenes: int = 2,
+    timeout: int = 60,
+):
+    """Widen the date window for any city too few candidate scenes cover.
+
+    The default 7-day search can leave a city effectively uncovered when its
+    only recent tile is a *partial* acquisition that doesn't actually reach it
+    (e.g. Mindanao's Cagayan de Oro: the single 7-day 51PXK scene's real data
+    stops ~8.14N, south of the city, even though its catalogue footprint claims
+    to reach 9.05N). The footprint overstates the data, so a city can look
+    "covered" while the pixels are missing.
+
+    To be robust to that, a city is considered safely covered only when at least
+    `min_covering_scenes` *distinct acquisitions* (by footprint) include it — a
+    second scene of the same tile fills the first's nodata/partial-swath gaps.
+    For any city below that bar we re-search *its own bbox* over progressively
+    wider windows, scoring new covering scenes against the full AOI and appending
+    them (de-duplicated by product Id). Older scenes are acceptable here: a
+    slightly less current tile that actually has data beats no coverage.
+
+    Args:
+        ranked: the ranked scene list from `search_imagery(..., return_ranked=True)`.
+        city_entries: list of `{"name", "geojson", ...}` from
+            `boundary.get_risk_city_boundaries`.
+        satellite_type: "sentinel-1" / "sentinel-2".
+        aoi_geom: merged AOI GeoJSON, used to re-score appended scenes.
+        initial_date_range: the window already searched (skipped when widening).
+        widen_date_ranges: ascending windows to try for uncovered cities.
+        timeout: per-request timeout.
+
+    Returns the (possibly extended) ranked list, re-sorted best-first.
+    """
+    if not city_entries:
+        return ranked
+
+    ranked = list(ranked)
+    seen_ids = {s.get("Id") for s in ranked}
+    aoi = _aoi_geometry(None, aoi_geom)
+
+    for entry in city_entries:
+        geom = None
+        try:
+            geom = shape(entry["geojson"])
+        except (KeyError, ValueError, AttributeError, TypeError):
+            continue
+        if geom is None or geom.area <= 0:
+            continue
+        covering = sum(1 for s in ranked if _scene_covers_geom(s, geom))
+        if covering >= min_covering_scenes:
+            continue  # enough distinct acquisitions already include this city
+
+        name = entry.get("name", "?")
+        found = False
+        for window in widen_date_ranges:
+            if window <= initial_date_range:
+                continue
+            logger.info(
+                "City %r uncovered by %dd candidates; widening to %dd",
+                name,
+                initial_date_range,
+                window,
+            )
+            extra = search_imagery(
+                geom.bounds,
+                satellite_type,
+                date_range=window,
+                timeout=timeout,
+                return_ranked=True,
+                aoi_geom=entry["geojson"],
+            )
+            if not extra:
+                continue
+            for scene in extra:
+                if scene.get("Id") in seen_ids:
+                    continue
+                if not _scene_covers_geom(scene, geom):
+                    continue
+                # Re-score against the full AOI so it ranks consistently.
+                scene["_overlap"] = _scene_aoi_overlap(scene, aoi)
+                scene["_cloud"] = _scene_cloud_cover(scene)
+                scene["_score"] = _scene_score(scene, aoi)
+                ranked.append(scene)
+                seen_ids.add(scene.get("Id"))
+                covering += 1
+                found = True
+            if found:
+                logger.info(
+                    "Backfilled coverage for %r from %dd window "
+                    "(now %d covering scene(s))",
+                    name,
+                    window,
+                    covering,
+                )
+            if covering >= min_covering_scenes:
+                break
+        if not found:
+            logger.warning(
+                "No scene with real coverage of %r found even after widening "
+                "(data-availability limit)",
+                name,
+            )
+
+    ranked.sort(key=lambda s: s.get("_score", 0.0), reverse=True)
+    return ranked
+
+
+def select_mosaic_scenes(ranked, city_geoms, max_scenes: int):
+    """Greedily pick scenes that maximise combined city coverage (set-cover).
+
+    The naive top-`max_scenes`-by-score set tends to bunch around the single
+    best-covered city, leaving other scattered cities uncovered (the Mindanao
+    trap: 3 highest-overlap tiles all clustered on one city). This instead does
+    a greedy weighted set-cover over the *individual* city polygons:
+
+    1. Start with the cities that no chosen scene covers yet.
+    2. Repeatedly pick the scene that newly covers the most still-uncovered
+       cities (ties broken by the scene's coverage score, so less-cloudy /
+       higher-overlap wins), until every city is covered or `max_scenes` is hit.
+    3. If the cap is reached with cities still uncovered, or all cities are
+       covered with budget to spare, top up from the remaining ranked scenes
+       (best score first) so the mosaic still fills nodata gaps.
+
+    Args:
+        ranked: scenes sorted best-first, each annotated with `_score`
+            (from `search_imagery(..., return_ranked=True)`).
+        city_geoms: list of shapely geometries, one per risk city (WGS84).
+        max_scenes: maximum number of scenes to return.
+
+    Returns the chosen scene dicts (a subset of `ranked`), best-first within the
+    final set. Falls back to `ranked[:max_scenes]` when no city geometries are
+    given.
+    """
+    if max_scenes <= 0:
+        return []
+    if not city_geoms:
+        return list(ranked[:max_scenes])
+
+    remaining = [g for g in city_geoms if g is not None]
+    chosen = []
+    pool = list(ranked)
+
+    # Greedy set-cover: each round, take the scene covering the most cities not
+    # yet covered. Ties -> higher score (already the pool's sort order).
+    while remaining and pool and len(chosen) < max_scenes:
+        best_scene = None
+        best_new = 0
+        best_score = -1.0
+        for scene in pool:
+            newly = [g for g in remaining if _scene_covers_geom(scene, g)]
+            score = scene.get("_score", 0.0) or 0.0
+            if len(newly) > best_new or (
+                len(newly) == best_new and len(newly) > 0 and score > best_score
+            ):
+                best_scene, best_new, best_score = scene, len(newly), score
+        if best_scene is None or best_new == 0:
+            break  # no remaining scene covers any still-uncovered city
+        chosen.append(best_scene)
+        pool.remove(best_scene)
+        remaining = [
+            g for g in remaining if not _scene_covers_geom(best_scene, g)
+        ]
+
+    # Top up with the best remaining scenes (fills nodata gaps / unreached
+    # cities) until we hit the cap. Prefer scenes whose MGRS tile is not already
+    # in the set so a spare slot adds new geography rather than a duplicate
+    # tile; fall back to any remaining scene if every tile is already present.
+    chosen_tiles = {_scene_tile_id(s) for s in chosen}
+    for prefer_new_tile in (True, False):
+        for scene in pool:
+            if len(chosen) >= max_scenes:
+                break
+            if scene in chosen:
+                continue
+            tid = _scene_tile_id(scene)
+            if prefer_new_tile and tid is not None and tid in chosen_tiles:
+                continue
+            chosen.append(scene)
+            chosen_tiles.add(tid)
+        if len(chosen) >= max_scenes:
+            break
+
+    uncovered = len(remaining)
+    logger.info(
+        "Mosaic set-cover: chose %d scene(s) for %d cities (%d city(ies) "
+        "still uncovered after selection)",
+        len(chosen),
+        len([g for g in city_geoms if g is not None]),
+        uncovered,
+    )
+    return chosen
 
 
 def search_imagery(

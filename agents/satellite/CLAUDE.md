@@ -214,6 +214,101 @@ polygon:
   148 KB, index_map 189 KB, classification 21 KB, zones.geojson **901 KB** with
   22 graded features (cf. the pre-fix run: 614/1053/792/64 bytes).
 
+### Step 10: Full multi-city coverage — set-cover mosaic + areal cities + date backfill — DONE
+
+Re-testing Mindanao after raising the mosaic trigger surfaced that the three
+risk cities still weren't all making it into the final overlay. Investigation
+found **three independent causes**, each fixed:
+
+**FIX A — mosaic threshold raised 60 → 85 (`sentinel.py` + `processor.py`).**
+`COVERAGE_MOSAIC_THRESHOLD` (both copies) is now `85.0` (a **percent**, not a
+fraction). The decision that actually drives the mosaic is
+`processor.COVERAGE_MOSAIC_THRESHOLD` (compared `best_overlap*100 < threshold`);
+`sentinel`'s copy is kept in sync but is not read for the decision. At 85, a
+scattered multi-city AOI whose best single tile covers <85% reliably mosaics
+(Mindanao's best is ~34%).
+
+**FIX B — areal city geometries (`boundary.py`).** The real reason **Davao**
+was never covered: Nominatim returns a **`MultiLineString` (zero area)** for
+"Davao", not an admin polygon. A zero-area geometry can never be "covered"
+(`intersection.area / geom.area` → 0/0) and silently dropped Davao from both
+coverage scoring and the merged AOI. `get_risk_city_boundaries` now passes each
+resolved geometry through `_ensure_areal()`, which buffers any zero-area
+Point/line into a ~6 km disk (`_CITY_POINT_BUFFER_DEG = 0.05`) and re-emits it
+via `shapely.mapping`. Davao went from 0% → 100% covered.
+
+**FIX C — greedy set-cover mosaic selection (`sentinel.py`,
+`select_mosaic_scenes`).** The old `scenes[:MOSAIC_MAX_SCENES]` took the top-N by
+score, which **bunched on the single best-covered city** (all 3 slots near
+Cotabato). Selection is now a weighted greedy set-cover over the *individual*
+city polygons: each round picks the scene newly covering the most
+still-uncovered cities (ties → higher score), then tops up spare slots
+preferring scenes whose **MGRS tile** (`_scene_tile_id`) isn't already in the set
+(so a spare slot adds new geography, not a duplicate tile). `processor`'s
+`process_satellite_imagery` gained a `city_geoms` param; `agent.py` builds the
+per-city shapely geoms and threads them in. Falls back to top-N when no geoms
+are given.
+
+**FIX D — date-window backfill for partial tiles
+(`sentinel.py`, `backfill_uncovered_cities`).** With A–C in place **Cagayan de
+Oro** still failed: its only 7-day tile (`51PXK`, 2026-06-09) is a **partial
+acquisition** whose real pixel data stops at ~8.14 N — south of the city
+(8.25–8.63 N) — even though its **catalogue footprint overstates** coverage
+(claims 9.05 N). Because the footprint lies, footprint-based coverage thinks CdO
+is fine while the pixels are missing. The backfill therefore treats a city as
+safely covered only when **≥ `min_covering_scenes` (2) distinct acquisitions**
+include it; for any city below that bar it re-queries *that city's own bbox*
+over widening windows (14d, then 30d), appends new covering scenes (re-scored
+against the AOI, de-duped by product Id), and stops once the bar is met. For CdO
+this pulls in the **2026-06-01 51PXK** acquisition (footprint 8.75 N, real data
+reaching the city); set-cover then prefers that scene over the partial one, and
+the mosaic merges both PXK dates to fill the gap. `agent.py` runs the backfill
+right after `search_imagery`. When even 30d finds nothing, it logs a
+data-availability limit rather than silently dropping the city.
+
+**FIX E — Id-keyed per-scene band extraction (`processor.py`).** With A–D in
+place CdO *still* came back 0%, but selection was now correct (it picked the
+2026-06-01 51PXK reaching 8.63 N). The culprit was a stale-cache bug:
+`_extract_bands` reuses an already-present output file, and `download_imagery`
+keyed each scene's extraction subdir on a **positional `scene_<idx>`**. Re-running
+the same `event_id` with a *different* scene selection (as happens whenever the
+candidate set changes) made `scene_1` serve a **previous run's tile**, so the
+mosaic silently merged the wrong tile's data and CdO's pixels never made it in.
+The per-scene subdir is now keyed on the scene's **stable product `Id`**
+(`scene_<Id>`), so a different tile can never collide with another's cached
+bands. This is a real correctness bug, not just a test artifact — any
+re-process of an event with a changed scene set was affected.
+
+New/changed: `sentinel.{select_mosaic_scenes, backfill_uncovered_cities,
+_scene_covers_geom, _scene_tile_id}`; `boundary.{_ensure_areal,
+_CITY_POINT_BUFFER_DEG}`; `processor.process_satellite_imagery(..., city_geoms=)`;
+`processor.download_imagery` (Id-keyed scene subdirs). The Step 9 caveat
+(single-tile bounds miss the southern cities) is now resolved by the mosaic path
+covering all cities.
+
+#### End-to-end test (Mindanao M7.8 earthquake, 2026-06-08) — PASS
+
+Ran the full pipeline (`mindanao-eq-20260608`, "Mindanao, Philippines",
+earthquake) against live CDSE over the merged Davao/Cotabato/Cagayan de Oro
+polygon, verifying each city's polygon lands inside the exported PNG bounds:
+- Boundary: 3/4 cities resolved (General Santos has no Nominatim polygon, skipped;
+  **Davao resolved to a zero-area MultiLineString → buffered to a ~6 km disk**).
+- Selection: best 7-day tile `T51NYH` covers only **34%** of the AOI (< 85%) →
+  mosaic. Set-cover over the three city polygons. **Cagayan de Oro uncovered by
+  the 7-day candidates → backfill widened to 14 days and pulled in the
+  `T51PXK` 2026-06-01 acquisition** (99% overlap, 15% cloud) whose real data
+  reaches 8.63 N; set-cover then chose it over the partial 06-09 PXK.
+- Mosaic of 3 tiles (`NYH` 06-14 + `PXK` 06-01 + `NYJ` 06-09) → stacked
+  30978×20976, clipped to 20990×14283, **67.5% valid pixels**.
+- **Final PNG bounds N=8.630 (was 8.140 before FIX E)**; **all three cities
+  100% inside the bounds** (Davao 0%→100%, Cotabato 100%, Cagayan de Oro
+  0%→100%).
+- NDVI mean 0.326, **27.0% affected**; classes sparse_veg 9.1% / stressed 10.8%
+  / **damage 7.1%**; **251 hazard zones, 822.39 km²**.
+- The `bounds` payload carries all three georeferencing shapes (`bounds`
+  {west/south/east/north}, `bounds_leaflet`, `bounds_corners`) — verified
+  present and consistent for the frontend overlay.
+
 ### Step 9: Overlay-ready layers — transparency + georeferencing — DONE
 
 For the frontend to drop the PNGs onto a web map, two things were missing.

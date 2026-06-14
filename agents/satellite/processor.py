@@ -59,8 +59,9 @@ DOWNLOAD_URL = (
 TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
 
 # A single scene covering less than this percentage of the AOI triggers a
-# multi-tile mosaic of the top-ranked scenes (FIX 2).
-COVERAGE_MOSAIC_THRESHOLD = 60.0
+# multi-tile mosaic of the top-ranked scenes (FIX 2). Raised 60 -> 85 so
+# scattered multi-city AOIs (best single tile still misses cities) mosaic.
+COVERAGE_MOSAIC_THRESHOLD = 85.0
 # How many top-scored scenes to mosaic when one scene is not enough.
 MOSAIC_MAX_SCENES = 3
 # After clipping, a result with fewer than this percentage of valid (non-nodata)
@@ -513,8 +514,16 @@ def download_imagery(
             logger.warning("Skipping scene %d: download failed", idx)
             continue
         # Each scene's bands go in their own subdir so same-named JP2s from
-        # different tiles don't clobber each other before mosaicking.
-        scene_event = f"{event_id}/scene_{idx}" if len(scenes) > 1 else event_id
+        # different tiles don't clobber each other before mosaicking. Key the
+        # subdir on the scene's stable product Id (not a positional index):
+        # _extract_bands reuses an already-present file, so a bare scene_<idx>
+        # would serve a *previous* run's tile when the same event_id is
+        # re-processed with a different scene selection.
+        if len(scenes) > 1:
+            scene_key = scene.get("Id") or f"scene_{idx}"
+            scene_event = f"{event_id}/scene_{scene_key}"
+        else:
+            scene_event = event_id
         paths = _extract_bands(
             zip_path, scene_event, band_tokens, satellite_type
         )
@@ -1216,6 +1225,7 @@ def process_satellite_imagery(
     event_id: str,
     token: str,
     disaster_type: str,
+    city_geoms=None,
 ) -> Optional[dict]:
     """Run the full remote-sensing pipeline, coverage-aware with fallback.
 
@@ -1240,6 +1250,10 @@ def process_satellite_imagery(
         event_id: namespaces all artifacts.
         token: CDSE access token.
         disaster_type: drives band selection, indices and styling.
+        city_geoms: optional list of per-city shapely geometries (WGS84). When
+            given, the mosaic uses greedy set-cover to spread scenes across all
+            cities instead of taking the top-N by score (which can bunch on one
+            city and leave scattered cities uncovered).
 
     Returns the result dict on success, a `coverage_insufficient` marker if no
     candidate has enough valid data, or None if a stage hard-fails.
@@ -1265,13 +1279,20 @@ def process_satellite_imagery(
         and best_overlap * 100 < COVERAGE_MOSAIC_THRESHOLD
         and len(scenes) > 1
     ):
-        mosaic_set = scenes[:MOSAIC_MAX_SCENES]
+        # Greedy set-cover over the individual city polygons so the mosaic
+        # spreads across scattered cities instead of bunching on the single
+        # best-covered one. Falls back to top-N by score when no city geometries
+        # are supplied.
+        from sentinel import select_mosaic_scenes
+
+        mosaic_set = select_mosaic_scenes(scenes, city_geoms, MOSAIC_MAX_SCENES)
         logger.info(
-            "Best scene covers only %.0f%% of AOI (< %.0f%%); mosaicking top "
-            "%d scenes",
+            "Best scene covers only %.0f%% of AOI (< %.0f%%); mosaicking %d "
+            "scene(s) (set-cover over %d cities)",
             best_overlap * 100,
             COVERAGE_MOSAIC_THRESHOLD,
             len(mosaic_set),
+            len([g for g in (city_geoms or []) if g is not None]),
         )
         candidates.append(("mosaic", mosaic_set))
     candidates.extend(("single", [s]) for s in scenes)
