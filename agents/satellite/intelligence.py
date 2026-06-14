@@ -91,8 +91,73 @@ def _extract_json(text: str) -> Optional[dict]:
         try:
             return json.loads(text[start : end + 1])
         except (json.JSONDecodeError, ValueError):
-            return None
+            pass
+
+    # Last resort: the response was likely truncated mid-object (a reasoning
+    # model that hit finish_reason=length). Try to repair an unterminated JSON
+    # object from the first '{' by closing any open string and balancing the
+    # open brackets, then re-parse. This salvages a usable dict from a cut-off
+    # response instead of dropping the whole call to the deterministic default.
+    if start != -1:
+        repaired = _repair_truncated_json(text[start:])
+        if repaired is not None:
+            return repaired
     return None
+
+
+def _repair_truncated_json(fragment: str) -> Optional[dict]:
+    """Best-effort repair of a JSON object truncated mid-stream.
+
+    Walks the fragment tracking string state and the bracket stack, drops a
+    trailing incomplete token, closes an open string, and appends the missing
+    closing brackets. Returns the parsed dict, or ``None`` if it still won't
+    parse. This is intentionally conservative — it only rescues an object that
+    was well-formed up to the truncation point.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    # Index just after the last point where the object is structurally complete:
+    # a closed value (`}`/`]`), or a separator (`,`) / container open (`{`/`[`).
+    # A colon is deliberately NOT a safe point — it promises a value that may be
+    # truncated, so we cut back *before* the key it follows.
+    last_safe = -1
+
+    for i, ch in enumerate(fragment):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+            last_safe = i + 1
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            last_safe = i + 1
+        elif ch == ",":
+            last_safe = i + 1
+
+    if not stack:
+        return None  # nothing open -> not the truncation case we handle
+
+    # Cut back to the last structurally safe point (drops a half-written value
+    # or key), strip a dangling comma, then close every still-open bracket.
+    body = fragment[: last_safe if last_safe > 0 else len(fragment)].rstrip()
+    body = body.rstrip(",")
+    body += "".join(reversed(stack))
+
+    try:
+        result = json.loads(body)
+        return result if isinstance(result, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +235,7 @@ class SatelliteIntelligence:
         *,
         primary_model: Optional[str] = None,
         system: Optional[str] = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
         temperature: float = 0.2,
     ) -> Optional[str]:
         """Run ``prompt`` through the model fallback chain.
@@ -178,6 +243,14 @@ class SatelliteIntelligence:
         Returns the raw text content of the first model that answers, logging
         which model was used. Returns ``None`` if every model in the chain
         (including the Opus last resort) fails.
+
+        Note on ``max_tokens``: several models in the Featherless chain
+        (Kimi-K2.6, Qwen3.6) are *reasoning* models that spend tokens on
+        internal thinking before emitting the answer. With too small a budget
+        they return ``finish_reason=length`` with empty or truncated visible
+        content. The default is therefore generous (2048) so a reasoning model
+        has room to both think and finish its JSON; callers needing more (e.g.
+        ``interpret_results``) raise it further.
         """
         messages: list[dict[str, str]] = []
         if system:
@@ -189,13 +262,19 @@ class SatelliteIntelligence:
             if client is None:
                 continue
             try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=MODEL_TIMEOUT_SECONDS,
-                )
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "timeout": MODEL_TIMEOUT_SECONDS,
+                }
+                # The AIML-hosted Opus model rejects `temperature` ("deprecated
+                # for this model" -> HTTP 400). Only the Featherless models take
+                # it; omit it for the Opus last resort so the fallback actually
+                # works when the whole Featherless chain is down.
+                if provider != "aiml":
+                    kwargs["temperature"] = temperature
+                resp = client.chat.completions.create(**kwargs)
                 content = (resp.choices[0].message.content or "").strip()
                 if not content:
                     logger.warning(
@@ -224,7 +303,7 @@ class SatelliteIntelligence:
         *,
         primary_model: Optional[str] = None,
         system: Optional[str] = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
     ) -> Optional[dict]:
         """Run ``prompt`` and parse the response as a JSON object, or ``None``."""
         raw = self._complete(
@@ -360,7 +439,7 @@ Return ONLY valid JSON:
   "reasoning": "why this strategy"
 }}"""
         return self._complete_json(
-            prompt, primary_model="Qwen/Qwen3.6-35B-A3B"
+            prompt, primary_model="Qwen/Qwen3.6-35B-A3B", max_tokens=2560
         )
 
     # ------------------------------------------------------------------ #
@@ -410,7 +489,7 @@ Return ONLY valid JSON:
   "recommendations": ["rec 1", "rec 2"]
 }}"""
         return self._complete_json(
-            prompt, primary_model="google/gemma-4-31B-it", max_tokens=1536
+            prompt, primary_model="google/gemma-4-31B-it", max_tokens=2560
         )
 
     # ------------------------------------------------------------------ #
@@ -457,7 +536,9 @@ Do NOT return JSON — return a natural text message."""
         return self._complete(
             prompt,
             primary_model="moonshotai/Kimi-K2.6",
-            max_tokens=512,
+            # Kimi is a reasoning model — it needs headroom to think *and* write
+            # the ~200-word message, or it returns empty (finish_reason=length).
+            max_tokens=1536,
             temperature=0.5,  # a little warmth for natural prose
         )
 

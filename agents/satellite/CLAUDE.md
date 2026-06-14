@@ -41,7 +41,87 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
-### Step 12: Per-city artifacts for multi-city AOIs — DONE
+### Step 13: Rigorous end-to-end test pass + fixes — DONE
+
+A full six-suite end-to-end test (intelligence, boundary, sentinel, processor,
+R2, full pipeline) was run live against Featherless + CDSE + R2. Harnesses live
+under `agents/satellite/tests/`. **Result: all suites pass.** Five real defects
+were found and fixed along the way.
+
+**Tally (live):**
+- Suite 1 (intelligence, T1.1–T1.9): PASS — structural checks on all six methods.
+- Suite 2 (boundary, T2.1–T2.4): 9/0/0.
+- Suite 3 (sentinel, T3.1–T3.3): 7/0/1 (the 1 WARN: a CDSE cloud-peek read
+  timeout, which correctly degrades to the user hint).
+- Suite 4 (processor, T4.1–T4.6): 14/0/1 (the 1 WARN: 0 flood zones for
+  dry-season Peshawar — physically correct).
+- Suite 5 (R2, T5.1–T5.3): 9/0/0 — all artifact URLs HTTP 200, bounds shapes ok.
+- Suite 6 (full pipeline):
+  - **T6.1 Peshawar flood** 17/0/0 — Sentinel-2/NDWI, all 4 R2 URLs 200,
+    interpretation + Band message generated (gemma + Kimi served the calls).
+  - **T6.2 Mindanao earthquake** 10/0/0 — 3-tile set-cover mosaic → merged clip
+    20990×14283 @ 67.5% valid → NDVI 26.97% affected, **251 zones / 822.39 km²**
+    (matches Step 10) → all 4 merged R2 URLs 200 (geojson 13 MB) → Band message.
+  - **T6.3 anomaly recovery** 3/0/0 — first CDSE auth forced to fail →
+    `handle_anomaly("copernicus_auth_failed")` fired → retry succeeded → full
+    output produced. This run exercised all three Featherless models
+    (gemma/Kimi/**Qwen**).
+
+**FIX 1 — reasoning-model token starvation (`intelligence.py`).** Kimi-K2.6 and
+Qwen3.6 are *reasoning* models: they spend tokens thinking before emitting the
+answer. At the old `max_tokens` (1024, and 512 for the Band message) they
+returned `finish_reason=length` with **empty or truncated** content, so
+`devise_satellite_strategy` (pins Kimi), `handle_anomaly` (pins Qwen) and
+`generate_band_message` (pins Kimi) intermittently failed to `None`. Raised the
+defaults to 2048 (`_complete`/`_complete_json`), `handle_anomaly` and
+`interpret_results` to 2560, and the Band message to 1536.
+
+**FIX 2 — Opus last resort always 400'd (`intelligence.py`).** The AIML-hosted
+`claude-opus-4-8` rejects `temperature` ("deprecated for this model" → HTTP
+400), so the final safety-net model never worked. `_complete` now omits
+`temperature` for the `aiml` provider; the Opus fallback is verified working.
+
+**FIX 3 — truncated-JSON repair (`intelligence.py`).** Added
+`_repair_truncated_json`, used by `_extract_json` as a last resort: it walks the
+bracket/string state of a cut-off response, drops the dangling token, and closes
+open brackets so a mostly-complete reasoning-model reply still yields a usable
+dict instead of dropping to the deterministic default. Unit-tested on mid-array,
+after-colon, mid-string and nested truncations.
+
+**FIX 4 — Mindanao analysed the whole island (`agent.py`).** `_RISK_CITY_MAP`
+had no entry for `("mindanao, philippines", …)`, so `detect_risk_cities` fell
+back to the headline token "Mindanao" — the **entire island** (~520×470 km). Its
+bounding box is a ~2.5-**billion**-pixel clip window, which hung the pipeline for
+40+ min and exhausted memory. Added curated 3-city entries (Davao, Cotabato,
+Cagayan de Oro) for earthquake/landslide, matching the Step 8/10 scenario.
+
+**FIX 5 — clip + memory blow-ups on the large mosaic (`processor.py`).**
+- `clip_to_polygon` now **pre-windows to the polygon's pixel bbox** before the
+  `rasterio.mask` rasterize. Previously it rasterized a full-grid in-memory
+  GTiff (650M px ≈ hundreds of MB) on *every* call; windowing makes it operate
+  only on the geometry's window. Verified byte-identical output to the old path
+  (Suite 4 unchanged) and ~0.1 s on a 36M-px synthetic cube
+  (`tests/test_clip_window.py`).
+- The pre-clip stacked cube (`_stacked`, several GB on a mosaic) is now **freed
+  + `gc.collect()`'d before the render tail** when per-city is off. On the 16 GB
+  test box the Mindanao run dropped from ~17 GB (paging/thrash) to ~8 GB
+  (CPU-bound) private memory, letting the merged vectorize + upload finish.
+
+**Per-city artifacts disabled (`agent.py`).** Step 12's per-city render re-clips
+the full mosaic once per city — far too slow/memory-heavy on a large multi-tile
+AOI for the value it adds (the merged whole-area result already covers every
+city). `run_pipeline` now passes `city_boundaries=None`, so the per-city block
+is skipped; `city_geoms` is still threaded so the set-cover mosaic spreads
+scenes across the scattered cities. Step 12 code is retained but dormant.
+
+**Environment note.** The Mindanao mosaic (3 float32 bands × ~650M px + TCI) is
+genuinely large; the full per-event run needs ~8 GB free RAM and the 251-zone
+vectorize of the 300M-px merged array is a multi-minute single-threaded step.
+Also observed: the Featherless plan has a **concurrency limit of 4 units** and
+Kimi costs 4, so two pipeline runs in parallel get 429'd — the deterministic
+pipeline issues LLM calls serially, so this is not a problem in production.
+
+### Step 12: Per-city artifacts for multi-city AOIs — DONE (now dormant)
 
 For a multi-city AOI the merged whole-area PNG/GeoJSON is awkward to consume —
 the frontend and the hazard agent want **individual layers per city**. The

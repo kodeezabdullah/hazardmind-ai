@@ -83,6 +83,15 @@ _RISK_CITY_MAP = {
     ("dhaka, bangladesh", "flood"): ["Dhaka", "Narayanganj", "Gazipur"],
     ("kathmandu, nepal", "earthquake"): ["Kathmandu", "Lalitpur", "Bhaktapur"],
     ("kathmandu, nepal", "landslide"): ["Kathmandu", "Sindhupalchok"],
+    # Mindanao is a whole island (~520x470 km); analysing it as one polygon
+    # would clip a ~2.5-billion-pixel window and exhaust memory. The at-risk
+    # population centres for the M7.8 scenario are these three scattered cities.
+    ("mindanao, philippines", "earthquake"): [
+        "Davao", "Cotabato", "Cagayan de Oro",
+    ],
+    ("mindanao, philippines", "landslide"): [
+        "Davao", "Cotabato", "Cagayan de Oro",
+    ],
 }
 
 
@@ -437,10 +446,12 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
         result = process_satellite_imagery(
             selection, scenes, bbox, merged, event_id, token, disaster_type,
             city_geoms=city_geoms,
-            # Per-city artifacts: re-clip the merged mosaic to each city polygon
-            # and render individual PNGs + GeoJSON (multi-city AOIs only). The
-            # city_polys already carry {name, geojson}.
-            city_boundaries=city_polys,
+            # Per-city artifacts are intentionally disabled: re-clipping the full
+            # mosaic to each city is very expensive on a large multi-tile AOI
+            # (the merged whole-area clip already gives the frontend and hazard
+            # agent everything they need). `city_geoms` is still passed so the
+            # mosaic set-cover spreads scenes across the scattered cities.
+            city_boundaries=None,
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")

@@ -662,23 +662,57 @@ def clip_to_polygon(
         logger.error("Failed to reproject clip polygon: %s", exc)
         return None
 
+    # Pre-window to the polygon's bounding box BEFORE the expensive mask.
+    # rasterio.mask rasterizes against a full-grid in-memory dataset; on a big
+    # mosaic (e.g. Mindanao's 30978x20976 ≈ 650M px) that is hundreds of MB and
+    # seconds of work *per call*. The per-city path re-clips the same mosaic to
+    # each city polygon, where a single city covers ~1-2% of the grid — masking
+    # the whole grid each time is pathologically slow. So we first compute the
+    # geometry's pixel window, slice the cube down to it (a cheap view), and run
+    # the mask/rasterize only on that window. The result is identical; we just
+    # avoid touching the 98% of pixels the polygon can't possibly include.
+    try:
+        gminx, gminy, gmaxx, gmaxy = shape(geom).bounds
+    except (ValueError, AttributeError, TypeError) as exc:
+        logger.error("Could not compute clip geometry bounds: %s", exc)
+        return None
+
+    # Pixel offsets of the geometry bbox in the cube (transform.e is negative).
+    px0 = int(np.floor((gminx - transform.c) / transform.a))
+    px1 = int(np.ceil((gmaxx - transform.c) / transform.a))
+    py0 = int(np.floor((gmaxy - transform.f) / transform.e))
+    py1 = int(np.ceil((gminy - transform.f) / transform.e))
+    win_c0 = max(0, min(px0, px1))
+    win_c1 = min(w, max(px0, px1))
+    win_r0 = max(0, min(py0, py1))
+    win_r1 = min(h, max(py0, py1))
+
+    if win_c1 <= win_c0 or win_r1 <= win_r0:
+        logger.warning("Clip geometry does not overlap the raster grid")
+        return None
+
+    win_h = win_r1 - win_r0
+    win_w = win_c1 - win_c0
+    # Transform of the windowed sub-grid (origin shifted to the window corner).
+    win_transform = transform * rasterio.Affine.translation(win_c0, win_r0)
+
     # Build the inside-polygon boolean mask using rasterio.features against an
-    # in-memory single-band dataset describing the reference grid.
+    # in-memory single-band dataset describing only the WINDOWED grid.
     from rasterio.io import MemoryFile
 
     try:
         profile = {
             "driver": "GTiff",
-            "height": h,
-            "width": w,
+            "height": win_h,
+            "width": win_w,
             "count": 1,
             "dtype": "uint8",
             "crs": crs,
-            "transform": transform,
+            "transform": win_transform,
         }
         with MemoryFile() as mem:
             with mem.open(**profile) as tmp:
-                tmp.write(np.ones((1, h, w), dtype="uint8"))
+                tmp.write(np.ones((1, win_h, win_w), dtype="uint8"))
             with mem.open() as tmp:
                 clipped, clip_transform = rio_mask(
                     tmp, [geom], crop=True, nodata=0, filled=True
@@ -688,11 +722,12 @@ def clip_to_polygon(
         logger.error("Failed to build clip mask: %s", exc)
         return None
 
-    # Apply the same crop window to every band by reprojecting the crop bounds
-    # back into pixel offsets relative to the original transform.
+    # Apply the same crop window to every band. Offsets are relative to the
+    # original cube transform; the mask crop is relative to the window, so add
+    # the window origin back in.
     new_h, new_w = inside.shape
-    col_off = round((clip_transform.c - transform.c) / transform.a)
-    row_off = round((clip_transform.f - transform.f) / transform.e)
+    col_off = win_c0 + round((clip_transform.c - win_transform.c) / transform.a)
+    row_off = win_r0 + round((clip_transform.f - win_transform.f) / transform.e)
 
     def crop(arr: np.ndarray) -> np.ndarray:
         sub = arr[row_off:row_off + new_h, col_off:col_off + new_w]
@@ -1462,6 +1497,16 @@ def process_satellite_imagery(
         logger.info(
             "Candidate (%s) accepted with %.2f%% valid pixels", kind, valid
         )
+
+        # Free the pre-clip stacked cube before the memory-heavy render tail.
+        # On a large multi-tile mosaic (e.g. Mindanao ≈ 650M px) the stacked
+        # cube is several GB; holding it through PNG export + vectorization on a
+        # 16 GB box pushes the process into paging/thrash. `_stacked` is only
+        # needed for per-city re-clipping, which is disabled, so drop it now.
+        if not (city_boundaries and len(city_boundaries) > 1):
+            clipped.pop("_stacked", None)
+            import gc
+            gc.collect()
 
         # Render the cheap tail (indices -> PNGs -> vectorize -> bounds) for the
         # whole merged AOI.
