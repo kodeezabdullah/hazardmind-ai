@@ -55,6 +55,14 @@ final_reports     <- Agent 4 writes
 @hazardmind-impact (Hanan)
 @hazardmind-report (Zohair)
 
+## Git Rules
+- Author: kodeezabdullah
+- Email: abdullah.gis.services@gmail.com
+- NO Co-authored-by Claude
+- NO AI attribution
+- NO other contributors
+- Every commit: kodeezabdullah only
+
 ## Checklist
 - [x] Step 1: Branch + structure
 - [ ] Step 2: DB connection
