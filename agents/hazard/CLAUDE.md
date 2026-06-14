@@ -372,29 +372,32 @@ Rules:
 
 ## BUILD STATUS TRACKER
 
-Update this section as each piece is completed:
-
-- [ ] `requirements.txt` created
-- [ ] `.env` filled completely
-- [ ] `agent_config.yaml` created
-- [ ] `analyzer.py` — GDACS fetcher
-- [ ] `analyzer.py` — USGS fetcher
-- [ ] `analyzer.py` — OpenTopography fetcher
-- [ ] `analyzer.py` — Featherless flood analysis
-- [ ] `analyzer.py` — Featherless earthquake analysis
-- [ ] `analyzer.py` — Featherless landslide analysis
-- [ ] `analyzer.py` — asyncio.gather() parallel runner
-- [ ] `analyzer.py` — fallback chain
-- [ ] `agent.py` — AnalyzeHazardInput Pydantic model
-- [ ] `agent.py` — analyze_hazard tool function
-- [ ] `agent.py` — DB write to hazard_zones
-- [ ] `agent.py` — Band @mention to Hanan
-- [ ] `agent.py` — AnthropicAdapter setup
-- [ ] `agent.py` — agent.run() working
+- [x] `requirements.txt` created
+- [x] `.env` filled (BAND_API_KEY still pending from Abdullah)
+- [x] `agent_config.yaml` created
+- [x] `intelligence.py` — complete, tested, all 9 functions working
+- [x] `analyzer.py` — fetch_gdacs, fetch_usgs, fetch_slope complete
+- [x] `analyzer.py` — analyze_flood, analyze_earthquake, analyze_landslide complete
+- [x] `analyzer.py` — run_parallel_analysis with asyncio.gather complete
+- [x] `analyzer.py` — fallback chain working (real GDACS data confirmed, 91 events)
+- [x] `agent.py` — AnalyzeHazardInput removed (handled inline)
+- [x] `agent.py` — analyze_hazard tool function complete
+- [x] `agent.py` — DB write to hazard_zones (CAST uuid fix applied)
+- [x] `agent.py` — Band @mention to Hanan (handle TBD)
+- [x] `agent.py` — AnthropicAdapter setup (provider_key fix pending)
+- [x] `agent.py` — Agent.create() with real SDK pattern
+- [ ] BAND_API_KEY — blocked, need from Abdullah
+- [ ] Hanan's Band handle — blocked, need from team
 - [ ] Tested: receives Abdullah's @mention
-- [ ] Tested: 3 parallel tasks run
-- [ ] Tested: DB write confirmed
-- [ ] Tested: Hanan receives my Band message
+- [ ] Tested: 3 parallel tasks run live
+- [ ] Tested: DB write confirmed with real event_id
+- [ ] Tested: Hanan receives Band message
+
+## KNOWN ISSUES
+- BAND_API_KEY empty — agent cannot connect until Abdullah provides it
+- HANAN_HANDLE = "TBD_HANAN_HANDLE" — replace when Hanan shares her handle
+- AnthropicAdapter: change api_key= to provider_key= (deprecation warning)
+- openai pinned to 1.56.0 in requirements.txt — do not upgrade
 
 ---
 
