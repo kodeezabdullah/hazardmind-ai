@@ -3,9 +3,11 @@ import argparse
 import json
 from pathlib import Path
 
+from db_client import ensure_final_reports_table, write_final_report_metadata
 from generator import generate_report
 from map_generator import generate_static_map
 from pdf_generator import generate_pdf_report
+from storage_client import upload_file_to_r2
 
 
 def parse_args():
@@ -14,6 +16,8 @@ def parse_args():
     parser.add_argument("--output", help="Optional path to save the generated JSON.")
     parser.add_argument("--pdf-output", help="Optional path to save the generated PDF report.")
     parser.add_argument("--map-output", help="Optional path to save the generated static map PNG.")
+    parser.add_argument("--upload-r2", action="store_true", help="Upload generated PDF and map artifacts to Cloudflare R2.")
+    parser.add_argument("--write-db", action="store_true", help="Write final report metadata to Neon.")
     return parser.parse_args()
 
 
@@ -21,6 +25,7 @@ async def main():
     args = parse_args()
     report = await generate_report(args.event_id)
     map_output_path = None
+    pdf_output_path = None
 
     if args.map_output:
         map_output_path = Path(args.map_output)
@@ -36,17 +41,49 @@ async def main():
         append_report_log(report, "PDF generated locally", "2026-06-13T18:04:20Z")
         print(f"Saved PDF report to {saved_pdf_path}")
 
+    if args.upload_r2:
+        if not pdf_output_path or not pdf_output_path.exists():
+            raise RuntimeError("R2 upload requires --pdf-output to generate a local PDF first.")
+        if not map_output_path or not map_output_path.exists():
+            raise RuntimeError("R2 upload requires --map-output to generate a local map first.")
+
+        event_id = report["event_id"]
+        pdf_url = upload_file_to_r2(
+            str(pdf_output_path),
+            f"events/{event_id}/report.pdf",
+            "application/pdf",
+        )
+        report["report"]["pdf_url"] = pdf_url
+        append_report_log(report, "PDF uploaded to Cloudflare R2", "2026-06-13T18:05:00Z")
+        print("PDF uploaded to R2")
+
+        map_url = upload_file_to_r2(
+            str(map_output_path),
+            f"events/{event_id}/risk_map.png",
+            "image/png",
+        )
+        report["report"]["map_url"] = map_url
+        append_report_log(report, "Map uploaded to Cloudflare R2", "2026-06-13T18:05:20Z")
+        print("Map uploaded to R2")
+
+    if args.write_db:
+        await ensure_final_reports_table()
+        await write_final_report_metadata(report)
+        append_report_log(report, "Final report metadata written to Neon", "2026-06-13T18:05:40Z")
+        print("Final report metadata written to Neon")
+
     if args.output:
         append_report_log(report, "JSON written locally", "2026-06-13T18:04:40Z")
 
     report_json = json.dumps(report, indent=2)
-    print(report_json)
 
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(f"{report_json}\n", encoding="utf-8")
         print(f"Saved report JSON to {output_path}")
+    else:
+        print(report_json)
 
 
 def append_report_log(report: dict, message: str, timestamp: str) -> None:
