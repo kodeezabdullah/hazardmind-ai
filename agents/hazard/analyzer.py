@@ -85,10 +85,24 @@ async def fetch_slope(bbox: list) -> dict:
     }
 
 
-async def analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data) -> dict:
+async def analyze_flood(
+    bbox,
+    affected_area_km2,
+    mean_value,
+    gdacs_data,
+    satellite_type="sentinel-2",
+) -> dict:
+    if satellite_type == "sentinel-1":
+        index_label = "SAR backscatter ratio (VV-VH)"
+        index_context = "Values near 0 indicate water. Negative values mean flooding."
+    else:
+        index_label = "NDWI flood index"
+        index_context = "Values above 0.3 indicate flooding. Above 0.5 is severe."
+
     prompt = (
         f"Flood risk analysis. Area: {affected_area_km2}km2. "
-        f"Flood index: {mean_value}. GDACS events: {gdacs_data.get('count', 0)}. "
+        f"{index_label}: {mean_value}. {index_context} "
+        f"GDACS events: {gdacs_data.get('count', 0)}. "
         f"BBox: {bbox}. Return JSON only: risk, confidence, reasoning, affected_zones"
     )
     system = (
@@ -220,9 +234,29 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
 
 async def run_parallel_analysis(satellite_data: dict) -> dict:
     event_id = satellite_data.get("event_id", "unknown")
-    bbox = satellite_data["boundaries"]["bbox"]
-    affected_area_km2 = satellite_data["analysis"]["affected_area_km2"]
-    mean_value = satellite_data["analysis"].get("mean_value", 0.0)
+    boundaries = satellite_data.get("boundaries", {})
+    bbox = boundaries.get("bbox", [])
+    analysis = satellite_data.get("analysis", {})
+    affected_area_km2 = analysis.get("affected_area_km2", 0.0)
+    mean_value = analysis.get("mean_value", 0.0)
+    risk_cities = boundaries.get("risk_cities", [])
+    satellite_type = satellite_data.get("satellite", {}).get("type", "sentinel-2")
+
+    if not bbox or len(bbox) < 4:
+        return {
+            "event_id": event_id,
+            "flood_risk": "UNKNOWN",
+            "earthquake_risk": "UNKNOWN",
+            "landslide_risk": "UNKNOWN",
+            "overall_severity": "HIGH",
+            "confidence_scores": {
+                "flood": 0.0,
+                "earthquake": 0.0,
+                "landslide": 0.0,
+            },
+            "risk_polygons": {},
+            "error": "Invalid bbox received from satellite agent",
+        }
 
     fetch_results = await asyncio.gather(
         fetch_gdacs(bbox),
@@ -247,7 +281,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     )
 
     analysis_results = await asyncio.gather(
-        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data),
+        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type),
         analyze_earthquake(bbox, usgs_data),
         analyze_landslide(bbox, gdacs_data, slope_data),
         return_exceptions=True,
@@ -276,6 +310,11 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         severity_map.get(landslide["risk"], 1),
     )
     overall_severity = reverse_map[max_score]
+    unknown_count = sum(
+        1 for r in [flood, quake, landslide] if r.get("risk") == "UNKNOWN"
+    )
+    if unknown_count >= 2:
+        overall_severity = "HIGH"
 
     return {
         "event_id": event_id,
@@ -283,6 +322,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         "earthquake_risk": quake["risk"],
         "landslide_risk": landslide["risk"],
         "overall_severity": overall_severity,
+        "unknown_count": unknown_count,
         "confidence_scores": {
             "flood": flood.get("confidence", 0.0),
             "earthquake": quake.get("confidence", 0.0),
