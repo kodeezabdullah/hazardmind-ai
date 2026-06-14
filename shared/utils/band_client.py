@@ -1,7 +1,22 @@
 import os
+from pathlib import Path
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-load_dotenv()
+
+
+def load_agent_env():
+    root_env = Path(__file__).resolve().parents[2] / '.env'
+    load_dotenv(root_env)
+
+    cwd = Path.cwd()
+    for parent in [cwd] + list(cwd.parents):
+        agent_env = parent / '.env'
+        if agent_env.exists() and agent_env != root_env:
+            load_dotenv(agent_env, override=True)
+            break
+
+
+load_agent_env()
 
 FALLBACK_MODELS = [
     "google/gemma-4-31B-it",
