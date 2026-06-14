@@ -126,7 +126,8 @@ FeatureCollection adds `total_area`.
 merged_polygon, event_id, token, disaster_type)`.** Chains
 download → stack → clip → indices → export → vectorize and returns
 `{satellite_type, index_type, water_percent, mean_index, affected_area_km2,
-png_paths, geojson}`.
+valid_percent, png_paths, geojson, bounds}` (`bounds` = WGS84 georeferencing for
+the PNGs; see Step 9).
 
 **7J — `agent.py`.** `run_pipeline` resolves region + risk-city boundaries
 first (so they're reported even on a demo-cache hit), authenticates to CDSE,
@@ -212,6 +213,38 @@ polygon:
 - All four artifacts uploaded and publicly fetchable (HTTP 200): true_color
   148 KB, index_map 189 KB, classification 21 KB, zones.geojson **901 KB** with
   22 graded features (cf. the pre-fix run: 614/1053/792/64 bytes).
+
+### Step 9: Overlay-ready layers — transparency + georeferencing — DONE
+
+For the frontend to drop the PNGs onto a web map, two things were missing.
+
+**Transparent outside-polygon background (`export_png`).** `true_color.png` was
+written as plain RGB, and the clip sets outside-polygon pixels to 0, so it
+rendered with a **solid black box** around the risk-area silhouette — fouling any
+overlay. All three PNGs are now **RGBA with alpha 0 outside the clip mask**, so
+they share one identical silhouette and composite cleanly:
+- `true_color` alpha = clip mask AND not-all-black (so TCI nodata/seams are
+  transparent too).
+- `index_map` alpha = finite-index AND inside-polygon.
+- `classification` already only paints graded hazard pixels.
+Verified on Mindanao: true_color/index 90.8% transparent (9.2% = the cities),
+classification 96.2% transparent.
+
+**Georeferencing bounds (`_compute_bounds`, in the result payload).** A PNG has
+no spatial info; a web map places it by its geographic extent. The clip is in the
+scene's native UTM CRS, so `_compute_bounds(clipped)` derives the extent from the
+clip `transform` + `shape`, reprojects the corners to **WGS84 (EPSG:4326)** with
+`rasterio.warp.transform_bounds`, and returns it in three shapes (all PNGs share
+these bounds):
+- `bounds` — `{west, south, east, north}`
+- `bounds_leaflet` — `[[south, west], [north, east]]` for `L.imageOverlay`
+- `bounds_corners` — 4 `[lng, lat]` corners CW from top-left for a MapLibre/
+  Mapbox `image` source
+`process_satellite_imagery` adds `bounds` to its result and `agent.py` forwards
+it in the room payload alongside the artifact URLs. Caveat: the bounds describe
+the **rendered clip extent**, which on a single-scene result is that one tile's
+footprint — for Mindanao (PXK only) the southern cities (Davao, Cotabato) fall
+outside it; full coverage there needs the mosaic path.
 
 #### End-to-end test (Peshawar flood) — PASS
 

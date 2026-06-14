@@ -249,6 +249,9 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 "class_counts": result.get("class_counts"),
                 "affected_area_km2": result["affected_area_km2"],
                 "bbox": list(bbox),
+                # Geographic extent of the PNG layers, for map overlay. Shapes
+                # for Leaflet (bounds_leaflet) and MapLibre (bounds_corners).
+                "bounds": result.get("bounds"),
                 "region_boundary": region.get("geojson"),
                 "risk_cities": [c["name"] for c in city_polys],
                 "true_color_url": urls["true_color_url"],

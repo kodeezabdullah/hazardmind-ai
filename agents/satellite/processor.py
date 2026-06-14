@@ -41,7 +41,7 @@ from rasterio.enums import Resampling
 from rasterio.features import shapes
 from rasterio.mask import mask as rio_mask
 from rasterio.merge import merge as rio_merge
-from rasterio.warp import transform_geom
+from rasterio.warp import transform_bounds, transform_geom
 from shapely.geometry import mapping, shape
 from shapely.ops import transform as shapely_transform
 
@@ -1124,6 +1124,57 @@ def _valid_pixel_percent(clipped: dict) -> float:
     return 100.0 * int(np.count_nonzero(valid)) / inside_count
 
 
+def _compute_bounds(clipped: dict) -> Optional[dict]:
+    """Geographic bounds of the exported PNGs, for map georeferencing.
+
+    The clip is in the scene's native CRS (UTM); the PNGs span the clip's full
+    extent. A web map needs that extent in WGS84 lng/lat. Derives the extent
+    from the clip transform + shape, reprojects the corners to EPSG:4326, and
+    returns the extent in several common shapes so the frontend can pick:
+
+        {
+            "crs": "EPSG:4326",
+            "bounds": {"west","south","east","north"},
+            # Leaflet: L.imageOverlay(url, bounds_leaflet)
+            "bounds_leaflet": [[south, west], [north, east]],
+            # MapLibre/Mapbox image source: clockwise from top-left, [lng,lat]
+            "bounds_corners": [[w,n],[e,n],[e,s],[w,s]],
+        }
+
+    Returns None if the transform/shape/crs are unavailable.
+    """
+    transform = clipped.get("transform")
+    shape_hw = clipped.get("shape")
+    crs = clipped.get("crs")
+    if transform is None or not shape_hw or crs is None:
+        return None
+
+    h, w = shape_hw
+    left = transform.c
+    top = transform.f
+    right = transform.c + transform.a * w
+    bottom = transform.f + transform.e * h
+
+    try:
+        west, south, east, north = transform_bounds(
+            crs, "EPSG:4326", left, bottom, right, top
+        )
+    except (rasterio.errors.RasterioError, ValueError) as exc:
+        logger.warning("Could not reproject bounds to WGS84: %s", exc)
+        return None
+
+    west, south = round(west, 6), round(south, 6)
+    east, north = round(east, 6), round(north, 6)
+    return {
+        "crs": "EPSG:4326",
+        "bounds": {"west": west, "south": south, "east": east, "north": north},
+        "bounds_leaflet": [[south, west], [north, east]],
+        "bounds_corners": [
+            [west, north], [east, north], [east, south], [west, south]
+        ],
+    }
+
+
 def _attempt_clip(
     selection: dict,
     scenes,
@@ -1277,6 +1328,8 @@ def process_satellite_imagery(
             scheme_key=indices["scheme_key"],
         )
 
+        bounds = _compute_bounds(clipped)
+
         logger.info("Satellite imagery pipeline complete for %s", event_id)
         return {
             "satellite_type": satellite_type,
@@ -1288,6 +1341,9 @@ def process_satellite_imagery(
             "valid_percent": round(valid, 2),
             "png_paths": pngs,
             "geojson": geojson,
+            # Geographic extent of the PNGs, for map georeferencing. All PNGs
+            # share these bounds (same clip extent). See _compute_bounds.
+            "bounds": bounds,
         }
 
     # Every candidate was too sparse to be usable.
