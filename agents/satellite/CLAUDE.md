@@ -41,6 +41,113 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 11: LLM intelligence layer (`intelligence.py`) — DONE
+
+The agent is no longer a pure GIS tool — every decision point can now consult an
+LLM. `intelligence.py` adds `SatelliteIntelligence`, a thin reasoning layer over
+**Featherless** (an OpenAI-compatible inference host) with a model fallback
+chain and a Claude-Opus last resort via the **AIML** API. Both providers are
+reached through the `openai` SDK with a custom `base_url`.
+
+**Providers & keys.**
+- Featherless — `base_url=https://api.featherless.ai/v1`, `FEATHERLESS_API_KEY`.
+- AIML (Opus last resort) — `base_url=https://api.aimlapi.com/v1`, `AIML_API_KEY`.
+
+**Model fallback chain (`_complete` / `_build_chain`).** Each LLM call walks
+this chain, returning the first model that answers (logged as
+`LLM call served by <provider>/<model>`):
+1. `google/gemma-4-31B-it` — primary
+2. `moonshotai/Kimi-K2.6` — fallback 1
+3. `Qwen/Qwen3.6-35B-A3B` — fallback 2
+4. `deepseek-ai/DeepSeek-V4-Pro` — fallback 3
+5. `claude-opus-4-8` via AIML — last resort
+
+A method may pin a **preferred primary** (e.g. method 2 prefers Kimi); the pin is
+moved to the front of the chain for that call only. Per-model timeout is **30 s**
+(`MODEL_TIMEOUT_SECONDS`); `max_retries=0` on the clients so our own chain owns
+retry. A model that times out, errors, **or returns empty content** is skipped to
+the next link. If every model fails, the method returns `None` and the caller
+falls back to its deterministic default — intelligence is always additive, never
+a hard dependency. JSON responses are parsed by `_extract_json` (strict parse →
+strip ```` ```json ```` fence → outermost `{...}` span).
+
+**The six methods** (each returns a parsed dict, or `None` on total failure;
+method 5 returns free text):
+1. `parse_disaster_input(raw_message)` — raw Band text → structured profile
+   (`location/region/disaster_type/magnitude/secondary_risks/urgency/ambiguous/
+   missing_info/confidence`). Model: gemma.
+2. `devise_satellite_strategy(profile, cloud_cover, available_scenes_count,
+   attempt_number)` — optimal satellite + analysis approach with reasoning
+   (`satellite/reason/date_range_days/bands_priority/analysis_type/triage_*/
+   confidence/fallback_strategy`). Model: Kimi.
+3. `handle_anomaly(anomaly_type, context, attempt_number)` — recovery strategy
+   (`action/specific_steps/use_landsat/expand_date_range/alert_human/
+   alert_message/confidence_in_recovery/estimated_delay_seconds/reasoning`) for
+   `no_sentinel_scenes`, `high_cloud_cover`, `low_data_quality`,
+   `download_failed`, `coverage_insufficient`, `extreme_index_values`,
+   `r2_upload_failed`, `copernicus_auth_failed`, `mosaic_failed`,
+   `landsat_fallback_needed` (and any other label). Model: Qwen.
+4. `interpret_results(index_type, index_stats, disaster_type, location,
+   total_zones, area_km2, satellite_used)` — expert assessment
+   (`severity/summary/key_findings/anomalies/comparison/immediate_concerns/
+   confidence/data_quality/recommendations`). Model: gemma.
+5. `generate_band_message(results, interpretation, anomalies, confidence,
+   next_agent_handle)` — natural, expert-sounding hand-off message for the room
+   (free text, not JSON; starts `@<handle>`, flags anomalies, ends with the
+   event_id). Model: Kimi.
+6. `decide_landsat_fallback(sentinel_failure_reason, disaster_type, location,
+   days_since_disaster)` — whether Landsat 8/9 is worth trying
+   (`use_landsat/reason/expected_quality/bands_to_use/confidence`). Model: gemma.
+
+**Integration into `agent.py`.** `run_pipeline` now threads six integration
+points alongside the deterministic pipeline (a module-level `intelligence =
+SatelliteIntelligence()` is shared across tool calls; `MAX_STEP_ATTEMPTS = 3`,
+`MIN_CONFIDENCE = 0.6`):
+- **IP1 — parse + ambiguity gate.** A new optional `raw_message` tool field
+  carries the original alert text; `parse_disaster_input` structures it. If the
+  profile is `ambiguous` **and** a *core* field (location or disaster type) is
+  genuinely missing, `run_pipeline` returns `status: clarification_needed`
+  (`_clarification`) so the model asks the room to clarify. The gate matches
+  missing fields as **standalone tokens** (`disaster_type`, `city`, …) or empty
+  parsed values, so low-stakes notes like "confirmation of disaster type" do
+  **not** trigger a spurious clarification loop.
+- **IP2 — strategy reasoning.** `devise_satellite_strategy` runs after the
+  cloud-aware `select_satellite`; its reasoning + date-window are **logged**. The
+  deterministic cloud-aware selection stays authoritative for the actual mission
+  (physics over assumption).
+- **IP3 — anomaly recovery (max 3 attempts).** `_authenticate_with_recovery`
+  retries CDSE auth, calling `handle_anomaly("copernicus_auth_failed")` between
+  tries and honouring a bounded `estimated_delay_seconds` hint.
+  `_search_with_recovery` widens the date window 7→14→30 days on
+  `handle_anomaly("no_sentinel_scenes")`. A `coverage_insufficient` result asks
+  `handle_anomaly` (which may advise Landsat / alert a human) and folds the
+  advice into the error. `_recover` is the shared logging wrapper.
+- **IP4 — interpretation.** After upload, `interpret_results` turns the raw index
+  stats into an expert assessment, stored under `interpretation` in the result.
+- **IP5 — natural Band message.** `generate_band_message` writes the room
+  message; the model relays it **verbatim** (the system prompt instructs it to
+  prefer `band_message` over the legacy key/value format, falling back only if
+  it's missing). The full machine-readable payload still rides along in the JSON.
+- **IP6 — confidence quality gate.** If the interpretation confidence
+  `< MIN_CONFIDENCE`, `handle_anomaly("low_confidence")` is consulted (logged);
+  the result is still sent because responders need the data.
+
+The Band system prompt was updated to (a) pass `raw_message` through, (b) relay
+`band_message` verbatim on success, and (c) handle the new
+`clarification_needed` status.
+
+**Verification.** `python intelligence.py` runs a live three-method smoke test
+(parse → strategy → anomaly) against Featherless — confirmed: gemma serves the
+gemma-pinned methods, and when Kimi/Qwen return empty content the chain falls
+through to gemma cleanly. The three spec test cases pass:
+- *Normal flood* (`"flood in Peshawar Pakistan"`): parsed `ambiguous=false`,
+  conf 0.9, `disaster_type=flood`; strategy → sentinel-1 at 55% cloud.
+- *Ambiguous* (`"disaster in KPK"`): parsed `location=null`,
+  `disaster_type=null`, `ambiguous=true`, missing `["city","disaster_type",…]`
+  → clarification fires.
+- *Anomaly* (forced `copernicus_auth_failed`): exactly 3 attempts then graceful
+  `None`.
+
 ### Step 7: Full remote-sensing pipeline — DONE
 
 Major restructure of `processor.py` and the modules around it: the agent now
