@@ -110,7 +110,7 @@ Never go silent — if analysis fails send error status to Hanan."""
 
 adapter = AnthropicAdapter(
     model="claude-opus-4-8",
-    api_key=os.getenv("AIML_API_KEY"),
+    provider_key=os.getenv("AIML_API_KEY"),
     system_prompt=SYSTEM_PROMPT,
     max_tokens=4096
 )
