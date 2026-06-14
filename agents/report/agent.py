@@ -5,6 +5,7 @@ from pathlib import Path
 
 from db_client import ensure_final_reports_table, write_final_report_metadata
 from generator import generate_report
+from llm_clients import featherless_health_check
 from map_generator import generate_static_map
 from pdf_generator import generate_pdf_report
 from storage_client import upload_file_to_r2
@@ -18,11 +19,17 @@ def parse_args():
     parser.add_argument("--map-output", help="Optional path to save the generated static map PNG.")
     parser.add_argument("--upload-r2", action="store_true", help="Upload generated PDF and map artifacts to Cloudflare R2.")
     parser.add_argument("--write-db", action="store_true", help="Write final report metadata to Neon.")
+    parser.add_argument("--llm-health-check", action="store_true", help="Check Featherless model availability and exit.")
     return parser.parse_args()
 
 
 async def main():
     args = parse_args()
+    if args.llm_health_check:
+        for label, status in await featherless_health_check():
+            print(f"{label}: {status}")
+        return
+
     report = await generate_report(args.event_id)
     map_output_path = None
     pdf_output_path = None

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -5,8 +6,18 @@ from dotenv import load_dotenv
 
 from llm_clients import (
     generate_detailed_report_with_aiml_fallback,
-    generate_detailed_report_with_featherless,
+    generate_composite_detailed_report_with_featherless,
     generate_executive_summary_with_aiml,
+)
+from intelligence import (
+    assess_event_criticality,
+    detect_anomalies,
+    generate_band_ready_message,
+    generate_decision_brief,
+    generate_map_narrative,
+    generate_priority_recommendations,
+    run_quality_check,
+    strip_sources,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -266,13 +277,13 @@ async def generate_report(event_id: str):
     ]
 
     detailed_report, detailed_source, featherless_fallback_used, featherless_model = await generate_detailed_report(result)
-    if detailed_source == "featherless:kimi-k2.6":
+    if detailed_source.startswith("featherless:"):
         agent_log.append(
-            _report_log("Featherless Kimi K2.6 generated detailed disaster report", "2026-06-13T18:03:20Z")
+            _report_log("Featherless composite generated detailed disaster report", "2026-06-13T18:03:20Z")
         )
     else:
         agent_log.append(
-            _report_log("Featherless Kimi K2.6 unavailable, AI/ML fallback used", "2026-06-13T18:03:20Z")
+            _report_log("Featherless cascades unavailable, AI/ML fallback used", "2026-06-13T18:03:20Z")
         )
 
     summary, summary_source, summary_fallback_used = await generate_executive_summary(
@@ -296,12 +307,50 @@ async def generate_report(event_id: str):
         "pdf_url": "",
         "map_url": "",
     }
+
+    intelligence_with_sources = await generate_intelligence(result)
+    intelligence, intelligence_sources = strip_sources(intelligence_with_sources)
+    decision_summary = intelligence.get("decision_brief", {}).get("official_summary")
+    if decision_summary:
+        result["report"]["summary"] = decision_summary
+        summary_source = intelligence_sources.get("decision_brief", summary_source)
+
+    priority_timeline = intelligence.get("priority_timeline", {})
+    result["report"]["recommendations"] = merge_recommendations(
+        result["report"]["recommendations"],
+        priority_timeline.get("next_6_hours", []),
+        priority_timeline.get("resource_priorities", []),
+    )
+
+    result["intelligence"] = intelligence
     result["model_sources"] = {
         "detailed_report": detailed_source,
         "executive_summary": summary_source,
         "fallback_used": featherless_fallback_used or summary_fallback_used,
         "featherless_model": featherless_model,
+        "intelligence": {
+            "criticality": intelligence_sources.get("criticality", "deterministic_fallback"),
+            "anomaly_check": intelligence_sources.get("anomaly_check", "deterministic_fallback"),
+            "map_narrative": intelligence_sources.get("map_narrative", "deterministic_fallback"),
+            "priority_recommendations": intelligence_sources.get(
+                "priority_recommendations", "deterministic_fallback"
+            ),
+            "decision_brief": intelligence_sources.get("decision_brief", "deterministic_fallback"),
+            "quality_check": intelligence_sources.get("quality_check", "deterministic_fallback"),
+            "band_ready_message": intelligence_sources.get("band_ready_message", "deterministic_template"),
+        },
     }
+    agent_log.extend(
+        [
+            _report_log("Criticality assessed", "2026-06-13T18:03:45Z"),
+            _report_log("Anomalies checked", "2026-06-13T18:03:50Z"),
+            _report_log("Map narrative generated", "2026-06-13T18:03:55Z"),
+            _report_log("Priority timeline generated", "2026-06-13T18:04:00Z"),
+            _report_log("Decision brief generated with Opus", "2026-06-13T18:04:05Z"),
+            _report_log("Quality check completed", "2026-06-13T18:04:10Z"),
+            _report_log("Band-ready final message prepared", "2026-06-13T18:04:15Z"),
+        ]
+    )
     result["agent_log"] = agent_log
 
     return {
@@ -319,18 +368,54 @@ async def generate_report(event_id: str):
             "impact",
             "routes",
             "report",
+            "intelligence",
             "model_sources",
             "agent_log",
         )
     }
 
 
+async def generate_intelligence(report_context: dict) -> dict:
+    criticality = await assess_event_criticality(report_context)
+    anomalies, map_narrative, priority_timeline = await asyncio.gather(
+        detect_anomalies(report_context),
+        generate_map_narrative(report_context),
+        generate_priority_recommendations(report_context),
+    )
+    partial = {"criticality": criticality}
+    partial.update(
+        {
+            "anomalies": anomalies,
+            "map_narrative": map_narrative,
+            "priority_timeline": priority_timeline,
+        }
+    )
+    decision_brief = await generate_decision_brief(report_context, partial)
+    partial["decision_brief"] = decision_brief
+    quality_check = await run_quality_check(report_context, partial)
+    partial["quality_check"] = quality_check
+    partial["band_ready_message"] = await generate_band_ready_message(report_context, partial)
+    return partial
+
+
+def merge_recommendations(*groups: list[str]) -> list[str]:
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in group or []:
+            cleaned = str(item).strip()
+            if cleaned and cleaned.lower() not in seen:
+                merged.append(cleaned)
+                seen.add(cleaned.lower())
+    return merged[:10]
+
+
 async def generate_detailed_report(data: dict) -> tuple[dict, str, bool, str]:
-    featherless_result = await generate_detailed_report_with_featherless(data)
+    featherless_result = await generate_composite_detailed_report_with_featherless(data)
     if featherless_result["ok"]:
         return (
             featherless_result["data"],
-            "featherless:kimi-k2.6",
+            featherless_result["source"],
             False,
             featherless_result["featherless_model"],
         )

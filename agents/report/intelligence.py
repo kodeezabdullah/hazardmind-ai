@@ -1,0 +1,586 @@
+import json
+
+from llm_clients import (
+    AIML_GPT_LAST_RESORT,
+    AIML_OPUS,
+    FEATHERLESS_DEEPSEEK,
+    FEATHERLESS_CHECK_TOKENS,
+    FEATHERLESS_GEMMA,
+    FEATHERLESS_JSON_TOKENS,
+    FEATHERLESS_KIMI,
+    FEATHERLESS_MAP_TOKENS,
+    FEATHERLESS_QWEN,
+    FEATHERLESS_RECOMMENDATION_TOKENS,
+    call_aiml,
+    featherless_json_cascade,
+)
+
+
+async def assess_event_criticality(report_context: dict) -> dict:
+    """
+    Determines criticality level, escalation need, and why.
+    """
+    fallback = _fallback_criticality(report_context)
+    data, source = await featherless_json_cascade(
+        purpose="criticality",
+        prompt=
+        _json_prompt(
+            "Assess event criticality for emergency leadership.",
+            report_context,
+            {
+                "criticality": "low|normal|high|critical",
+                "overall_confidence": "number from 0.0 to 1.0",
+                "escalation_required": "boolean",
+                "rationale": "short user-facing explanation",
+                "trigger_factors": ["short factors"],
+            },
+        ),
+        system=_json_system("You are a disaster-risk criticality analyst."),
+        primary_model=FEATHERLESS_KIMI,
+        fallback_models=[FEATHERLESS_DEEPSEEK, FEATHERLESS_GEMMA],
+        max_tokens=FEATHERLESS_JSON_TOKENS,
+        timeout_seconds=45,
+        required_keys=["criticality", "overall_confidence", "escalation_required", "rationale", "trigger_factors"],
+    )
+    result = _coerce_criticality(data, fallback)
+    result["_source"] = source
+    return result
+
+
+async def detect_anomalies(report_context: dict) -> dict:
+    """
+    Detects abnormal or suspicious conditions in the pipeline data.
+    """
+    fallback = _fallback_anomalies(report_context)
+    data, source = await featherless_json_cascade(
+        purpose="anomaly_check",
+        prompt=
+        _json_prompt(
+            "Detect abnormal, missing, conflicting, or suspicious disaster-pipeline conditions.",
+            report_context,
+            {
+                "anomalies_detected": "boolean",
+                "anomalies": [
+                    {
+                        "type": "no_data|low_confidence|conflicting_data|extreme_values|missing_area|api_timeout|cascade_failure|other",
+                        "severity": "low|medium|high|critical",
+                        "description": "short explanation",
+                        "recommended_handling": "short operational handling instruction",
+                    }
+                ],
+            },
+        ),
+        system=_json_system("You are a disaster data quality analyst."),
+        primary_model=FEATHERLESS_QWEN,
+        fallback_models=[FEATHERLESS_KIMI, FEATHERLESS_GEMMA],
+        max_tokens=FEATHERLESS_CHECK_TOKENS,
+        timeout_seconds=45,
+        required_keys=None,
+    )
+    result = _coerce_anomalies(data, fallback)
+    result["_source"] = source
+    return result
+
+
+async def generate_map_narrative(report_context: dict) -> dict:
+    """
+    Explains what the map means in operational terms.
+    """
+    fallback = _fallback_map_narrative(report_context)
+    data, source = await featherless_json_cascade(
+        purpose="map_narrative",
+        prompt=
+        _json_prompt(
+            "Explain the static risk map in operational terms for emergency managers.",
+            report_context,
+            {
+                "map_narrative": "concise paragraph",
+                "key_spatial_findings": ["finding"],
+                "hotspots": ["hotspot"],
+                "map_limitations": ["limitation"],
+            },
+        ),
+        system=_json_system("You are a geospatial disaster intelligence analyst."),
+        primary_model=FEATHERLESS_GEMMA,
+        fallback_models=[FEATHERLESS_KIMI, FEATHERLESS_DEEPSEEK],
+        max_tokens=FEATHERLESS_MAP_TOKENS,
+        timeout_seconds=45,
+        required_keys=["map_narrative", "key_spatial_findings", "hotspots", "map_limitations"],
+    )
+    result = _coerce_map_narrative(data, fallback)
+    result["_source"] = source
+    return result
+
+
+async def generate_priority_recommendations(report_context: dict) -> dict:
+    """
+    Generates action priorities for the next 6, 24, and 72 hours.
+    """
+    fallback = _fallback_priority_timeline(report_context)
+    data, source = await featherless_json_cascade(
+        purpose="priority_recommendations",
+        prompt=
+        _json_prompt(
+            "Generate concise operational disaster response priorities. Keep each item under 12 words.",
+            report_context,
+            {
+                "next_6_hours": ["three immediate actions"],
+                "next_24_hours": ["three stabilization actions"],
+                "next_72_hours": ["three recovery actions"],
+                "resource_priorities": ["three resource needs"],
+                "coordination_priorities": ["three coordination needs"],
+            },
+        ),
+        system=_json_system("You are an emergency operations planning analyst."),
+        primary_model=FEATHERLESS_DEEPSEEK,
+        fallback_models=[FEATHERLESS_KIMI, FEATHERLESS_GEMMA],
+        max_tokens=FEATHERLESS_RECOMMENDATION_TOKENS,
+        timeout_seconds=45,
+        required_keys=None,
+    )
+    result = _coerce_priority_timeline(data, fallback)
+    result["_source"] = source
+    return result
+
+
+async def generate_decision_brief(report_context: dict, intelligence: dict) -> dict:
+    """
+    Generates a concise official decision-maker brief.
+    """
+    fallback = _fallback_decision_brief(report_context, intelligence)
+    prompt = _json_prompt(
+        "Generate an official decision-maker brief for senior responders.",
+        {"event": _compact_context(report_context), "intelligence": intelligence},
+        {
+            "decision_brief": "concise official brief",
+            "official_summary": "3 to 5 sentence official summary",
+            "key_decisions_required": ["decision"],
+            "human_review_required": "boolean",
+        },
+    )
+    system = _json_system("You are Opus writing official high-stakes emergency briefs. Return strict JSON only.")
+
+    response = await call_aiml(prompt, system=system, model=AIML_OPUS, max_tokens=1000)
+    source = "aiml:opus-4.8"
+    if not response["ok"] or not response["content"]:
+        response = await call_aiml(prompt, system=system, model=AIML_GPT_LAST_RESORT, max_tokens=1000)
+        source = "aiml:gpt-4.5" if response["ok"] and response["content"] else "deterministic_fallback"
+
+    try:
+        data = json.loads(_extract_json(response["content"])) if response["ok"] else fallback
+    except json.JSONDecodeError:
+        data = fallback
+        source = "deterministic_fallback"
+
+    data = _coerce_decision_brief(data, fallback)
+    data["_source"] = source
+    return data
+
+
+async def run_quality_check(report_context: dict, intelligence: dict) -> dict:
+    """
+    Checks completeness and readiness before final report.
+    """
+    fallback = _fallback_quality_check(report_context, intelligence)
+    review, source = await featherless_json_cascade(
+        purpose="quality_check",
+        prompt=_json_prompt(
+            "Review the deterministic checklist and add concise warnings or blocking issues if needed.",
+            {"event": _compact_context(report_context), "intelligence": intelligence, "deterministic_check": fallback},
+            {
+                "warnings": ["warning"],
+                "blocking_issues": ["issue"],
+                "review_note": "short readiness note",
+            },
+        ),
+        system=_json_system("You are a disaster-report quality controller."),
+        primary_model=FEATHERLESS_QWEN,
+        fallback_models=[FEATHERLESS_KIMI, FEATHERLESS_GEMMA],
+        max_tokens=FEATHERLESS_CHECK_TOKENS,
+        timeout_seconds=45,
+        required_keys=["warnings", "blocking_issues"],
+    )
+    result = dict(fallback)
+    if source != "deterministic_fallback":
+        result["warnings"] = _merge_lists(fallback["warnings"], review.get("warnings", []))
+        result["blocking_issues"] = _merge_lists(fallback["blocking_issues"], review.get("blocking_issues", []))
+        if result["blocking_issues"]:
+            result["status"] = "not_ready"
+        elif result["warnings"]:
+            result["status"] = "ready_with_warnings"
+        result["review_note"] = str(review.get("review_note") or "")
+        result["_source"] = f"hybrid:deterministic+{source}"
+        return result
+
+    result["_source"] = "deterministic_fallback"
+    return result
+
+
+async def generate_band_ready_message(report_context: dict, intelligence: dict) -> dict:
+    """
+    Generates a final message that can later be sent to Band.
+    """
+    criticality = intelligence.get("criticality", {})
+    quality = intelligence.get("quality_check", {})
+    confidence = float(criticality.get("overall_confidence", 0.75))
+    status = "COMPLETE"
+    if quality.get("status") == "not_ready":
+        status = "NEEDS_REVIEW"
+    elif quality.get("status") == "ready_with_warnings":
+        status = "COMPLETE_WITH_WARNINGS"
+
+    message = (
+        f"HazardMind Report Agent complete for {report_context.get('event_id')} "
+        f"({report_context.get('location')}, {report_context.get('hazard_type')}). "
+        f"Criticality: {criticality.get('criticality', 'high')}; "
+        f"confidence: {round(confidence * 100)}%. "
+        f"Summary: {intelligence.get('decision_brief', {}).get('official_summary') or report_context.get('report', {}).get('summary')}"
+    )
+    return {
+        "target": "@muhammad-abdullah",
+        "message": message,
+        "status": status,
+        "confidence": round(confidence, 2),
+        "_source": "template+intelligence",
+    }
+
+
+def strip_sources(intelligence: dict) -> tuple[dict, dict]:
+    cleaned = {}
+    sources = {}
+    source_keys = {
+        "criticality": "criticality",
+        "anomalies": "anomaly_check",
+        "map_narrative": "map_narrative",
+        "priority_timeline": "priority_recommendations",
+        "decision_brief": "decision_brief",
+        "quality_check": "quality_check",
+        "band_ready_message": "band_ready_message",
+    }
+    for key, value in intelligence.items():
+        if isinstance(value, dict):
+            item = dict(value)
+            sources[source_keys.get(key, key)] = item.pop("_source", "deterministic_fallback")
+            cleaned[key] = item
+        else:
+            cleaned[key] = value
+    return cleaned, sources
+
+
+def _json_system(role: str) -> str:
+    return f"{role} Return final JSON only. Do not include reasoning. Keep output concise. No markdown."
+
+
+def _json_prompt(task: str, context: dict, schema: dict) -> str:
+    return f"""
+{task}
+Return final JSON only. No markdown. No reasoning.
+Match this schema:
+{json.dumps(schema, indent=2)}
+
+Use concise user-facing rationales. Do not include hidden reasoning.
+
+Context:
+{json.dumps(_prompt_context(context), indent=2)}
+""".strip()
+
+
+def _prompt_context(context: dict) -> dict:
+    if "event" in context or "intelligence" in context:
+        return {
+            "event": _compact_context(context.get("event", {})),
+            "intelligence": context.get("intelligence", {}),
+        }
+    return _compact_context(context)
+
+
+def _compact_context(context: dict) -> dict:
+    return {
+        "event_id": context.get("event_id"),
+        "location": context.get("location"),
+        "hazard_type": context.get("hazard_type"),
+        "overall_severity": context.get("overall_severity"),
+        "satellite": context.get("satellite"),
+        "analysis": {
+            "index_type": context.get("analysis", {}).get("index_type"),
+            "mean_value": context.get("analysis", {}).get("mean_value"),
+            "affected_area_km2": context.get("analysis", {}).get("affected_area_km2"),
+            "damage_percent": context.get("analysis", {}).get("damage_percent"),
+            "total_zones": context.get("analysis", {}).get("total_zones"),
+            "zone_features": len(context.get("analysis", {}).get("zones", {}).get("features", [])),
+        },
+        "hazard": context.get("hazard"),
+        "impact": context.get("impact"),
+        "routes": {
+            "evacuation_route_count": len(context.get("routes", {}).get("evacuation_routes", {}).get("features", []))
+        },
+        "report": {
+            "summary": context.get("report", {}).get("summary"),
+            "recommendations": context.get("report", {}).get("recommendations", []),
+            "pdf_url": context.get("report", {}).get("pdf_url"),
+            "map_url": context.get("report", {}).get("map_url"),
+        },
+    }
+
+
+def _extract_json(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def _as_list(value, fallback: list[str]) -> list[str]:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if cleaned:
+            return cleaned
+    return fallback
+
+
+def _as_bool(value, fallback: bool) -> bool:
+    return value if isinstance(value, bool) else fallback
+
+
+def _as_confidence(value, fallback: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _merge_lists(first: list[str], second) -> list[str]:
+    merged = []
+    seen = set()
+    for value in [*(first or []), *(second if isinstance(second, list) else [])]:
+        text = str(value).strip()
+        if text and text.lower() not in seen:
+            merged.append(text)
+            seen.add(text.lower())
+    return merged
+
+
+def _coerce_criticality(data: dict, fallback: dict) -> dict:
+    criticality = str(data.get("criticality") or fallback["criticality"]).lower()
+    if criticality not in {"low", "normal", "high", "critical"}:
+        criticality = fallback["criticality"]
+    return {
+        "criticality": criticality,
+        "overall_confidence": _as_confidence(data.get("overall_confidence"), fallback["overall_confidence"]),
+        "escalation_required": _as_bool(data.get("escalation_required"), fallback["escalation_required"]),
+        "rationale": str(data.get("rationale") or fallback["rationale"]),
+        "trigger_factors": _as_list(data.get("trigger_factors"), fallback["trigger_factors"]),
+    }
+
+
+def _coerce_anomalies(data: dict, fallback: dict) -> dict:
+    anomalies = data.get("anomalies")
+    if not isinstance(anomalies, list):
+        anomalies = fallback["anomalies"]
+    cleaned = []
+    for item in anomalies:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {
+                "type": str(item.get("type") or "other"),
+                "severity": str(item.get("severity") or "low"),
+                "description": str(item.get("description") or ""),
+                "recommended_handling": str(item.get("recommended_handling") or ""),
+            }
+        )
+    return {
+        "anomalies_detected": _as_bool(data.get("anomalies_detected"), bool(cleaned)),
+        "anomalies": cleaned,
+    }
+
+
+def _coerce_map_narrative(data: dict, fallback: dict) -> dict:
+    return {
+        "map_narrative": str(data.get("map_narrative") or fallback["map_narrative"]),
+        "key_spatial_findings": _as_list(data.get("key_spatial_findings"), fallback["key_spatial_findings"]),
+        "hotspots": _as_list(data.get("hotspots"), fallback["hotspots"]),
+        "map_limitations": _as_list(data.get("map_limitations"), fallback["map_limitations"]),
+    }
+
+
+def _coerce_priority_timeline(data: dict, fallback: dict) -> dict:
+    return {
+        "next_6_hours": _as_list(data.get("next_6_hours"), fallback["next_6_hours"]),
+        "next_24_hours": _as_list(data.get("next_24_hours"), fallback["next_24_hours"]),
+        "next_72_hours": _as_list(data.get("next_72_hours"), fallback["next_72_hours"]),
+        "resource_priorities": _as_list(data.get("resource_priorities"), fallback["resource_priorities"]),
+        "coordination_priorities": _as_list(data.get("coordination_priorities"), fallback["coordination_priorities"]),
+    }
+
+
+def _coerce_decision_brief(data: dict, fallback: dict) -> dict:
+    return {
+        "decision_brief": str(data.get("decision_brief") or fallback["decision_brief"]),
+        "official_summary": str(data.get("official_summary") or fallback["official_summary"]),
+        "key_decisions_required": _as_list(data.get("key_decisions_required"), fallback["key_decisions_required"]),
+        "human_review_required": _as_bool(data.get("human_review_required"), fallback["human_review_required"]),
+    }
+
+
+def _coerce_quality_check(data: dict, fallback: dict) -> dict:
+    checks = data.get("checks") if isinstance(data.get("checks"), dict) else fallback["checks"]
+    status = str(data.get("status") or fallback["status"])
+    if status not in {"ready", "ready_with_warnings", "not_ready"}:
+        status = fallback["status"]
+    return {
+        "status": status,
+        "checks": {key: bool(checks.get(key)) for key in fallback["checks"]},
+        "warnings": _as_list(data.get("warnings"), fallback["warnings"]) if data.get("warnings") else fallback["warnings"],
+        "blocking_issues": _as_list(data.get("blocking_issues"), fallback["blocking_issues"])
+        if data.get("blocking_issues")
+        else fallback["blocking_issues"],
+    }
+
+
+def _fallback_criticality(context: dict) -> dict:
+    flood_confidence = float(context.get("hazard", {}).get("confidence_scores", {}).get("flood", 0.75))
+    population = int(context.get("impact", {}).get("population_affected", 0))
+    hospitals = int(context.get("impact", {}).get("hospitals_at_risk", 0))
+    severity = str(context.get("overall_severity", "")).upper()
+    critical = severity == "CRITICAL" or population >= 250000 or hospitals >= 10
+    return {
+        "criticality": "critical" if critical else "high",
+        "overall_confidence": round(min(0.95, max(0.65, flood_confidence - 0.03)), 2),
+        "escalation_required": critical,
+        "rationale": (
+            f"{context.get('location')} shows {severity} {context.get('hazard_type', 'hazard').lower()} risk with "
+            f"{population:,} people exposed and {hospitals} hospitals at risk."
+        ),
+        "trigger_factors": [
+            f"Overall severity is {severity}",
+            f"Flood confidence is {round(flood_confidence * 100)}%",
+            f"Population affected is {population:,}",
+            f"Hospitals at risk: {hospitals}",
+        ],
+    }
+
+
+def _fallback_anomalies(context: dict) -> dict:
+    anomalies = []
+    if not context.get("analysis", {}).get("zones", {}).get("features"):
+        anomalies.append(
+            {
+                "type": "missing_area",
+                "severity": "high",
+                "description": "No hazard zone polygons are available for the event.",
+                "recommended_handling": "Require spatial validation before operational deployment.",
+            }
+        )
+    if context.get("satellite", {}).get("cloud_cover", 0) > 30 and context.get("satellite", {}).get("type") != "sentinel-1":
+        anomalies.append(
+            {
+                "type": "conflicting_data",
+                "severity": "medium",
+                "description": "Cloud cover is high but the selected satellite source is not SAR.",
+                "recommended_handling": "Verify sensor selection before finalizing map products.",
+            }
+        )
+    return {"anomalies_detected": bool(anomalies), "anomalies": anomalies}
+
+
+def _fallback_map_narrative(context: dict) -> dict:
+    return {
+        "map_narrative": (
+            "The risk map concentrates critical and high flood polygons inside the Peshawar analysis boundary, "
+            "with one evacuation route crossing the affected corridor and hospital markers near mapped flood zones."
+        ),
+        "key_spatial_findings": [
+            "FZ-01 is the critical deep-water hotspot inside the analysis boundary.",
+            "FZ-02 marks a high-severity water zone southwest of the critical zone.",
+            "The evacuation route intersects the mapped flood corridor and should be validated before mass movement.",
+        ],
+        "hotspots": ["FZ-01 critical zone", "Lady Reading Hospital access corridor", "FZ-02 high zone"],
+        "map_limitations": [
+            "Risk polygons are local demo outputs and require field validation.",
+            "Static map does not show live flood progression.",
+        ],
+    }
+
+
+def _fallback_priority_timeline(context: dict) -> dict:
+    return {
+        "next_6_hours": [
+            "Confirm evacuation route passability and deploy rescue teams to FZ-01.",
+            "Protect access to Lady Reading Hospital and stage medical surge support.",
+            "Issue targeted public alerts for critical and high flood zones.",
+        ],
+        "next_24_hours": [
+            "Clear blocked road corridors serving hospitals and shelters.",
+            "Open shelters outside the mapped flood boundary.",
+            "Validate flood extent with field teams and updated satellite tasking.",
+        ],
+        "next_72_hours": [
+            "Maintain SAR-based monitoring and update the dashboard with revised zones.",
+            "Transition from rescue to relief logistics and public-health surveillance.",
+            "Document facility and school impacts for recovery planning.",
+        ],
+        "resource_priorities": [
+            "Swift-water rescue assets",
+            "Medical surge teams and backup power",
+            "Road clearance equipment",
+            "Shelter supplies and water purification",
+        ],
+        "coordination_priorities": [
+            "Emergency operations center",
+            "Hospital administrators",
+            "Transport and public works teams",
+            "School and shelter coordinators",
+        ],
+    }
+
+
+def _fallback_decision_brief(context: dict, intelligence: dict) -> dict:
+    summary = (
+        f"{context.get('location')} requires immediate escalation for a {context.get('overall_severity')} "
+        f"{context.get('hazard_type', 'hazard').lower()} event affecting "
+        f"{int(context.get('impact', {}).get('population_affected', 0)):,} people. "
+        "Critical decisions are needed on evacuation routing, hospital continuity, road clearance, and shelter activation."
+    )
+    return {
+        "decision_brief": summary,
+        "official_summary": summary,
+        "key_decisions_required": [
+            "Authorize immediate evacuation support for critical flood zones.",
+            "Prioritize hospital access and medical continuity operations.",
+            "Assign road clearance resources to rescue and logistics corridors.",
+        ],
+        "human_review_required": False,
+    }
+
+
+def _fallback_quality_check(context: dict, intelligence: dict) -> dict:
+    recommendations = context.get("report", {}).get("recommendations", [])
+    confidence = intelligence.get("criticality", {}).get("overall_confidence", 0.0)
+    checks = {
+        "event_id_present": bool(context.get("event_id")),
+        "satellite_data_present": bool(context.get("satellite", {}).get("scene_id")),
+        "hazard_data_present": bool(context.get("hazard")),
+        "impact_data_present": bool(context.get("impact")),
+        "map_artifacts_present": bool(context.get("analysis", {}).get("zones", {}).get("features")),
+        "recommendations_present": bool(recommendations),
+        "confidence_above_threshold": confidence >= 0.7,
+    }
+    warnings = []
+    if not context.get("artifacts", {}).get("geojson_url"):
+        warnings.append("GeoJSON artifact URL is not available in local demo mode.")
+    if not context.get("report", {}).get("map_url"):
+        warnings.append("Map URL is generated later by the local artifact step.")
+    blocking = [label for label, passed in checks.items() if not passed and label != "map_artifacts_present"]
+    return {
+        "status": "not_ready" if blocking else ("ready_with_warnings" if warnings else "ready"),
+        "checks": checks,
+        "warnings": warnings,
+        "blocking_issues": blocking,
+    }
