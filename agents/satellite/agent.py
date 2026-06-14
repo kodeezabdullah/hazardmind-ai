@@ -437,6 +437,10 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
         result = process_satellite_imagery(
             selection, scenes, bbox, merged, event_id, token, disaster_type,
             city_geoms=city_geoms,
+            # Per-city artifacts: re-clip the merged mosaic to each city polygon
+            # and render individual PNGs + GeoJSON (multi-city AOIs only). The
+            # city_polys already carry {name, geojson}.
+            city_boundaries=city_polys,
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")
@@ -465,7 +469,7 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 f"need >= {result.get('min_required_percent')}%)" + note,
             )
 
-        # (h) Upload all artifacts to Cloudflare R2.
+        # (h) Upload all artifacts to Cloudflare R2 (merged AOI).
         urls = upload_all_results(
             event_id,
             {
@@ -475,6 +479,45 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 "geojson": result["geojson"],
             },
         )
+
+        # (h.2) Per-city artifacts (multi-city AOIs). Each city's PNGs + GeoJSON
+        # were rendered from the same mosaic and namespaced under
+        # <event_id>/cities/<slug>/; upload each set under the matching R2 prefix
+        # and surface a compact per-city summary + URLs for the hazard agent.
+        cities_payload = []
+        for city in result.get("cities", []) or []:
+            slug = city.get("slug") or "city"
+            city_urls = upload_all_results(
+                f"{event_id}/cities/{slug}",
+                {
+                    "true_color": city["png_paths"].get("true_color"),
+                    "index_map": city["png_paths"].get("index_map"),
+                    "classification": city["png_paths"].get("classification"),
+                    "geojson": city["geojson"],
+                },
+            )
+            cities_payload.append(
+                {
+                    "name": city.get("name"),
+                    "slug": slug,
+                    "affected_area_km2": city.get("affected_area_km2"),
+                    "water_percent": city.get("water_percent"),
+                    "mean_index": city.get("mean_index"),
+                    "class_counts": city.get("class_counts"),
+                    "valid_percent": city.get("valid_percent"),
+                    "bounds": city.get("bounds"),
+                    "true_color_url": city_urls["true_color_url"],
+                    "index_url": city_urls["index_url"],
+                    "classification_url": city_urls["classification_url"],
+                    "geojson_url": city_urls["geojson_url"],
+                }
+            )
+        if cities_payload:
+            logger.info(
+                "Uploaded %d per-city artifact set(s) for %s",
+                len(cities_payload),
+                event_id,
+            )
 
         # INTEGRATION POINT 4 — expert interpretation of the raw GIS numbers.
         index_stats = {
@@ -561,6 +604,10 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
             "geojson_url": urls["geojson_url"],
             "image_url": urls["classification_url"] or urls["true_color_url"],
             "cached": False,
+            # Per-city artifacts + summaries (multi-city AOIs). Each entry has
+            # its own PNGs/GeoJSON URLs and bounds, so the hazard agent and the
+            # frontend can show individual city layers, not just the merged one.
+            "cities": cities_payload,
             # Expert reasoning from the intelligence layer (point 4).
             "interpretation": interpretation,
             "confidence": confidence,

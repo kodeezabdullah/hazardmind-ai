@@ -30,6 +30,7 @@ Run this file directly for a small smoke test:
 
 import logging
 import os
+import re
 import tempfile
 import zipfile
 from typing import Optional
@@ -1213,8 +1214,130 @@ def _attempt_clip(
     if clipped is None:
         return None
 
+    # Stash the pre-clip stacked cube so the caller can re-clip the same
+    # imagery to individual city polygons without downloading/stacking again.
+    clipped["_stacked"] = stacked
     clipped["valid_percent"] = _valid_pixel_percent(clipped)
     return clipped
+
+
+def _slugify(name: str) -> str:
+    """Turn a city name into a filesystem/URL-safe slug for artifact paths."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return slug or "city"
+
+
+def _render_clip(
+    clipped: dict,
+    satellite_type: str,
+    disaster_type: str,
+    out_id: str,
+) -> Optional[dict]:
+    """Render the cheap tail for one clipped cube.
+
+    indices -> PNGs -> vectorize -> bounds. `out_id` namespaces the PNG output
+    directory (`<temp>/<out_id>/`), so callers pass `<event_id>` for the merged
+    result and `<event_id>/cities/<slug>` for a per-city one. Returns the
+    per-clip result dict (without `valid_percent`, which the caller sets) or
+    None if indices/PNG export fails.
+    """
+    indices = calculate_indices(clipped, satellite_type, disaster_type)
+    if indices is None:
+        logger.error("Index calculation failed for %s", out_id)
+        return None
+
+    pngs = export_png(indices, clipped, out_id, disaster_type)
+    if pngs is None:
+        logger.error("PNG export failed for %s", out_id)
+        return None
+
+    geojson = vectorize_classification(
+        indices["classification_array"],
+        clipped["transform"],
+        clipped["crs"],
+        disaster_type,
+        scheme_key=indices["scheme_key"],
+    )
+
+    return {
+        "satellite_type": satellite_type,
+        "index_type": indices["index_type"],
+        "water_percent": indices["water_percent"],
+        "mean_index": indices["mean_value"],
+        "class_counts": indices["class_counts"],
+        "affected_area_km2": geojson["total_area"],
+        "png_paths": pngs,
+        "geojson": geojson,
+        # Geographic extent of the PNGs, for map georeferencing. All PNGs from
+        # this clip share these bounds (same clip extent). See _compute_bounds.
+        "bounds": _compute_bounds(clipped),
+    }
+
+
+def _render_per_city(
+    stacked: Optional[dict],
+    satellite_type: str,
+    disaster_type: str,
+    event_id: str,
+    city_boundaries: list,
+) -> list:
+    """Re-clip the already-stacked mosaic to each city and render its artifacts.
+
+    Reuses the expensive stacked cube (no re-download). For each city boundary
+    (`{"name", "geojson"}`) it clips to that city's polygon, checks the polygon
+    actually has data (skips a city the imagery doesn't reach), and renders a
+    full artifact set namespaced under `<event_id>/cities/<slug>/`. Returns a
+    list of per-city result dicts; cities with no usable data are omitted.
+    """
+    if not stacked or not city_boundaries:
+        return []
+
+    out: list = []
+    for cb in city_boundaries:
+        name = cb.get("name") if isinstance(cb, dict) else None
+        geojson_geom = cb.get("geojson") if isinstance(cb, dict) else None
+        if not geojson_geom:
+            continue
+        slug = _slugify(name)
+
+        clipped = clip_to_polygon(stacked, geojson_geom)
+        if clipped is None:
+            logger.warning("Per-city clip failed for %s; skipping", name)
+            continue
+
+        valid = _valid_pixel_percent(clipped)
+        if valid < MIN_VALID_PIXEL_PERCENT:
+            logger.info(
+                "City %s has only %.2f%% valid pixels (< %.1f%%); imagery does "
+                "not reach it, skipping per-city render",
+                name,
+                valid,
+                MIN_VALID_PIXEL_PERCENT,
+            )
+            continue
+
+        city_result = _render_clip(
+            clipped,
+            satellite_type,
+            disaster_type,
+            f"{event_id}/cities/{slug}",
+        )
+        if city_result is None:
+            logger.warning("Per-city render failed for %s; skipping", name)
+            continue
+
+        city_result["name"] = name
+        city_result["slug"] = slug
+        city_result["valid_percent"] = round(valid, 2)
+        out.append(city_result)
+        logger.info(
+            "Per-city render for %s: %.2f km^2 affected, %.1f%% valid",
+            name,
+            city_result["affected_area_km2"],
+            valid,
+        )
+
+    return out
 
 
 def process_satellite_imagery(
@@ -1226,6 +1349,7 @@ def process_satellite_imagery(
     token: str,
     disaster_type: str,
     city_geoms=None,
+    city_boundaries=None,
 ) -> Optional[dict]:
     """Run the full remote-sensing pipeline, coverage-aware with fallback.
 
@@ -1254,9 +1378,17 @@ def process_satellite_imagery(
             given, the mosaic uses greedy set-cover to spread scenes across all
             cities instead of taking the top-N by score (which can bunch on one
             city and leave scattered cities uncovered).
+        city_boundaries: optional list of per-city `{"name", "geojson"}` dicts.
+            When there is more than one city, the accepted mosaic is re-clipped
+            to each city polygon and a per-city artifact set (PNGs + GeoJSON +
+            bounds, namespaced under `<event_id>/cities/<slug>/`) is rendered
+            and returned under the result's `cities` key. The expensive
+            download+stack is reused, so this is cheap.
 
     Returns the result dict on success, a `coverage_insufficient` marker if no
-    candidate has enough valid data, or None if a stage hard-fails.
+    candidate has enough valid data, or None if a stage hard-fails. On success
+    the result carries the merged-AOI artifacts plus, for a multi-city AOI, a
+    `cities` list of per-city artifact sets.
     """
     satellite_type = selection.get("satellite_type", "sentinel-2")
 
@@ -1331,41 +1463,39 @@ def process_satellite_imagery(
             "Candidate (%s) accepted with %.2f%% valid pixels", kind, valid
         )
 
-        indices = calculate_indices(clipped, satellite_type, disaster_type)
-        if indices is None:
-            logger.error("Aborting pipeline: index calculation failed")
-            return None
-
-        pngs = export_png(indices, clipped, event_id, disaster_type)
-        if pngs is None:
-            logger.error("Aborting pipeline: PNG export failed")
-            return None
-
-        geojson = vectorize_classification(
-            indices["classification_array"],
-            clipped["transform"],
-            clipped["crs"],
-            disaster_type,
-            scheme_key=indices["scheme_key"],
+        # Render the cheap tail (indices -> PNGs -> vectorize -> bounds) for the
+        # whole merged AOI.
+        merged_result = _render_clip(
+            clipped, satellite_type, disaster_type, event_id
         )
+        if merged_result is None:
+            logger.error("Aborting pipeline: merged render failed")
+            return None
+        merged_result["valid_percent"] = round(valid, 2)
 
-        bounds = _compute_bounds(clipped)
+        # Per-city artifacts. The expensive download+stack is already done; for
+        # a multi-city AOI we re-clip the *same* stacked mosaic to each city
+        # polygon and render its own PNGs + GeoJSON. This is far cheaper than a
+        # fresh search per city and gives the hazard agent individual,
+        # easy-to-consume layers per city (in addition to the merged result).
+        if city_boundaries and len(city_boundaries) > 1:
+            cities = _render_per_city(
+                stacked=clipped.get("_stacked"),
+                satellite_type=satellite_type,
+                disaster_type=disaster_type,
+                event_id=event_id,
+                city_boundaries=city_boundaries,
+            )
+            if cities:
+                merged_result["cities"] = cities
+                logger.info(
+                    "Rendered %d per-city artifact set(s) for %s",
+                    len(cities),
+                    event_id,
+                )
 
         logger.info("Satellite imagery pipeline complete for %s", event_id)
-        return {
-            "satellite_type": satellite_type,
-            "index_type": indices["index_type"],
-            "water_percent": indices["water_percent"],
-            "mean_index": indices["mean_value"],
-            "class_counts": indices["class_counts"],
-            "affected_area_km2": geojson["total_area"],
-            "valid_percent": round(valid, 2),
-            "png_paths": pngs,
-            "geojson": geojson,
-            # Geographic extent of the PNGs, for map georeferencing. All PNGs
-            # share these bounds (same clip extent). See _compute_bounds.
-            "bounds": bounds,
-        }
+        return merged_result
 
     # Every candidate was too sparse to be usable.
     logger.error(

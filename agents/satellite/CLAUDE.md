@@ -41,6 +41,57 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 12: Per-city artifacts for multi-city AOIs — DONE
+
+For a multi-city AOI the merged whole-area PNG/GeoJSON is awkward to consume —
+the frontend and the hazard agent want **individual layers per city**. The
+expensive part of the pipeline is download + stack (hundreds of MB for the
+mosaic); clip, indices, PNG export and vectorization are all cheap and operate
+on the already-stacked cube. So we **stack once, then re-clip the same mosaic to
+each city polygon** and render a full artifact set per city — far cheaper than a
+fresh search/download per city.
+
+**`processor.py` refactor.**
+- The cheap tail (indices → PNGs → vectorize → bounds) is extracted into
+  `_render_clip(clipped, satellite_type, disaster_type, out_id)`, where `out_id`
+  namespaces the PNG output dir (`<temp>/<out_id>/`). The merged result and each
+  city now go through the same renderer.
+- `_attempt_clip` stashes the pre-clip stacked cube on the clipped dict
+  (`clipped["_stacked"]`). `clip_to_polygon` does **not** mutate its input
+  `stacked` (it builds a fresh dict with `.copy()`'d band arrays), so the same
+  cube can be re-clipped to many city polygons safely.
+- `_render_per_city(stacked, satellite_type, disaster_type, event_id,
+  city_boundaries)` loops the city boundaries (`{"name","geojson"}`), clips the
+  shared `stacked` to each city polygon, **skips a city the imagery doesn't reach**
+  (valid pixels `< MIN_VALID_PIXEL_PERCENT`), and renders its artifacts under
+  `<event_id>/cities/<slug>/` (slug via `_slugify`). Returns a list of per-city
+  result dicts (each with `name/slug/affected_area_km2/water_percent/mean_index/
+  class_counts/valid_percent/png_paths/geojson/bounds`).
+- `process_satellite_imagery` gained a `city_boundaries` param. When there is
+  **more than one** city, the accepted mosaic is fed to `_render_per_city` and
+  the per-city sets are attached to the result under `cities`. The merged
+  whole-AOI result is **kept** (backward compatible) — per-city is additive.
+  A single-city AOI is unchanged (no redundant `cities`).
+
+**`agent.py` wiring.** `run_pipeline` passes `city_boundaries=city_polys` (the
+boundaries already carry `{name, geojson}`). After uploading the merged set it
+loops `result["cities"]`, uploading each via `upload_all_results(
+f"{event_id}/cities/{slug}", {...})` so the R2 keys mirror the temp layout:
+`events/<event_id>/cities/<slug>/{true_color,index_map,classification}.png` +
+`zones.geojson`. A compact per-city summary + URLs (+ each city's own `bounds`)
+is surfaced in the result payload under `cities`, alongside the merged
+artifacts. `r2_upload.upload_all_results` was reused as-is — it already
+namespaces every key by the `event_id` it's given, so the slashed per-city id
+nests the objects correctly.
+
+**Verification.** Unit-tested `_render_per_city` on a synthetic WGS84 S2 cube
+(west half wet, east half dry) with two city boxes: West City → 100% water with
+hazard zones, East City → 0% water (correctly clean), each writing its own three
+PNGs under `cities/<slug>/` with independent bounds — proving each city is
+clipped to its own polygon, not sharing the merged result. Directory layout on
+disk confirmed: `<event_id>/cities/<slug>/{true_color,index_map,
+classification}.png`.
+
 ### Step 11: LLM intelligence layer (`intelligence.py`) — DONE
 
 The agent is no longer a pure GIS tool — every decision point can now consult an
