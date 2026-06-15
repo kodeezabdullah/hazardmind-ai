@@ -27,7 +27,6 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 load_dotenv()
@@ -290,8 +289,3 @@ async def health_check():
         "mode": "mock" if os.environ.get("USE_MOCK_BAND", "true").lower() == "true" else "live",
         "band_agent_id": os.environ.get("BAND_AGENT_ID", "not-set"),
     }
-
-
-_static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(_static_dir):
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
