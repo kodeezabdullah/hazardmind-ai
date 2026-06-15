@@ -1,6 +1,748 @@
-async def generate_report(event_id: str):
-    return {
-        "map_url": "",
+import asyncio
+import json
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from llm_clients import (
+    generate_detailed_report_with_aiml_fallback,
+    generate_composite_detailed_report_with_featherless,
+    generate_executive_summary_with_aiml,
+    model_cascade_enabled,
+)
+from intelligence import (
+    assess_event_criticality,
+    detect_anomalies,
+    generate_band_ready_message,
+    generate_decision_brief,
+    generate_map_narrative,
+    generate_priority_recommendations,
+    run_quality_check,
+    strip_sources,
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+class LLMGenerationError(RuntimeError):
+    pass
+
+MOCK_EVENT_DATA = {
+    "event_id": "demo-peshawar-flood",
+    "location": "Peshawar, Pakistan",
+    "hazard_type": "Flood",
+    "overall_severity": "CRITICAL",
+    "satellite": {
+        "type": "sentinel-1",
+        "reason": "cloud_cover_above_30_percent_sar_selected",
+        "cloud_cover": 42,
+        "scene_id": "S1A_DEMO_PESHAWAR_20260613",
+    },
+    "boundaries": {
+        "region_boundary": {
+            "type": "FeatureCollection",
+            "features": [],
+        },
+        "risk_cities": ["Peshawar"],
+        "merged_polygon": {
+            "type": "Feature",
+            "properties": {"name": "Peshawar analysis area"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [
+                    [
+                        [71.40, 33.90],
+                        [71.65, 33.90],
+                        [71.65, 34.10],
+                        [71.40, 34.10],
+                        [71.40, 33.90],
+                    ]
+                ],
+            },
+        },
+        "bbox": [71.40, 33.90, 71.65, 34.10],
+    },
+    "artifacts": {
+        "true_color_url": "",
+        "index_url": "",
+        "classification_url": "",
+        "geojson_url": "",
+    },
+    "analysis": {
+        "index_type": "SAR VV/VH ratio",
+        "mean_value": 0.24,
+        "affected_area_km2": 153.37,
+        "damage_percent": 24.3,
+        "total_zones": 22,
+        "zones": {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "zone_id": "FZ-01",
+                        "severity": "critical",
+                        "class_name": "deep_water",
+                        "area_km2": 12.4,
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [71.47, 33.96],
+                                [71.56, 33.96],
+                                [71.56, 34.03],
+                                [71.47, 34.03],
+                                [71.47, 33.96],
+                            ]
+                        ],
+                    },
+                },
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "zone_id": "FZ-02",
+                        "severity": "high",
+                        "class_name": "water",
+                        "area_km2": 8.7,
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [
+                            [
+                                [71.43, 33.93],
+                                [71.50, 33.93],
+                                [71.50, 33.98],
+                                [71.43, 33.98],
+                                [71.43, 33.93],
+                            ]
+                        ],
+                    },
+                },
+            ],
+        },
+    },
+    "hazard": {
+        "flood_risk": "CRITICAL",
+        "earthquake_risk": "MEDIUM",
+        "landslide_risk": "LOW",
+        "confidence_scores": {
+            "flood": 0.91,
+            "earthquake": 0.67,
+            "landslide": 0.54,
+        },
+    },
+    "impact": {
+        "population_affected": 540000,
+        "hospitals_at_risk": 14,
+        "roads_blocked_km": 89,
+        "schools_affected": 67,
+        "vulnerability_score": 8.2,
+        "critical_facilities": [
+            {
+                "name": "Lady Reading Hospital",
+                "type": "hospital",
+                "lat": 34.015,
+                "lng": 71.570,
+                "risk": "HIGH",
+            },
+            {
+                "name": "Khyber Teaching Hospital",
+                "type": "hospital",
+                "lat": 33.998,
+                "lng": 71.487,
+                "risk": "MEDIUM",
+            },
+        ],
+    },
+    "routes": {
+        "evacuation_routes": {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"name": "Evacuation Route 1"},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [71.49, 33.97],
+                            [71.53, 34.00],
+                            [71.59, 34.06],
+                        ],
+                    },
+                }
+            ],
+        }
+    },
+    "agent_log": [
+        {
+            "agent": "hazardmind-satellite",
+            "status": "complete",
+            "message": "Sentinel-1 SAR selected due to cloud cover above 30%. Zones vectorized and uploaded.",
+            "timestamp": "2026-06-13T18:00:00Z",
+        },
+        {
+            "agent": "hazardmind-hazard",
+            "status": "complete",
+            "message": "Flood risk classified as CRITICAL. Earthquake and landslide risks assessed.",
+            "timestamp": "2026-06-13T18:01:00Z",
+        },
+        {
+            "agent": "hazardmind-impact",
+            "status": "complete",
+            "message": "Population and infrastructure exposure calculated.",
+            "timestamp": "2026-06-13T18:02:00Z",
+        },
+        {
+            "agent": "hazardmind-report",
+            "status": "complete",
+            "message": "Executive report and dashboard output generated.",
+            "timestamp": "2026-06-13T18:03:00Z",
+        },
+    ],
+}
+
+RECOMMENDATIONS = [
+    "Prioritize evacuation in critical flood zones.",
+    "Deploy emergency medical support near hospitals at risk.",
+    "Clear blocked road corridors for rescue access.",
+    "Open temporary shelters for displaced families.",
+    "Monitor flood expansion using updated satellite imagery.",
+]
+
+RESPONSE_PRIORITIES = [
+    "Activate evacuation support for FZ-01 and FZ-02.",
+    "Protect hospital access and stage medical surge teams near high-risk facilities.",
+    "Clear blocked road corridors needed for rescue and logistics movement.",
+]
+
+ASSUMPTIONS = [
+    "Satellite, hazard, and impact values are local demo data until upstream agents publish live outputs.",
+    "Risk zone geometries are simplified mock polygons for dashboard and report demonstration.",
+    "Facility and route coordinates are approximate and intended for prototype visualization.",
+]
+
+LIMITATIONS = [
+    "No live Band messages are consumed in this local demo run.",
+    "No field validation, hydrologic model, or live basemap tiles are used for artifact generation.",
+    "Impact estimates should be treated as decision-support indicators, not official counts.",
+]
+
+
+def build_detailed_report_prompt(data: dict) -> str:
+    scenario_json = json.dumps(data, indent=2)
+    return f"""
+Generate the detailed operational report body for a disaster response dashboard.
+Return strict JSON only. Do not include markdown or commentary.
+
+Required JSON shape:
+{{
+  "detailed_body": "string",
+  "recommendations": ["string"],
+  "response_priorities": ["string"],
+  "assumptions": ["string"],
+  "limitations": ["string"]
+}}
+
+Focus on detailed incident analysis, operational risk interpretation, recommendations,
+response priorities, assumptions, and limitations.
+
+Use this full scenario data:
+{scenario_json}
+""".strip()
+
+
+def build_executive_summary_prompt(data: dict, detailed_report: dict) -> str:
+    scenario_json = json.dumps(data, indent=2)
+    detailed_json = json.dumps(detailed_report, indent=2)
+    return f"""
+Write a short executive summary for senior emergency decision makers.
+Return only 3 to 5 polished sentences, with no markdown.
+Use concise language suitable for the dashboard and PDF.
+
+Base event data:
+{scenario_json}
+
+Detailed operational report:
+{detailed_json}
+""".strip()
+
+
+async def generate_report(event_id: str, context: dict | None = None, use_llm: bool = True):
+    if context is None and event_id != MOCK_EVENT_DATA["event_id"]:
+        raise ValueError(
+            f"Only local mock event '{MOCK_EVENT_DATA['event_id']}' is available right now."
+        )
+
+    load_dotenv(BASE_DIR / ".env")
+
+    source_context = context or MOCK_EVENT_DATA
+    result = json.loads(json.dumps(source_context))
+    result["event_id"] = event_id
+    agent_log = [
+        _report_log("Report Agent received event context", "2026-06-13T18:03:00Z"),
+    ]
+
+    if not use_llm:
+        return generate_offline_contract_report(result, agent_log)
+
+    detailed_report, detailed_source, featherless_fallback_used, featherless_model = await generate_detailed_report(result)
+    if detailed_source.startswith("featherless:"):
+        agent_log.append(
+            _report_log("Featherless composite generated detailed disaster report", "2026-06-13T18:03:20Z")
+        )
+    else:
+        agent_log.append(
+            _report_log("Featherless cascades unavailable, AI/ML fallback used", "2026-06-13T18:03:20Z")
+        )
+
+    summary, summary_source, summary_fallback_used = await generate_executive_summary(
+        result,
+        detailed_report,
+    )
+    _assert_required_report_sections(detailed_report, detailed_source, summary, summary_source)
+    agent_log.append(
+        _report_log("AI/ML generated executive summary", "2026-06-13T18:03:40Z")
+        if summary_source == "aiml"
+        else _report_log("AI/ML unavailable, deterministic executive summary used", "2026-06-13T18:03:40Z")
+    )
+
+    result["report"] = {
+        "summary": summary,
+        "detailed_body": detailed_report["detailed_body"],
+        "technical_analysis": detailed_report["technical_analysis"],
+        "recommendations": detailed_report["recommendations"],
+        "response_priorities": detailed_report["response_priorities"],
+        "assumptions": detailed_report["assumptions"],
+        "limitations": detailed_report["limitations"],
         "pdf_url": "",
-        "summary": "",
+        "map_url": "",
+        "recommended_response_level": determine_recommended_response_level(result),
+    }
+    result["recommended_response_level"] = result["report"]["recommended_response_level"]
+
+    intelligence_with_sources = await generate_intelligence(result)
+    intelligence, intelligence_sources = strip_sources(intelligence_with_sources)
+    _assert_live_intelligence_sources(intelligence_sources, intelligence)
+    decision_summary = intelligence.get("decision_brief", {}).get("official_summary")
+    if decision_summary and str(intelligence_sources.get("decision_brief", "")).startswith("aiml:"):
+        result["report"]["summary"] = decision_summary
+        summary_source = intelligence_sources.get("decision_brief", summary_source)
+
+    priority_timeline = intelligence.get("priority_timeline", {})
+    result["report"]["recommendations"] = merge_recommendations(
+        result["report"]["recommendations"],
+        priority_timeline.get("next_6_hours", []),
+        priority_timeline.get("resource_priorities", []),
+    )
+
+    result["intelligence"] = intelligence
+    result["model_sources"] = {
+        "detailed_report": detailed_source,
+        "executive_summary": summary_source,
+        "fallback_used": featherless_fallback_used or summary_fallback_used,
+        "featherless_model": featherless_model,
+        "intelligence": {
+            "criticality": intelligence_sources.get("criticality", "deterministic_fallback"),
+            "anomaly_check": intelligence_sources.get("anomaly_check", "deterministic_fallback"),
+            "map_narrative": intelligence_sources.get("map_narrative", "deterministic_fallback"),
+            "priority_recommendations": intelligence_sources.get(
+                "priority_recommendations", "deterministic_fallback"
+            ),
+            "decision_brief": intelligence_sources.get("decision_brief", "deterministic_fallback"),
+            "quality_check": intelligence_sources.get("quality_check", "deterministic_fallback"),
+            "band_ready_message": intelligence_sources.get("band_ready_message", "deterministic_template"),
+        },
+    }
+    agent_log.extend(
+        [
+            _report_log("Criticality assessed", "2026-06-13T18:03:45Z"),
+            _report_log("Anomalies checked", "2026-06-13T18:03:50Z"),
+            _report_log("Map narrative generated", "2026-06-13T18:03:55Z"),
+            _report_log("Priority timeline generated", "2026-06-13T18:04:00Z"),
+            _report_log("Decision brief generated with Opus", "2026-06-13T18:04:05Z"),
+            _report_log("Quality check completed", "2026-06-13T18:04:10Z"),
+            _report_log("Band-ready final message prepared", "2026-06-13T18:04:15Z"),
+        ]
+    )
+    result["agent_log"] = agent_log
+
+    return _frontend_ready_result(result)
+
+
+async def generate_intelligence(report_context: dict) -> dict:
+    criticality = await assess_event_criticality(report_context)
+    anomalies, map_narrative, priority_timeline = await asyncio.gather(
+        detect_anomalies(report_context),
+        generate_map_narrative(report_context),
+        generate_priority_recommendations(report_context),
+    )
+    partial = {"criticality": criticality}
+    partial.update(
+        {
+            "anomalies": anomalies,
+            "map_narrative": map_narrative,
+            "priority_timeline": priority_timeline,
+        }
+    )
+    decision_brief = await generate_decision_brief(report_context, partial)
+    partial["decision_brief"] = decision_brief
+    quality_check = await run_quality_check(report_context, partial)
+    partial["quality_check"] = quality_check
+    partial["band_ready_message"] = await generate_band_ready_message(report_context, partial)
+    return partial
+
+
+def generate_offline_contract_report(result: dict, agent_log: list[dict]) -> dict:
+    detailed_report = deterministic_detailed_report(result)
+    summary = deterministic_summary(result)
+    response_level = determine_recommended_response_level(result)
+    result["report"] = {
+        "summary": summary,
+        "detailed_body": detailed_report["detailed_body"],
+        "technical_analysis": detailed_report["technical_analysis"],
+        "recommendations": detailed_report["recommendations"],
+        "response_priorities": detailed_report["response_priorities"],
+        "assumptions": detailed_report["assumptions"],
+        "limitations": detailed_report["limitations"],
+        "pdf_url": "",
+        "map_url": "",
+        "recommended_response_level": response_level,
+    }
+    result["recommended_response_level"] = response_level
+    result["intelligence"] = deterministic_intelligence(result)
+    result["model_sources"] = {
+        "detailed_report": "offline_contract_test",
+        "executive_summary": "offline_contract_test",
+        "fallback_used": False,
+        "featherless_model": "offline_contract_test",
+        "intelligence": {
+            "criticality": "offline_contract_test",
+            "anomaly_check": "offline_contract_test",
+            "map_narrative": "offline_contract_test",
+            "priority_recommendations": "offline_contract_test",
+            "decision_brief": "offline_contract_test",
+            "quality_check": "offline_contract_test",
+            "band_ready_message": "offline_contract_test",
+        },
+    }
+    agent_log.extend(
+        [
+            _report_log("Offline contract-test mode used deterministic report text", "2026-06-13T18:03:20Z"),
+            _report_log("Offline intelligence and Band-ready message prepared", "2026-06-13T18:03:40Z"),
+        ]
+    )
+    result["agent_log"] = agent_log
+    return _frontend_ready_result(result)
+
+
+def deterministic_intelligence(context: dict) -> dict:
+    flood_confidence = _number(context.get("hazard", {}).get("confidence_scores", {}).get("flood"), default=0.75)
+    overall_confidence = _number(context.get("impact", {}).get("overall_confidence"), flood_confidence, default=0.75)
+    population = int(_number(context.get("impact", {}).get("population_affected"), context.get("impact", {}).get("total_affected"), default=0))
+    hospitals = int(_number(context.get("impact", {}).get("hospitals_at_risk"), default=0))
+    severity = str(context.get("overall_severity") or "UNKNOWN").upper()
+    official_summary = deterministic_summary(context)
+    return {
+        "criticality": {
+            "criticality": "critical" if severity == "CRITICAL" or hospitals >= 10 or population >= 250000 else "high",
+            "overall_confidence": round(max(0.0, min(0.99, overall_confidence)), 2),
+            "escalation_required": severity == "CRITICAL" or hospitals >= 10 or population >= 250000,
+            "rationale": f"{context.get('location')} shows {severity} {context.get('hazard_type', 'hazard').lower()} risk with {population:,} people exposed and {hospitals} hospitals at risk.",
+            "trigger_factors": [
+                f"Overall severity is {severity}",
+                f"Flood confidence is {round(flood_confidence * 100)}%",
+                f"Population affected is {population:,}",
+                f"Hospitals at risk: {hospitals}",
+            ],
+        },
+        "anomalies": {"anomalies_detected": False, "anomalies": []},
+        "map_narrative": {
+            "map_narrative": (
+                f"The offline contract-test map narrative places {context.get('analysis', {}).get('total_zones', 0)} "
+                f"hazard zones inside the {context.get('location')} analysis area and keeps routes, facilities, "
+                "and boundaries in GeoJSON-ready form."
+            ),
+            "key_spatial_findings": [
+                "Critical and high zones remain the priority overlay layers.",
+                "Evacuation route geometry is preserved for frontend MapLibre rendering.",
+                "Facility exposure remains visible for report and dashboard checks.",
+            ],
+            "hotspots": ["Critical flood zone", "Hospital access corridor"],
+            "map_limitations": ["Offline contract mode uses deterministic local text and fixture-compatible geometry."],
+        },
+        "priority_timeline": {
+            "next_6_hours": RESPONSE_PRIORITIES,
+            "next_24_hours": [
+                "Clear blocked routes serving hospitals and shelters.",
+                "Refresh satellite and hazard-zone overlays.",
+                "Validate population exposure with local authorities.",
+            ],
+            "next_72_hours": [
+                "Maintain updated public-risk communications.",
+                "Transition response operations into relief logistics.",
+                "Document infrastructure damage for recovery planning.",
+            ],
+            "resource_priorities": [
+                "Rescue teams",
+                "Medical surge support",
+                "Road clearance equipment",
+                "Shelter supplies",
+            ],
+            "coordination_priorities": [
+                "Emergency operations center",
+                "Hospital administrators",
+                "Transport authorities",
+                "Shelter coordinators",
+            ],
+        },
+        "decision_brief": {
+            "decision_brief": official_summary,
+            "official_summary": official_summary,
+            "key_decisions_required": [
+                "Authorize evacuation support for critical flood zones.",
+                "Prioritize hospital access and road clearance.",
+                "Confirm shelter activation for exposed households.",
+            ],
+            "human_review_required": False,
+        },
+        "quality_check": {
+            "status": "ready",
+            "checks": {
+                "event_id_present": bool(context.get("event_id")),
+                "satellite_data_present": bool(context.get("satellite", {}).get("scene_id")),
+                "hazard_data_present": bool(context.get("hazard")),
+                "impact_data_present": bool(context.get("impact")),
+                "map_artifacts_present": bool(context.get("analysis", {}).get("zones", {}).get("features")),
+                "recommendations_present": True,
+                "confidence_above_threshold": overall_confidence >= 0.7,
+            },
+            "warnings": [],
+            "blocking_issues": [],
+        },
+        "band_ready_message": {
+            "target": "@hazardmind-orchestrator",
+            "message": f"HazardMind Report Agent offline contract test complete for {context.get('event_id')}. Summary: {official_summary}",
+            "status": "COMPLETE",
+            "confidence": round(overall_confidence, 2),
+        },
+    }
+
+
+def _frontend_ready_result(result: dict) -> dict:
+    return {
+        key: result[key]
+        for key in (
+            "event_id",
+            "location",
+            "hazard_type",
+            "overall_severity",
+            "satellite",
+            "boundaries",
+            "artifacts",
+            "analysis",
+            "hazard",
+            "impact",
+            "routes",
+            "report",
+            "intelligence",
+            "model_sources",
+            "recommended_response_level",
+            "agent_log",
+        )
+    }
+
+
+def merge_recommendations(*groups: list[str]) -> list[str]:
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in group or []:
+            cleaned = str(item).strip()
+            if cleaned and cleaned.lower() not in seen:
+                merged.append(cleaned)
+                seen.add(cleaned.lower())
+    return merged[:10]
+
+
+async def generate_detailed_report(data: dict) -> tuple[dict, str, bool, str]:
+    featherless_result = await generate_composite_detailed_report_with_featherless(data)
+    if featherless_result["ok"] and _all_components_are_live(featherless_result):
+        return (
+            featherless_result["data"],
+            featherless_result["source"],
+            False,
+            featherless_result["featherless_model"],
+        )
+
+    if not model_cascade_enabled():
+        raise LLMGenerationError("LLM generation failed: primary model did not produce required live detailed report sections.")
+
+    fallback_result = await generate_detailed_report_with_aiml_fallback(data)
+    if not fallback_result["ok"]:
+        raise LLMGenerationError(
+            "LLM generation failed: detailed report generation failed after Featherless cascade and AI/ML fallback."
+        )
+    return (
+        fallback_result["data"],
+        "aiml_fallback",
+        True,
+        fallback_result["featherless_model"],
+    )
+
+
+async def generate_executive_summary(data: dict, detailed_report: dict) -> tuple[str, str, bool]:
+    response = await generate_executive_summary_with_aiml(data, detailed_report)
+    if not response["ok"]:
+        raise LLMGenerationError("LLM generation failed: executive summary generation failed.")
+    return response["summary"], response["source"], not response["ok"]
+
+
+def _all_components_are_live(featherless_result: dict) -> bool:
+    component_sources = featherless_result.get("component_sources") or {}
+    if not component_sources:
+        return True
+    return all(str(source).startswith("featherless:") for source in component_sources.values())
+
+
+def _assert_live_intelligence_sources(intelligence_sources: dict, intelligence: dict) -> None:
+    failed = []
+    anomaly_source = str(intelligence_sources.get("anomaly_check", "deterministic_fallback"))
+    anomaly_check = intelligence.get("anomalies", {}) if isinstance(intelligence.get("anomalies"), dict) else {}
+    if anomaly_source == "data_validation" and anomaly_check.get("status") == "clear":
+        pass
+    elif anomaly_source == "llm_required_failed" or anomaly_source.startswith("deterministic_fallback"):
+        failed.append("anomaly_check")
+    if failed:
+        raise LLMGenerationError(
+            "LLM generation failed: required intelligence sections did not receive live model output "
+            f"({', '.join(sorted(failed))})."
+        )
+
+
+def _assert_required_report_sections(detailed_report: dict, detailed_source: str, summary: str, summary_source: str) -> None:
+    failed = []
+    if str(detailed_source).startswith("deterministic_fallback") or not detailed_report.get("detailed_body"):
+        failed.append("detailed_report")
+    if not detailed_report.get("technical_analysis"):
+        failed.append("technical_analysis")
+    if not detailed_report.get("recommendations"):
+        failed.append("recommendations")
+    if str(summary_source).startswith("deterministic_fallback") or not str(summary).strip():
+        failed.append("executive_summary")
+    if failed:
+        raise LLMGenerationError(
+            "LLM generation failed: required report sections did not receive live model output "
+            f"({', '.join(sorted(failed))})."
+        )
+
+
+def normalize_detailed_report(text: str) -> dict:
+    try:
+        parsed = json.loads(extract_json(text))
+    except json.JSONDecodeError:
+        parsed = {"detailed_body": text}
+
+    return {
+        "detailed_body": str(parsed.get("detailed_body") or text or deterministic_detailed_report(MOCK_EVENT_DATA)["detailed_body"]),
+        "recommendations": list_or_default(parsed.get("recommendations"), RECOMMENDATIONS),
+        "response_priorities": list_or_default(parsed.get("response_priorities"), RESPONSE_PRIORITIES),
+        "assumptions": list_or_default(parsed.get("assumptions"), ASSUMPTIONS),
+        "limitations": list_or_default(parsed.get("limitations"), LIMITATIONS),
+    }
+
+
+def extract_json(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def list_or_default(value, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if cleaned:
+            return cleaned
+    return default
+
+
+def deterministic_detailed_report(data: dict) -> dict:
+    return {
+        "detailed_body": (
+            f"{data['location']} is experiencing a {data['overall_severity']} {data['hazard_type'].lower()} "
+            f"scenario with {data['analysis']['affected_area_km2']} km2 affected and "
+            f"{data['impact']['population_affected']:,} people exposed. Flood risk is classified as "
+            f"{data['hazard']['flood_risk']} with hospitals, roads, and schools requiring immediate operational attention."
+        ),
+        "technical_analysis": (
+            f"{data['satellite']['type']} imagery supports a {data['analysis']['index_type']} analysis with "
+            f"mean value {data['analysis']['mean_value']}, {data['analysis']['damage_percent']}% estimated damage, "
+            f"and {data['analysis']['total_zones']} mapped zones. Road blockage is estimated at "
+            f"{data['impact']['roads_blocked_km']} km with vulnerability score {data['impact']['vulnerability_score']}."
+        ),
+        "recommendations": RECOMMENDATIONS,
+        "response_priorities": RESPONSE_PRIORITIES,
+        "assumptions": ASSUMPTIONS,
+        "limitations": LIMITATIONS,
+    }
+
+
+def deterministic_summary(data: dict) -> str:
+    return (
+        f"Critical flood risk has been detected across high-density areas of {data['location']}. "
+        f"Satellite-derived classification identifies {data['analysis']['total_zones']} zones and "
+        f"{data['analysis']['affected_area_km2']} km2 of affected area, with "
+        f"{data['impact']['population_affected']:,} people exposed. Immediate evacuation, hospital support, "
+        "road clearance, and shelter activation are recommended."
+    )
+
+
+def determine_recommended_response_level(report_context: dict) -> str:
+    impact = report_context.get("impact", {})
+    severity = str(report_context.get("overall_severity") or "").upper()
+    total_affected = _number(
+        impact.get("total_affected"),
+        impact.get("population_affected"),
+        default=0,
+    )
+    high_risk_people = _number(impact.get("high_risk_people"), default=0)
+    hospitals_at_risk = _number(impact.get("hospitals_at_risk"), default=0)
+    vulnerability = str(impact.get("vulnerability_score") or "").upper()
+
+    if (
+        severity == "CRITICAL"
+        or hospitals_at_risk >= 10
+        or total_affected >= 1_000_000
+        or (vulnerability == "HIGH" and high_risk_people >= 100_000)
+    ):
+        return "NDMA Level-3"
+    if severity == "HIGH" or hospitals_at_risk >= 3 or total_affected >= 100_000:
+        return "NDMA Level-2"
+    return "NDMA Level-1"
+
+
+def _number(*values, default: float = 0) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _report_log(message: str, timestamp: str) -> dict:
+    return {
+        "agent": "hazardmind-report",
+        "status": "complete",
+        "message": message,
+        "timestamp": timestamp,
     }
