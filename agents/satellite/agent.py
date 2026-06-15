@@ -43,6 +43,8 @@ from boundary import (
     get_risk_city_boundaries,
     merge_risk_boundaries,
 )
+from confidence_tracker import ConfidenceTracker
+from cross_validator import CrossValidator
 from intelligence import SatelliteIntelligence
 from processor import process_satellite_imagery
 from r2_upload import check_demo_cache, upload_all_results
@@ -62,6 +64,11 @@ HAZARD_AGENT = "@hazardmind-hazard"
 # tool calls. Every method returns None on total failure, so the pipeline keeps
 # working on its deterministic defaults if the LLMs are unreachable.
 intelligence = SatelliteIntelligence()
+
+# Cross-validation layer (GDACS / USGS / cloud / index / coverage / Featherless
+# expert). Reuses the shared intelligence layer for its expert opinion. Each
+# check is best-effort, so an unreachable feed never blocks a handoff.
+cross_validator = CrossValidator(intelligence=intelligence)
 
 # Max recovery attempts per failing step before we give up / alert a human.
 MAX_STEP_ATTEMPTS = 3
@@ -145,6 +152,16 @@ class ProcessDisasterInput(BaseModel):
             "and detect ambiguity."
         ),
     )
+
+
+def _coerce_float(value) -> Optional[float]:
+    """Return ``value`` as a float, or ``None`` if it isn't numeric."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _error(event_id: str, message: str) -> str:
@@ -300,6 +317,10 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
     event_id = params.event_id
     location = params.location
     disaster_type = params.disaster_type
+
+    # Running confidence ledger for this event. Cross-validation feeds it
+    # evidence/concerns; the completion signal carries its overall score.
+    tracker = ConfidenceTracker()
 
     logger.info(
         "Processing event %s: %s / %s (magnitude=%s)",
@@ -530,6 +551,30 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 event_id,
             )
 
+        # CROSS-VALIDATION — check the satellite result against every reachable
+        # external source (GDACS / USGS / cloud / index physics / coverage /
+        # Featherless expert), feeding evidence + concerns into the confidence
+        # tracker. The bbox centroid drives the geographic feed lookups. Never
+        # raises — a failing feed is skipped.
+        validation_input = {
+            "affected_area_km2": result.get("affected_area_km2"),
+            "cloud_cover": selection.get("cloud_cover"),
+            "mean_ndwi": result.get("mean_index"),
+            "mean_index": result.get("mean_index"),
+            "water_percent": result.get("water_percent"),
+            "coverage_percent": result.get("valid_percent"),
+            "valid_percent": result.get("valid_percent"),
+        }
+        validations = cross_validator.validate_all(
+            validation_input, disaster_type, bbox, tracker
+        )
+        logger.info(
+            "Cross-validation: %d findings, confidence=%.2f, alert=%s",
+            len(validations),
+            tracker.overall_confidence(),
+            tracker.should_alert_team(),
+        )
+
         # INTEGRATION POINT 4 — expert interpretation of the raw GIS numbers.
         index_stats = {
             "mean_index": result.get("mean_index"),
@@ -560,23 +605,31 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 interpretation.get("confidence"),
             )
 
-        # INTEGRATION POINT 6 — confidence quality gate. If the interpretation
-        # is low-confidence, ask the LLM how to improve / whether to alert a
-        # human. We still send (people need the data), but the anomaly advice
-        # is logged and surfaced.
-        confidence = (interpretation or {}).get("confidence")
+        # Fold the interpreter's self-rated confidence into the cross-validation
+        # ledger as one more weighted source, then use the tracker's overall
+        # score as the authoritative confidence for the gate + handoff. This
+        # blends the expert read with the hard external checks rather than
+        # trusting the LLM's number alone.
+        interp_conf = _coerce_float((interpretation or {}).get("confidence"))
+        if interp_conf is not None:
+            tracker.add_evidence("interpretation", interp_conf, weight=0.2)
+        confidence = round(tracker.overall_confidence(), 4)
         anomalies = (interpretation or {}).get("anomalies") or []
-        try:
-            low_confidence = confidence is not None and float(confidence) < MIN_CONFIDENCE
-        except (TypeError, ValueError):
-            low_confidence = False
-        if low_confidence:
+
+        # INTEGRATION POINT 6 — confidence quality gate. Below MIN_CONFIDENCE the
+        # result is low-quality: ask the LLM how to improve / whether to alert a
+        # human, and flag that the team should verify before relying on it. We
+        # still send (people need the data), but the advice is logged + surfaced.
+        needs_verification = tracker.needs_verification()
+        should_alert = tracker.should_alert_team()
+        if confidence < MIN_CONFIDENCE or needs_verification or should_alert:
             _recover(
                 "low_confidence",
                 {
                     "event_id": event_id,
                     "confidence": confidence,
                     "anomalies": anomalies,
+                    "concerns": tracker.concerns,
                     "index_stats": index_stats,
                 },
                 MAX_STEP_ATTEMPTS,
@@ -621,7 +674,16 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
             "cities": cities_payload,
             # Expert reasoning from the intelligence layer (point 4).
             "interpretation": interpretation,
+            # Confidence is the cross-validation tracker's overall score (a
+            # weighted blend of external checks + the expert interpretation),
+            # not the LLM's self-rating alone.
             "confidence": confidence,
+            # Cross-validation: concerns raised, per-source findings, and the
+            # two action flags the orchestrator/frontend care about.
+            "concerns": tracker.concerns,
+            "validations": validations,
+            "needs_verification": needs_verification,
+            "should_alert": should_alert,
         }
 
         # INTEGRATION POINT 5 — a natural, expert-sounding hand-off message for
@@ -639,7 +701,10 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
                 "location": location,
             },
             interpretation=interpretation,
-            anomalies=anomalies,
+            # Surface both the interpreter's anomalies and the cross-validation
+            # concerns so the natural handoff message flags what we're unsure of.
+            anomalies=anomalies
+            + [f"{c['severity']}: {c['concern']}" for c in tracker.concerns],
             confidence=confidence,
             next_agent_handle=HAZARD_AGENT,
         )

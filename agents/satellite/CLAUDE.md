@@ -41,6 +41,94 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 14: Intelligent expert layer — confidence, cross-validation, stance — DONE
+
+The agent is no longer a pipeline that emits whatever it computed — it is an
+**expert that evaluates its own confidence, cross-validates every source, and
+forms (and defends) evidence-based positions.** Three new self-contained
+modules, wired into `run_pipeline`. Branch: **main**.
+
+**`event_id`.** Still parsed from the orchestrator's message and threaded
+through unchanged — the agent **never generates its own**. (The Band tool flow
+receives `event_id` as a required tool arg; an absent one means the model should
+ask the orchestrator to resend.)
+
+**`confidence_tracker.py` — `ConfidenceTracker`.** A pure, no-I/O running ledger
+for one event. `add_evidence(source, value∈[0,1], weight>0)` and
+`add_concern(text, severity∈{LOW,MEDIUM,HIGH,CRITICAL})` accumulate;
+`overall_confidence()` is the weighted average of evidence **minus** a per-
+concern penalty (LOW .05 / MEDIUM .10 / HIGH .20 / CRITICAL .35), clamped to
+[0,1] (0.0 when there is no evidence yet). Thresholds drive behaviour:
+`needs_verification()` (< 0.70 → ask the orchestrator before handing off) and
+`should_alert_team()` (any CRITICAL concern → alert the room). Inputs are coerced
+/ clamped and an unknown severity degrades to MEDIUM, so a bad value never
+crashes the ledger. `get_report()` is a compact JSON snapshot.
+
+**`cross_validator.py` — `CrossValidator`.** `validate_all(satellite_result,
+disaster_type, location, tracker)` checks the result against **every reachable
+source** and feeds the tracker, returning human-readable findings
+(`{source,status,detail}`):
+1. **GDACS** (`check_gdacs`, public `geteventlist/EVENTS4APP` GeoJSON) — nearest
+   event within 250 km of the AOI centroid; compares affected-area extent:
+   ratio 0.7–1.3 → CONFIRMED (evidence .9); > 2.0 → HIGH concern "secondary
+   flooding?"; < 0.5 → HIGH concern "cloud masking?"; in-between → PARTIAL; event
+   present but no area → weak EVENT_PRESENT corroboration.
+2. **USGS** (`check_usgs`, FDSN `event/1/query`) — earthquakes only; strongest
+   quake within 250 km / 14 days; M > 6.5 → HIGH concern (expect wider damage).
+3. **Cloud cover** — > 60% → CRITICAL (optical unreliable); > 30% → MEDIUM; else
+   strong evidence.
+4. **Index physics** (flood) — NDWI < 0 while GDACS is RED → CRITICAL
+   CONTRADICTION (cloud interference); NDWI > 0.3 & water > 20% → strong; etc.
+5. **Coverage** — valid-pixel share < 60% → HIGH concern (incomplete picture).
+6. **Featherless expert opinion** (`get_featherless_opinion`) — routes a "senior
+   remote-sensing expert" prompt through the existing `SatelliteIntelligence`
+   chain (Qwen-pinned) for `{reliable,confidence,concerns,alert_team,
+   recommendation}`; its confidence is added as weighted evidence.
+   **Every external call is best-effort** — an unreachable feed or LLM is logged
+   and skipped (no evidence, no crash), so a missing cross-check never blocks a
+   life-critical handoff. The geographic feeds accept a `(lat,lon)` pair, a
+   lat/lon dict, or a bbox (centroid used) — `run_pipeline` passes the analysis
+   `bbox`. Public feed URLs are overridable via `GDACS_GEOJSON_URL` /
+   `USGS_QUERY_URL` (blank = built-in default).
+
+**`stance_engine.py` — `StanceEngine`.** `evaluate_orchestrator_instruction(
+instruction, current_evidence, tracker)` asks the LLM (Qwen-pinned) whether an
+orchestrator instruction makes scientific sense given the agent's evidence,
+returning `{agree, confidence_in_own_position, reasoning, recommendation,
+response_to_orchestrator, will_comply_if_insisted}`. **On total LLM failure it
+defaults to a conservative *comply* stance** (the agent defers, never silently
+ignores the orchestrator). `form_band_message(stance, handle)` renders it as a
+natural room message: agreement → "Proceeding as suggested"; disagreement →
+the reasoned push-back with the agent's confidence and either "will switch if you
+insist" or "strongly recommend reconsidering".
+
+**`agent.py` wiring.** A module-level `cross_validator = CrossValidator(
+intelligence=intelligence)` is shared across tool calls. In `run_pipeline`: a
+`ConfidenceTracker` is created per event; after the R2 upload, `validate_all`
+runs over the result + analysis bbox, populating the tracker. The interpreter's
+self-rated confidence is folded in as one more weighted source, and the
+tracker's **overall score becomes the authoritative `confidence`** (not the LLM's
+number alone). The quality gate now fires when `confidence < MIN_CONFIDENCE`
+**or** `needs_verification()` **or** `should_alert_team()`. The natural Band
+message is fed the cross-validation concerns alongside the interpreter anomalies
+so the handoff flags them.
+
+**Completion signal.** The structured payload gained `concerns` (the tracker's
+concern list), `validations` (per-source findings), `needs_verification` and
+`should_alert`, alongside the existing artifact URLs / areas / bounds /
+`confidence`. The `band_message` (relayed verbatim by the model) carries the
+natural-language version.
+
+**Tests (`tests/test_suite_7_intelligence_stance.py`).** Four spec scenarios,
+**offline + deterministic** (feeds + LLM stubbed): (1) normal flow → confidence
+≥ 0.70, no alert, GDACS CONFIRMED; (2) GDACS discrepancy (sat 500 vs GDACS 120
+km²) → 4.2× HIGH concern + DISCREPANCY finding; (3) low confidence → concerns
+drop it < 0.70, `needs_verification()` true, CRITICAL trips `should_alert_team()`;
+(4) stance disagreement (use SAR at 15% cloud) → agent pushes back with reasoning
+in the Band message, will comply if insisted, and the LLM-down fallback defaults
+to comply. **All 15 checks pass.** Graceful degradation verified separately (no
+network: GDACS skipped, no crash; 70% cloud still trips the CRITICAL alert).
+
 ### Step 13: Rigorous end-to-end test pass + fixes — DONE
 
 A full six-suite end-to-end test (intelligence, boundary, sentinel, processor,
