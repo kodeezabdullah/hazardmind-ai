@@ -65,7 +65,7 @@ final_reports     <- Agent 4 writes
 
 ## Checklist
 - [x] Step 1: Branch + structure
-- [ ] Step 2: DB connection
+- [x] Step 2: DB connection
 - [ ] Step 3: Models
 - [ ] Step 4: POST /analyze
 - [ ] Step 5: GET /status
