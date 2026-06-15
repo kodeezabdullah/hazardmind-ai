@@ -1,9 +1,10 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 
 from band_client import notify_satellite
-from db import create_disaster_event, get_event_status
+from db import create_disaster_event, get_event_results, get_event_status
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -59,8 +60,28 @@ async def get_status(job_id: str):
 
 @router.get("/results/{job_id}", response_model=ResultsResponse)
 async def get_results(job_id: str):
-    # TODO: aggregate satellite/hazard/impact/report rows
-    raise HTTPException(status_code=501, detail="results endpoint not implemented yet")
+    event = await get_event_results(job_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    if event["status"] != "complete":
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "processing",
+                "step": event["step"],
+                "message": "Pipeline still running",
+            },
+        )
+
+    return ResultsResponse(
+        job_id=str(event["event_id"]),
+        status="complete",
+        satellite=event["satellite"],
+        hazard=event["hazard"],
+        impact=event["impact"],
+        report=event["report"],
+    )
 
 
 @router.get("/band-log/{job_id}", response_model=BandLogResponse)
