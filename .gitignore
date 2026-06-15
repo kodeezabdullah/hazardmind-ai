@@ -54,76 +54,50 @@ coverage/
 *.mo
 *.pot
 
-# Django stuff:
+# Framework / runtime state
 *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
-
-# Flask stuff:
 instance/
 .webassets-cache
-
-# Scrapy stuff:
 .scrapy
-
-# Sphinx documentation
 docs/_build/
-
-# PyBuilder
 .pybuilder/
 target/
-
-# Jupyter Notebook
 .ipynb_checkpoints
-
-# IPython
 profile_default/
 ipython_config.py
 
-# pyenv
-# .python-version
-
-# pdm
+# Python project managers / tools
 .pdm-python
 .pdm-build/
-
-# pixi
-.pixi
-
-# PEP 582
+.pixi/
 __pypackages__/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+.ruff_cache/
 
-# Celery
+# Background services / local data
 celerybeat-schedule
 celerybeat.pid
-
-# Redis
 *.rdb
 *.aof
 *.pid
-
-# RabbitMQ
 mnesia/
 rabbitmq/
 rabbitmq-data/
-
-# ActiveMQ
 activemq-data/
 
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# Environments and local credentials
 .env
-.env.local
+.env.*
+!.env.example
 .envrc
-
-# Band SDK agent credentials
-agent_config.yaml
-__pycache__/
-*.pyc
-*.pyo
 .venv
 .venv/
 venv/
@@ -131,57 +105,28 @@ env/
 ENV/
 env.bak/
 venv.bak/
+agents/report/venv/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# Band SDK agent credentials
+agent_config.yaml
 
-# Rope project settings
-.ropeproject
+# Report Agent local artifacts
+agents/report/generated/
 
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# IDEs
+# IDEs and editors
 .idea/
 .vscode/
 *.swp
-.pytest_cache/
-.mypy_cache/
-coverage/
-.coverage
-.claude/
 tempCodeRunnerFile.py
 
-# Ruff
-.ruff_cache/
-
-# PyPI configuration file
+# Docs / local app state
+/site
+.claude/
 .pypirc
-
-# Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-
-# Streamlit
 .streamlit/secrets.toml
-
-# Abstra
 .abstra/
 
 # OS
@@ -192,6 +137,9 @@ node_modules/
 .next/
 out/
 .vercel/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 frontend/.env.local
 
 # Build outputs

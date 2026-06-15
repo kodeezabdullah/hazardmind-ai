@@ -1,0 +1,91 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "broken-open-ring",
+        "severity": "critical"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.45,
+              33.95
+            ],
+            [
+              71.5,
+              33.95
+            ],
+            [
+              71.5,
+              34.0
+            ],
+            [
+              71.45,
+              34.0
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "broken-bad-coordinate",
+        "severity": "high"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.52,
+              33.96
+            ],
+            [
+              "bad",
+              33.96
+            ],
+            [
+              71.55,
+              33.99
+            ],
+            [
+              71.52,
+              33.96
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "broken-too-few-points",
+        "severity": "medium"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.58,
+              34.02
+            ],
+            [
+              71.59,
+              34.02
+            ],
+            [
+              71.58,
+              34.02
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

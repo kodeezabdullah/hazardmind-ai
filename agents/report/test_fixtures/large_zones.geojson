@@ -1,0 +1,4445 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-001",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.905
+            ],
+            [
+              71.414,
+              33.905
+            ],
+            [
+              71.414,
+              33.914
+            ],
+            [
+              71.405,
+              33.914
+            ],
+            [
+              71.405,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-002",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.905
+            ],
+            [
+              71.433,
+              33.905
+            ],
+            [
+              71.433,
+              33.914
+            ],
+            [
+              71.424,
+              33.914
+            ],
+            [
+              71.424,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-003",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.905
+            ],
+            [
+              71.452,
+              33.905
+            ],
+            [
+              71.452,
+              33.914
+            ],
+            [
+              71.443,
+              33.914
+            ],
+            [
+              71.443,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-004",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.905
+            ],
+            [
+              71.471,
+              33.905
+            ],
+            [
+              71.471,
+              33.914
+            ],
+            [
+              71.462,
+              33.914
+            ],
+            [
+              71.462,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-005",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.905
+            ],
+            [
+              71.49,
+              33.905
+            ],
+            [
+              71.49,
+              33.914
+            ],
+            [
+              71.481,
+              33.914
+            ],
+            [
+              71.481,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-006",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.905
+            ],
+            [
+              71.509,
+              33.905
+            ],
+            [
+              71.509,
+              33.914
+            ],
+            [
+              71.5,
+              33.914
+            ],
+            [
+              71.5,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-007",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.905
+            ],
+            [
+              71.528,
+              33.905
+            ],
+            [
+              71.528,
+              33.914
+            ],
+            [
+              71.519,
+              33.914
+            ],
+            [
+              71.519,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-008",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.905
+            ],
+            [
+              71.547,
+              33.905
+            ],
+            [
+              71.547,
+              33.914
+            ],
+            [
+              71.538,
+              33.914
+            ],
+            [
+              71.538,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-009",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.905
+            ],
+            [
+              71.566,
+              33.905
+            ],
+            [
+              71.566,
+              33.914
+            ],
+            [
+              71.557,
+              33.914
+            ],
+            [
+              71.557,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-010",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.905
+            ],
+            [
+              71.585,
+              33.905
+            ],
+            [
+              71.585,
+              33.914
+            ],
+            [
+              71.576,
+              33.914
+            ],
+            [
+              71.576,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-011",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.905
+            ],
+            [
+              71.604,
+              33.905
+            ],
+            [
+              71.604,
+              33.914
+            ],
+            [
+              71.595,
+              33.914
+            ],
+            [
+              71.595,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-012",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.905
+            ],
+            [
+              71.623,
+              33.905
+            ],
+            [
+              71.623,
+              33.914
+            ],
+            [
+              71.614,
+              33.914
+            ],
+            [
+              71.614,
+              33.905
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-013",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.922
+            ],
+            [
+              71.414,
+              33.922
+            ],
+            [
+              71.414,
+              33.931
+            ],
+            [
+              71.405,
+              33.931
+            ],
+            [
+              71.405,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-014",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.922
+            ],
+            [
+              71.433,
+              33.922
+            ],
+            [
+              71.433,
+              33.931
+            ],
+            [
+              71.424,
+              33.931
+            ],
+            [
+              71.424,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-015",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.922
+            ],
+            [
+              71.452,
+              33.922
+            ],
+            [
+              71.452,
+              33.931
+            ],
+            [
+              71.443,
+              33.931
+            ],
+            [
+              71.443,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-016",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.922
+            ],
+            [
+              71.471,
+              33.922
+            ],
+            [
+              71.471,
+              33.931
+            ],
+            [
+              71.462,
+              33.931
+            ],
+            [
+              71.462,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-017",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.922
+            ],
+            [
+              71.49,
+              33.922
+            ],
+            [
+              71.49,
+              33.931
+            ],
+            [
+              71.481,
+              33.931
+            ],
+            [
+              71.481,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-018",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.922
+            ],
+            [
+              71.509,
+              33.922
+            ],
+            [
+              71.509,
+              33.931
+            ],
+            [
+              71.5,
+              33.931
+            ],
+            [
+              71.5,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-019",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.922
+            ],
+            [
+              71.528,
+              33.922
+            ],
+            [
+              71.528,
+              33.931
+            ],
+            [
+              71.519,
+              33.931
+            ],
+            [
+              71.519,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-020",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.922
+            ],
+            [
+              71.547,
+              33.922
+            ],
+            [
+              71.547,
+              33.931
+            ],
+            [
+              71.538,
+              33.931
+            ],
+            [
+              71.538,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-021",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.922
+            ],
+            [
+              71.566,
+              33.922
+            ],
+            [
+              71.566,
+              33.931
+            ],
+            [
+              71.557,
+              33.931
+            ],
+            [
+              71.557,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-022",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.922
+            ],
+            [
+              71.585,
+              33.922
+            ],
+            [
+              71.585,
+              33.931
+            ],
+            [
+              71.576,
+              33.931
+            ],
+            [
+              71.576,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-023",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.922
+            ],
+            [
+              71.604,
+              33.922
+            ],
+            [
+              71.604,
+              33.931
+            ],
+            [
+              71.595,
+              33.931
+            ],
+            [
+              71.595,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-024",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.922
+            ],
+            [
+              71.623,
+              33.922
+            ],
+            [
+              71.623,
+              33.931
+            ],
+            [
+              71.614,
+              33.931
+            ],
+            [
+              71.614,
+              33.922
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-025",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.939
+            ],
+            [
+              71.414,
+              33.939
+            ],
+            [
+              71.414,
+              33.948
+            ],
+            [
+              71.405,
+              33.948
+            ],
+            [
+              71.405,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-026",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.939
+            ],
+            [
+              71.433,
+              33.939
+            ],
+            [
+              71.433,
+              33.948
+            ],
+            [
+              71.424,
+              33.948
+            ],
+            [
+              71.424,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-027",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.939
+            ],
+            [
+              71.452,
+              33.939
+            ],
+            [
+              71.452,
+              33.948
+            ],
+            [
+              71.443,
+              33.948
+            ],
+            [
+              71.443,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-028",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.939
+            ],
+            [
+              71.471,
+              33.939
+            ],
+            [
+              71.471,
+              33.948
+            ],
+            [
+              71.462,
+              33.948
+            ],
+            [
+              71.462,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-029",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.939
+            ],
+            [
+              71.49,
+              33.939
+            ],
+            [
+              71.49,
+              33.948
+            ],
+            [
+              71.481,
+              33.948
+            ],
+            [
+              71.481,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-030",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.939
+            ],
+            [
+              71.509,
+              33.939
+            ],
+            [
+              71.509,
+              33.948
+            ],
+            [
+              71.5,
+              33.948
+            ],
+            [
+              71.5,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-031",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.939
+            ],
+            [
+              71.528,
+              33.939
+            ],
+            [
+              71.528,
+              33.948
+            ],
+            [
+              71.519,
+              33.948
+            ],
+            [
+              71.519,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-032",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.939
+            ],
+            [
+              71.547,
+              33.939
+            ],
+            [
+              71.547,
+              33.948
+            ],
+            [
+              71.538,
+              33.948
+            ],
+            [
+              71.538,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-033",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.939
+            ],
+            [
+              71.566,
+              33.939
+            ],
+            [
+              71.566,
+              33.948
+            ],
+            [
+              71.557,
+              33.948
+            ],
+            [
+              71.557,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-034",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.939
+            ],
+            [
+              71.585,
+              33.939
+            ],
+            [
+              71.585,
+              33.948
+            ],
+            [
+              71.576,
+              33.948
+            ],
+            [
+              71.576,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-035",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.939
+            ],
+            [
+              71.604,
+              33.939
+            ],
+            [
+              71.604,
+              33.948
+            ],
+            [
+              71.595,
+              33.948
+            ],
+            [
+              71.595,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-036",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.939
+            ],
+            [
+              71.623,
+              33.939
+            ],
+            [
+              71.623,
+              33.948
+            ],
+            [
+              71.614,
+              33.948
+            ],
+            [
+              71.614,
+              33.939
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-037",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.956
+            ],
+            [
+              71.414,
+              33.956
+            ],
+            [
+              71.414,
+              33.965
+            ],
+            [
+              71.405,
+              33.965
+            ],
+            [
+              71.405,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-038",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.956
+            ],
+            [
+              71.433,
+              33.956
+            ],
+            [
+              71.433,
+              33.965
+            ],
+            [
+              71.424,
+              33.965
+            ],
+            [
+              71.424,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-039",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.956
+            ],
+            [
+              71.452,
+              33.956
+            ],
+            [
+              71.452,
+              33.965
+            ],
+            [
+              71.443,
+              33.965
+            ],
+            [
+              71.443,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-040",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.956
+            ],
+            [
+              71.471,
+              33.956
+            ],
+            [
+              71.471,
+              33.965
+            ],
+            [
+              71.462,
+              33.965
+            ],
+            [
+              71.462,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-041",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.956
+            ],
+            [
+              71.49,
+              33.956
+            ],
+            [
+              71.49,
+              33.965
+            ],
+            [
+              71.481,
+              33.965
+            ],
+            [
+              71.481,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-042",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.956
+            ],
+            [
+              71.509,
+              33.956
+            ],
+            [
+              71.509,
+              33.965
+            ],
+            [
+              71.5,
+              33.965
+            ],
+            [
+              71.5,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-043",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.956
+            ],
+            [
+              71.528,
+              33.956
+            ],
+            [
+              71.528,
+              33.965
+            ],
+            [
+              71.519,
+              33.965
+            ],
+            [
+              71.519,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-044",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.956
+            ],
+            [
+              71.547,
+              33.956
+            ],
+            [
+              71.547,
+              33.965
+            ],
+            [
+              71.538,
+              33.965
+            ],
+            [
+              71.538,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-045",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.956
+            ],
+            [
+              71.566,
+              33.956
+            ],
+            [
+              71.566,
+              33.965
+            ],
+            [
+              71.557,
+              33.965
+            ],
+            [
+              71.557,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-046",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.956
+            ],
+            [
+              71.585,
+              33.956
+            ],
+            [
+              71.585,
+              33.965
+            ],
+            [
+              71.576,
+              33.965
+            ],
+            [
+              71.576,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-047",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.956
+            ],
+            [
+              71.604,
+              33.956
+            ],
+            [
+              71.604,
+              33.965
+            ],
+            [
+              71.595,
+              33.965
+            ],
+            [
+              71.595,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-048",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.956
+            ],
+            [
+              71.623,
+              33.956
+            ],
+            [
+              71.623,
+              33.965
+            ],
+            [
+              71.614,
+              33.965
+            ],
+            [
+              71.614,
+              33.956
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-049",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.973
+            ],
+            [
+              71.414,
+              33.973
+            ],
+            [
+              71.414,
+              33.982
+            ],
+            [
+              71.405,
+              33.982
+            ],
+            [
+              71.405,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-050",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.973
+            ],
+            [
+              71.433,
+              33.973
+            ],
+            [
+              71.433,
+              33.982
+            ],
+            [
+              71.424,
+              33.982
+            ],
+            [
+              71.424,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-051",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.973
+            ],
+            [
+              71.452,
+              33.973
+            ],
+            [
+              71.452,
+              33.982
+            ],
+            [
+              71.443,
+              33.982
+            ],
+            [
+              71.443,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-052",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.973
+            ],
+            [
+              71.471,
+              33.973
+            ],
+            [
+              71.471,
+              33.982
+            ],
+            [
+              71.462,
+              33.982
+            ],
+            [
+              71.462,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-053",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.973
+            ],
+            [
+              71.49,
+              33.973
+            ],
+            [
+              71.49,
+              33.982
+            ],
+            [
+              71.481,
+              33.982
+            ],
+            [
+              71.481,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-054",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.973
+            ],
+            [
+              71.509,
+              33.973
+            ],
+            [
+              71.509,
+              33.982
+            ],
+            [
+              71.5,
+              33.982
+            ],
+            [
+              71.5,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-055",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.973
+            ],
+            [
+              71.528,
+              33.973
+            ],
+            [
+              71.528,
+              33.982
+            ],
+            [
+              71.519,
+              33.982
+            ],
+            [
+              71.519,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-056",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.973
+            ],
+            [
+              71.547,
+              33.973
+            ],
+            [
+              71.547,
+              33.982
+            ],
+            [
+              71.538,
+              33.982
+            ],
+            [
+              71.538,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-057",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.973
+            ],
+            [
+              71.566,
+              33.973
+            ],
+            [
+              71.566,
+              33.982
+            ],
+            [
+              71.557,
+              33.982
+            ],
+            [
+              71.557,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-058",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.973
+            ],
+            [
+              71.585,
+              33.973
+            ],
+            [
+              71.585,
+              33.982
+            ],
+            [
+              71.576,
+              33.982
+            ],
+            [
+              71.576,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-059",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.973
+            ],
+            [
+              71.604,
+              33.973
+            ],
+            [
+              71.604,
+              33.982
+            ],
+            [
+              71.595,
+              33.982
+            ],
+            [
+              71.595,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-060",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.973
+            ],
+            [
+              71.623,
+              33.973
+            ],
+            [
+              71.623,
+              33.982
+            ],
+            [
+              71.614,
+              33.982
+            ],
+            [
+              71.614,
+              33.973
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-061",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              33.99
+            ],
+            [
+              71.414,
+              33.99
+            ],
+            [
+              71.414,
+              33.999
+            ],
+            [
+              71.405,
+              33.999
+            ],
+            [
+              71.405,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-062",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              33.99
+            ],
+            [
+              71.433,
+              33.99
+            ],
+            [
+              71.433,
+              33.999
+            ],
+            [
+              71.424,
+              33.999
+            ],
+            [
+              71.424,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-063",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              33.99
+            ],
+            [
+              71.452,
+              33.99
+            ],
+            [
+              71.452,
+              33.999
+            ],
+            [
+              71.443,
+              33.999
+            ],
+            [
+              71.443,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-064",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              33.99
+            ],
+            [
+              71.471,
+              33.99
+            ],
+            [
+              71.471,
+              33.999
+            ],
+            [
+              71.462,
+              33.999
+            ],
+            [
+              71.462,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-065",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              33.99
+            ],
+            [
+              71.49,
+              33.99
+            ],
+            [
+              71.49,
+              33.999
+            ],
+            [
+              71.481,
+              33.999
+            ],
+            [
+              71.481,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-066",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              33.99
+            ],
+            [
+              71.509,
+              33.99
+            ],
+            [
+              71.509,
+              33.999
+            ],
+            [
+              71.5,
+              33.999
+            ],
+            [
+              71.5,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-067",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              33.99
+            ],
+            [
+              71.528,
+              33.99
+            ],
+            [
+              71.528,
+              33.999
+            ],
+            [
+              71.519,
+              33.999
+            ],
+            [
+              71.519,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-068",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              33.99
+            ],
+            [
+              71.547,
+              33.99
+            ],
+            [
+              71.547,
+              33.999
+            ],
+            [
+              71.538,
+              33.999
+            ],
+            [
+              71.538,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-069",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              33.99
+            ],
+            [
+              71.566,
+              33.99
+            ],
+            [
+              71.566,
+              33.999
+            ],
+            [
+              71.557,
+              33.999
+            ],
+            [
+              71.557,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-070",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              33.99
+            ],
+            [
+              71.585,
+              33.99
+            ],
+            [
+              71.585,
+              33.999
+            ],
+            [
+              71.576,
+              33.999
+            ],
+            [
+              71.576,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-071",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              33.99
+            ],
+            [
+              71.604,
+              33.99
+            ],
+            [
+              71.604,
+              33.999
+            ],
+            [
+              71.595,
+              33.999
+            ],
+            [
+              71.595,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-072",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              33.99
+            ],
+            [
+              71.623,
+              33.99
+            ],
+            [
+              71.623,
+              33.999
+            ],
+            [
+              71.614,
+              33.999
+            ],
+            [
+              71.614,
+              33.99
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-073",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              34.007
+            ],
+            [
+              71.414,
+              34.007
+            ],
+            [
+              71.414,
+              34.016
+            ],
+            [
+              71.405,
+              34.016
+            ],
+            [
+              71.405,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-074",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              34.007
+            ],
+            [
+              71.433,
+              34.007
+            ],
+            [
+              71.433,
+              34.016
+            ],
+            [
+              71.424,
+              34.016
+            ],
+            [
+              71.424,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-075",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              34.007
+            ],
+            [
+              71.452,
+              34.007
+            ],
+            [
+              71.452,
+              34.016
+            ],
+            [
+              71.443,
+              34.016
+            ],
+            [
+              71.443,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-076",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              34.007
+            ],
+            [
+              71.471,
+              34.007
+            ],
+            [
+              71.471,
+              34.016
+            ],
+            [
+              71.462,
+              34.016
+            ],
+            [
+              71.462,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-077",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              34.007
+            ],
+            [
+              71.49,
+              34.007
+            ],
+            [
+              71.49,
+              34.016
+            ],
+            [
+              71.481,
+              34.016
+            ],
+            [
+              71.481,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-078",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              34.007
+            ],
+            [
+              71.509,
+              34.007
+            ],
+            [
+              71.509,
+              34.016
+            ],
+            [
+              71.5,
+              34.016
+            ],
+            [
+              71.5,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-079",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              34.007
+            ],
+            [
+              71.528,
+              34.007
+            ],
+            [
+              71.528,
+              34.016
+            ],
+            [
+              71.519,
+              34.016
+            ],
+            [
+              71.519,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-080",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              34.007
+            ],
+            [
+              71.547,
+              34.007
+            ],
+            [
+              71.547,
+              34.016
+            ],
+            [
+              71.538,
+              34.016
+            ],
+            [
+              71.538,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-081",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              34.007
+            ],
+            [
+              71.566,
+              34.007
+            ],
+            [
+              71.566,
+              34.016
+            ],
+            [
+              71.557,
+              34.016
+            ],
+            [
+              71.557,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-082",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              34.007
+            ],
+            [
+              71.585,
+              34.007
+            ],
+            [
+              71.585,
+              34.016
+            ],
+            [
+              71.576,
+              34.016
+            ],
+            [
+              71.576,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-083",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              34.007
+            ],
+            [
+              71.604,
+              34.007
+            ],
+            [
+              71.604,
+              34.016
+            ],
+            [
+              71.595,
+              34.016
+            ],
+            [
+              71.595,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-084",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              34.007
+            ],
+            [
+              71.623,
+              34.007
+            ],
+            [
+              71.623,
+              34.016
+            ],
+            [
+              71.614,
+              34.016
+            ],
+            [
+              71.614,
+              34.007
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-085",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              34.024
+            ],
+            [
+              71.414,
+              34.024
+            ],
+            [
+              71.414,
+              34.033
+            ],
+            [
+              71.405,
+              34.033
+            ],
+            [
+              71.405,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-086",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              34.024
+            ],
+            [
+              71.433,
+              34.024
+            ],
+            [
+              71.433,
+              34.033
+            ],
+            [
+              71.424,
+              34.033
+            ],
+            [
+              71.424,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-087",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              34.024
+            ],
+            [
+              71.452,
+              34.024
+            ],
+            [
+              71.452,
+              34.033
+            ],
+            [
+              71.443,
+              34.033
+            ],
+            [
+              71.443,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-088",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              34.024
+            ],
+            [
+              71.471,
+              34.024
+            ],
+            [
+              71.471,
+              34.033
+            ],
+            [
+              71.462,
+              34.033
+            ],
+            [
+              71.462,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-089",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              34.024
+            ],
+            [
+              71.49,
+              34.024
+            ],
+            [
+              71.49,
+              34.033
+            ],
+            [
+              71.481,
+              34.033
+            ],
+            [
+              71.481,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-090",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              34.024
+            ],
+            [
+              71.509,
+              34.024
+            ],
+            [
+              71.509,
+              34.033
+            ],
+            [
+              71.5,
+              34.033
+            ],
+            [
+              71.5,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-091",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              34.024
+            ],
+            [
+              71.528,
+              34.024
+            ],
+            [
+              71.528,
+              34.033
+            ],
+            [
+              71.519,
+              34.033
+            ],
+            [
+              71.519,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-092",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              34.024
+            ],
+            [
+              71.547,
+              34.024
+            ],
+            [
+              71.547,
+              34.033
+            ],
+            [
+              71.538,
+              34.033
+            ],
+            [
+              71.538,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-093",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              34.024
+            ],
+            [
+              71.566,
+              34.024
+            ],
+            [
+              71.566,
+              34.033
+            ],
+            [
+              71.557,
+              34.033
+            ],
+            [
+              71.557,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-094",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              34.024
+            ],
+            [
+              71.585,
+              34.024
+            ],
+            [
+              71.585,
+              34.033
+            ],
+            [
+              71.576,
+              34.033
+            ],
+            [
+              71.576,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-095",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              34.024
+            ],
+            [
+              71.604,
+              34.024
+            ],
+            [
+              71.604,
+              34.033
+            ],
+            [
+              71.595,
+              34.033
+            ],
+            [
+              71.595,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-096",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              34.024
+            ],
+            [
+              71.623,
+              34.024
+            ],
+            [
+              71.623,
+              34.033
+            ],
+            [
+              71.614,
+              34.033
+            ],
+            [
+              71.614,
+              34.024
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-097",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              34.041
+            ],
+            [
+              71.414,
+              34.041
+            ],
+            [
+              71.414,
+              34.05
+            ],
+            [
+              71.405,
+              34.05
+            ],
+            [
+              71.405,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-098",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              34.041
+            ],
+            [
+              71.433,
+              34.041
+            ],
+            [
+              71.433,
+              34.05
+            ],
+            [
+              71.424,
+              34.05
+            ],
+            [
+              71.424,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-099",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              34.041
+            ],
+            [
+              71.452,
+              34.041
+            ],
+            [
+              71.452,
+              34.05
+            ],
+            [
+              71.443,
+              34.05
+            ],
+            [
+              71.443,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-100",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              34.041
+            ],
+            [
+              71.471,
+              34.041
+            ],
+            [
+              71.471,
+              34.05
+            ],
+            [
+              71.462,
+              34.05
+            ],
+            [
+              71.462,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-101",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              34.041
+            ],
+            [
+              71.49,
+              34.041
+            ],
+            [
+              71.49,
+              34.05
+            ],
+            [
+              71.481,
+              34.05
+            ],
+            [
+              71.481,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-102",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              34.041
+            ],
+            [
+              71.509,
+              34.041
+            ],
+            [
+              71.509,
+              34.05
+            ],
+            [
+              71.5,
+              34.05
+            ],
+            [
+              71.5,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-103",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              34.041
+            ],
+            [
+              71.528,
+              34.041
+            ],
+            [
+              71.528,
+              34.05
+            ],
+            [
+              71.519,
+              34.05
+            ],
+            [
+              71.519,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-104",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              34.041
+            ],
+            [
+              71.547,
+              34.041
+            ],
+            [
+              71.547,
+              34.05
+            ],
+            [
+              71.538,
+              34.05
+            ],
+            [
+              71.538,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-105",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              34.041
+            ],
+            [
+              71.566,
+              34.041
+            ],
+            [
+              71.566,
+              34.05
+            ],
+            [
+              71.557,
+              34.05
+            ],
+            [
+              71.557,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-106",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              34.041
+            ],
+            [
+              71.585,
+              34.041
+            ],
+            [
+              71.585,
+              34.05
+            ],
+            [
+              71.576,
+              34.05
+            ],
+            [
+              71.576,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-107",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              34.041
+            ],
+            [
+              71.604,
+              34.041
+            ],
+            [
+              71.604,
+              34.05
+            ],
+            [
+              71.595,
+              34.05
+            ],
+            [
+              71.595,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-108",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              34.041
+            ],
+            [
+              71.623,
+              34.041
+            ],
+            [
+              71.623,
+              34.05
+            ],
+            [
+              71.614,
+              34.05
+            ],
+            [
+              71.614,
+              34.041
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-109",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.405,
+              34.058
+            ],
+            [
+              71.414,
+              34.058
+            ],
+            [
+              71.414,
+              34.067
+            ],
+            [
+              71.405,
+              34.067
+            ],
+            [
+              71.405,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-110",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.424,
+              34.058
+            ],
+            [
+              71.433,
+              34.058
+            ],
+            [
+              71.433,
+              34.067
+            ],
+            [
+              71.424,
+              34.067
+            ],
+            [
+              71.424,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-111",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.443,
+              34.058
+            ],
+            [
+              71.452,
+              34.058
+            ],
+            [
+              71.452,
+              34.067
+            ],
+            [
+              71.443,
+              34.067
+            ],
+            [
+              71.443,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-112",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.48
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.462,
+              34.058
+            ],
+            [
+              71.471,
+              34.058
+            ],
+            [
+              71.471,
+              34.067
+            ],
+            [
+              71.462,
+              34.067
+            ],
+            [
+              71.462,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-113",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.55
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.481,
+              34.058
+            ],
+            [
+              71.49,
+              34.058
+            ],
+            [
+              71.49,
+              34.067
+            ],
+            [
+              71.481,
+              34.067
+            ],
+            [
+              71.481,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-114",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.62
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.5,
+              34.058
+            ],
+            [
+              71.509,
+              34.058
+            ],
+            [
+              71.509,
+              34.067
+            ],
+            [
+              71.5,
+              34.067
+            ],
+            [
+              71.5,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-115",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.69
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.519,
+              34.058
+            ],
+            [
+              71.528,
+              34.058
+            ],
+            [
+              71.528,
+              34.067
+            ],
+            [
+              71.519,
+              34.067
+            ],
+            [
+              71.519,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-116",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.76
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.538,
+              34.058
+            ],
+            [
+              71.547,
+              34.058
+            ],
+            [
+              71.547,
+              34.067
+            ],
+            [
+              71.538,
+              34.067
+            ],
+            [
+              71.538,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-117",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 0.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.557,
+              34.058
+            ],
+            [
+              71.566,
+              34.058
+            ],
+            [
+              71.566,
+              34.067
+            ],
+            [
+              71.557,
+              34.067
+            ],
+            [
+              71.557,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-118",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 0.27
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.576,
+              34.058
+            ],
+            [
+              71.585,
+              34.058
+            ],
+            [
+              71.585,
+              34.067
+            ],
+            [
+              71.576,
+              34.067
+            ],
+            [
+              71.576,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-119",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 0.34
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.595,
+              34.058
+            ],
+            [
+              71.604,
+              34.058
+            ],
+            [
+              71.604,
+              34.067
+            ],
+            [
+              71.595,
+              34.067
+            ],
+            [
+              71.595,
+              34.058
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "large-zone-120",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 0.41
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.614,
+              34.058
+            ],
+            [
+              71.623,
+              34.058
+            ],
+            [
+              71.623,
+              34.067
+            ],
+            [
+              71.614,
+              34.067
+            ],
+            [
+              71.614,
+              34.058
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
