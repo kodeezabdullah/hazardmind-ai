@@ -1,5 +1,6 @@
 annotated-types==0.7.0
 anyio==4.13.0
+anthropic
 asyncpg
 band-sdk[anthropic]
 boto3
