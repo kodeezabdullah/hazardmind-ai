@@ -834,6 +834,16 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             structured["band_message"] = band_message
             logger.info("Generated natural Band message (%d chars)", len(band_message))
 
+        # Post the authoritative completion signal to the room ourselves. The
+        # orchestrator advances the pipeline only on a genuine completion signal
+        # ("satellite complete" marker + structured JSON), and relying on the
+        # LLM adapter to relay it verbatim is unreliable — so post it directly.
+        _post_completion(
+            event_id,
+            band_message or f"{HAZARD_AGENT} satellite processing complete.",
+            structured,
+        )
+
         _completed_event_ids.add(event_id)
         return json.dumps(structured)
     except Exception as exc:  # noqa: BLE001 - report any failure to the room.
