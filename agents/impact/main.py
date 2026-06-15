@@ -21,7 +21,6 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import traceback
-import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -116,7 +115,7 @@ class ImpactResponse(BaseModel):
     hospitals_at_risk: int
     schools_at_risk: int
     roads_blocked_km: float
-    roads_blocked: int
+    roads_blocked: float
     bridges_at_risk: int
     # Vulnerability
     vulnerability_score: float
@@ -166,7 +165,12 @@ async def _run_assessment(request: AssessImpactRequest):
         logger.error("Failed to load hazard data: %s", exc)
         raise HTTPException(status_code=503, detail=f"Could not load hazard data: {exc}") from exc
 
-    event_id: str = hazard_data.get("event_id") or str(uuid.uuid4())
+    event_id = hazard_data.get("event_id")
+    if not event_id:
+        raise HTTPException(
+            status_code=400,
+            detail="event_id is required — never generate own",
+        )
     cost_tracker.reset()
 
     logger.info(
@@ -236,13 +240,13 @@ async def _run_assessment(request: AssessImpactRequest):
         "satellite_urls":         satellite_urls,
         "population_affected":    pop_count,
         "total_affected":         pop_count,
-        "high_risk_people":       int(pop_count * 0.2),
-        "medium_risk_people":     int(pop_count * 0.5),
+        "high_risk_people":       int(population_result.get("high_risk_people", int(pop_count * 0.2)) or int(pop_count * 0.2)),
+        "medium_risk_people":     int(population_result.get("medium_risk_people", int(pop_count * 0.5)) or int(pop_count * 0.5)),
         "vulnerable_population":  int(population_result.get("vulnerable_estimate", 0) or 0),
         "hospitals_at_risk":      hospitals,
         "schools_at_risk":        int(infrastructure_result.get("schools_at_risk", 0) or 0),
         "roads_blocked_km":       roads_km,
-        "roads_blocked":          int(roads_km),
+        "roads_blocked":          round(float(roads_km or 0), 1),
         "bridges_at_risk":        int(infrastructure_result.get("bridges_at_risk", 0) or 0),
         "vulnerability_score":    score,
         "estimated_evacuation_time": evac_time,

@@ -9,7 +9,7 @@ Routing table:
 Featherless chain (in order):
   1. google/gemma-4-31B-it
   2. moonshotai/Kimi-K2.6
-  3. Qwen/Qwen3-32B  (spec says 35B but that model doesn't exist on Featherless)
+  3. Qwen/Qwen3.6-35B-A3B
 
 Opus 4.8 and GPT-4.5 both use the AIML API (same base_url, different model names).
 GPT-4.5 is only reached when Opus throws an exception or times out.
@@ -32,7 +32,7 @@ AIML_BASE_URL = "https://api.aimlapi.com/v1"
 
 FEATHERLESS_PRIMARY = "google/gemma-4-31B-it"
 FEATHERLESS_SECONDARY = "moonshotai/Kimi-K2.6"
-FEATHERLESS_TERTIARY = "Qwen/Qwen3-32B"
+FEATHERLESS_TERTIARY = "Qwen/Qwen3.6-35B-A3B"
 FEATHERLESS_CHAIN = [FEATHERLESS_PRIMARY, FEATHERLESS_SECONDARY, FEATHERLESS_TERTIARY]
 
 OPUS_MODEL = "claude-opus-4-8"
