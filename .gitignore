@@ -121,7 +121,11 @@ activemq-data/
 
 # Band SDK agent credentials
 agent_config.yaml
+__pycache__/
+*.pyc
+*.pyo
 .venv
+.venv/
 venv/
 env/
 ENV/
