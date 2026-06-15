@@ -65,19 +65,29 @@ final_reports     <- Agent 4 writes
 
 ## Band Messaging Pattern (Step 9)
 Native Band messaging via band_client.py:
-- send_text_message(content, mentions) -> human-readable discussion
-- send_event(type,title,data)          -> structured event (JSON in content)
+- send_text_message(content, mentions) -> human-readable discussion (chat)
+- send_event(type,title,data)          -> structured event (/events channel)
 - send_thought(content)                -> agent reasoning (event type=thought)
 - send_task_update(task,status,result) -> task progress (event type=task)
 - parse_incoming_message(raw)          -> normalize text/event -> dict
 
-Band REST message API is strict:
-- POST .../messages body: {"message":{"content":str,"mentions":[{"id"}]}}
-- `type` field is REJECTED -> events encode structure as JSON in `content`
-- mentions is REQUIRED, minItems 1, and an agent CANNOT mention itself
-  -> orchestrator-origin messages anchor a mention on the satellite agent
-- Handoffs @mention the target agent when its *_AGENT_ID is set in .env,
+TWO DISTINCT BAND CHANNELS (this is the fix from the live test):
+1. TEXT  -> POST .../messages : visible chat, REQUIRES a mention (minItems 1),
+   an agent CANNOT mention itself. Natural messages go here.
+2. EVENT -> POST .../events   : structured pipeline events, NO mention needed,
+   NOT rendered as a chat line. JSON lives in event `metadata`, never dumped
+   as visible text. send_event() posts here via _post_event().
+   - message_type must be one of: tool_call|tool_result|thought|error|task.
+     The handoff's "data" title is mapped onto `task`.
+
+Mention rules (TEXT channel only):
+- Handoffs @mention the TARGET agent when its *_AGENT_ID is set in .env,
   else anchor on satellite and rely on the @handle in the content.
+- send_handoff() = natural TEXT (@mentions the target) + structured EVENT
+  (no mention). The only @handle the room sees is the natural message's
+  correct target — satellite handoff -> @satellite, hazard -> @hazard,
+  impact -> @impact, report -> @report. Events never carry a misdirected
+  @handle anymore (they used to hardcode the satellite anchor).
 
 INBOUND path (important):
 - GET .../messages REST history is EMPTY for this agent (total_count 0).
@@ -128,9 +138,12 @@ Featherless:
   (still no JSON), so the pipeline never blocks on the LLM.
 
 Two-channel handoff (band_client.send_handoff):
-  1. Natural text message  -> visible in Band chat (what judges read)
-  2. Structured JSON event  -> send_event("data", "agent_result", data) for parsing
-Both are sent on every handoff; structured data stays separate from prose.
+  1. Natural text message  -> POST .../messages, @mentions the TARGET agent
+     (visible in Band chat — what judges read)
+  2. Structured JSON event -> send_event("data","agent_result",data) ->
+     POST .../events (no mention, not a chat line — parsed by the pipeline)
+Both are sent on every handoff; structured data stays separate from prose and
+the event never pollutes the chat with JSON or a wrong @handle.
 
 ## Agent Personalities (band_client.AGENT_PERSONALITIES)
 - hazardmind-orchestrator: Calm, authoritative coordinator. Clear, decisive.
@@ -169,4 +182,6 @@ REPORT_AGENT_ID    = agent 4 (blank -> @handle text fallback)
 - [x] Step 8: Orchestrator
 - [x] Step 9: Band integration (perfect messaging + SDK inbound)
 - [x] Step 9.5: Natural messaging (Featherless) + agent discussion/cross-validation
+- [x] Step 9.6: Fix — events on /events channel (no JSON in chat); handoff
+      @mentions match the natural message target (satellite/hazard/impact/report)
 - [ ] Step 10: Full test (live end-to-end with real agents)

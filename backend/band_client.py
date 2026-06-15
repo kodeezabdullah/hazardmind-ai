@@ -226,6 +226,56 @@ async def send_text_message(
     return await _post_message(content, _resolve_mentions(mentions), room_id)
 
 
+# Band's event endpoint accepts only these message_type values; "data" (used by
+# handoffs) is not one of them, so it maps onto "task" (handoffs carry task data).
+EVENT_MESSAGE_TYPES = {EVENT_TASK, EVENT_THOUGHT, EVENT_TOOL_CALL, EVENT_TOOL_RESULT, EVENT_ERROR}
+
+
+async def _post_event(
+    message_type: str,
+    content: str,
+    metadata: dict,
+    room_id: Optional[str],
+) -> dict:
+    """POST a structured event to a Band room's /events endpoint.
+
+    Events are a distinct channel from text messages: they carry structured
+    `metadata`, require NO mentions, and render as collapsed pipeline events
+    rather than visible chat lines. See
+    POST /api/v1/agent/chats/{chat_id}/events.
+    """
+    default_room, api_key = _require_config()
+    room = room_id or default_room
+    url = f"{BAND_REST_URL}/api/v1/agent/chats/{room}/events"
+    payload = {
+        "event": {
+            "content": content,
+            "message_type": message_type,
+            "metadata": metadata,
+        }
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            url,
+            headers={"X-API-Key": api_key},
+            json=payload,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    # Record the event into the inbound store so GET /band-log and
+    # monitor_progress() see the full pipeline (Band does not echo it back).
+    inbound_store.add(
+        {
+            "content": content,
+            "type": message_type,
+            "data": metadata,
+            "sender": {"name": "hazardmind-orchestrator"},
+        }
+    )
+    return result
+
+
 async def send_event(
     event_type: str,
     title: str,
@@ -235,14 +285,19 @@ async def send_event(
 ) -> dict:
     """Send a structured Band event carrying pipeline data.
 
+    Posts to Band's dedicated /events channel, so the JSON payload lives in the
+    event `metadata` (parsed by the pipeline) rather than being dumped as a
+    visible chat message. Events require no mention, so they never pollute the
+    transcript with a misdirected @handle.
+
     event_type is one of: task / thought / tool_call / tool_result / error.
-    Band's message schema forbids a top-level `type` field, so the structure
-    is encoded as a JSON document in `content` (parse_incoming_message reads
-    it back). A leading @handle keeps the event readable in the transcript.
+    Any other value (e.g. the handoff's "data") is sent as a `task` event.
+    The `mentions` argument is accepted for call-site symmetry with
+    send_text_message() but is unused — events are not directed at anyone.
     """
-    body = {"event": event_type, "title": title, "data": data}
-    content = f"{ANCHOR_HANDLE} [{event_type}] {title}\n{json.dumps(body)}"
-    return await _post_message(content, _resolve_mentions(mentions), room_id)
+    message_type = event_type if event_type in EVENT_MESSAGE_TYPES else EVENT_TASK
+    metadata = {"event": event_type, "title": title, "data": data}
+    return await _post_event(message_type, title, metadata, room_id)
 
 
 async def send_thought(content: str, room_id: Optional[str] = None) -> dict:
@@ -309,23 +364,37 @@ def parse_incoming_message(raw_message: dict) -> dict:
     msg_type = raw_message.get("type", "text") or "text"
     data: Optional[dict] = None
 
-    # Event messages embed a JSON body (optionally after a "@handle [type]..."
-    # header line). Pull out the event type + structured data when present.
-    parsed = _try_json(_json_tail(content))
-    if isinstance(parsed, dict):
-        if parsed.get("event"):
-            msg_type = parsed["event"]
-        if isinstance(parsed.get("data"), dict):
-            data = parsed["data"]
-            inner = data.get("content")
-            if isinstance(inner, str) and inner:
-                content = inner
+    # Events carry their structured payload in `metadata`/`data` (the dedicated
+    # /events channel), not embedded in the text. Honor that first.
+    structured = raw_message.get("metadata")
+    if not isinstance(structured, dict):
+        structured = raw_message.get("data")
+    if isinstance(structured, dict):
+        if structured.get("event"):
+            msg_type = structured["event"]
+        inner_data = structured.get("data")
+        data = inner_data if isinstance(inner_data, dict) else structured
+
+    # Legacy / text path: an event may instead embed a JSON body in `content`
+    # (optionally after a "@handle [type]..." header line). Pull it out too.
+    if data is None:
+        parsed = _try_json(_json_tail(content))
+        if isinstance(parsed, dict):
+            if parsed.get("event"):
+                msg_type = parsed["event"]
+            if isinstance(parsed.get("data"), dict):
+                data = parsed["data"]
+                inner = data.get("content")
+                if isinstance(inner, str) and inner:
+                    content = inner
 
     return {
         "type": msg_type,
         "content": content,
         "data": data,
-        "event_id": _extract_event_id(str(raw_content)),
+        "event_id": raw_message.get("event_id")
+        or _extract_event_id(str(raw_content))
+        or (_extract_event_id(json.dumps(data)) if data else None),
         "agent": _sender_name(raw_message),
         "timestamp": raw_message.get("created_at")
         or raw_message.get("inserted_at")
@@ -573,13 +642,17 @@ async def send_handoff(
     mentions: Optional[list[str]] = None,
     title: str = "agent_result",
 ) -> None:
-    """Send a handoff as TWO Band messages: natural text + structured event.
+    """Send a handoff over TWO Band channels: natural text + structured event.
 
-    1. Natural text — what the judges read in the Band chat.
-    2. Structured JSON event — what the orchestrator parses for the pipeline.
+    1. Natural text — visible chat, @mentions the target agent (via `mentions`).
+       This is what the judges read.
+    2. Structured event — posted to the /events channel (not the chat), carrying
+       the same data in metadata for the pipeline to parse. The event is not a
+       visible message and is directed at no one, so it never shows a misdirected
+       @handle: the only mention the room sees is the natural message's target.
     """
     await send_text_message(natural_msg, mentions=mentions)
-    await send_event("data", title, data, mentions=mentions)
+    await send_event("data", title, data)
 
 
 def handoff_message(handle: str, event_id: str, **fields: Any) -> tuple[str, list[str]]:
