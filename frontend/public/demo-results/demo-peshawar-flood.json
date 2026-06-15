@@ -1,0 +1,462 @@
+{
+  "event_id": "demo-peshawar-flood",
+  "location": "Peshawar, Pakistan",
+  "hazard_type": "Flood",
+  "overall_severity": "CRITICAL",
+  "satellite": {
+    "type": "sentinel-1",
+    "reason": "cloud_cover_above_30_percent_sar_selected",
+    "cloud_cover": 42,
+    "scene_id": "S1A_DEMO_PESHAWAR_20260613"
+  },
+  "boundaries": {
+    "region_boundary": {
+      "type": "FeatureCollection",
+      "features": []
+    },
+    "risk_cities": [
+      "Peshawar"
+    ],
+    "merged_polygon": {
+      "type": "Feature",
+      "properties": {
+        "name": "Peshawar analysis area"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.4,
+              33.9
+            ],
+            [
+              71.65,
+              33.9
+            ],
+            [
+              71.65,
+              34.1
+            ],
+            [
+              71.4,
+              34.1
+            ],
+            [
+              71.4,
+              33.9
+            ]
+          ]
+        ]
+      }
+    },
+    "bbox": [
+      71.4,
+      33.9,
+      71.65,
+      34.1
+    ]
+  },
+  "artifacts": {
+    "true_color_url": "",
+    "index_url": "",
+    "classification_url": "",
+    "geojson_url": ""
+  },
+  "analysis": {
+    "index_type": "SAR VV/VH ratio",
+    "mean_value": 0.24,
+    "affected_area_km2": 153.37,
+    "damage_percent": 24.3,
+    "total_zones": 22,
+    "zones": {
+      "type": "FeatureCollection",
+      "features": [
+        {
+          "type": "Feature",
+          "properties": {
+            "zone_id": "FZ-01",
+            "severity": "critical",
+            "class_name": "deep_water",
+            "area_km2": 12.4
+          },
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  71.47,
+                  33.96
+                ],
+                [
+                  71.56,
+                  33.96
+                ],
+                [
+                  71.56,
+                  34.03
+                ],
+                [
+                  71.47,
+                  34.03
+                ],
+                [
+                  71.47,
+                  33.96
+                ]
+              ]
+            ]
+          }
+        },
+        {
+          "type": "Feature",
+          "properties": {
+            "zone_id": "FZ-02",
+            "severity": "high",
+            "class_name": "water",
+            "area_km2": 8.7
+          },
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+              [
+                [
+                  71.43,
+                  33.93
+                ],
+                [
+                  71.5,
+                  33.93
+                ],
+                [
+                  71.5,
+                  33.98
+                ],
+                [
+                  71.43,
+                  33.98
+                ],
+                [
+                  71.43,
+                  33.93
+                ]
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "hazard": {
+    "flood_risk": "CRITICAL",
+    "earthquake_risk": "MEDIUM",
+    "landslide_risk": "LOW",
+    "confidence_scores": {
+      "flood": 0.91,
+      "earthquake": 0.67,
+      "landslide": 0.54
+    }
+  },
+  "impact": {
+    "population_affected": 540000,
+    "hospitals_at_risk": 14,
+    "roads_blocked_km": 89,
+    "schools_affected": 67,
+    "vulnerability_score": 8.2,
+    "critical_facilities": [
+      {
+        "name": "Lady Reading Hospital",
+        "type": "hospital",
+        "lat": 34.015,
+        "lng": 71.57,
+        "risk": "HIGH"
+      },
+      {
+        "name": "Khyber Teaching Hospital",
+        "type": "hospital",
+        "lat": 33.998,
+        "lng": 71.487,
+        "risk": "MEDIUM"
+      }
+    ]
+  },
+  "routes": {
+    "evacuation_routes": {
+      "type": "FeatureCollection",
+      "features": [
+        {
+          "type": "Feature",
+          "properties": {
+            "name": "Evacuation Route 1"
+          },
+          "geometry": {
+            "type": "LineString",
+            "coordinates": [
+              [
+                71.49,
+                33.97
+              ],
+              [
+                71.53,
+                34.0
+              ],
+              [
+                71.59,
+                34.06
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "report": {
+    "summary": "Peshawar is experiencing a CRITICAL flood event, with SAR analysis confirming 153.37 km\u00b2 inundated and 540,000 people exposed at 0.91 confidence. Critical deep-water zones concentrate in the urban core, placing 14 hospitals, 89 km of roads, and 67 schools at immediate risk. Response capacity is severely limited by a single evacuation route and a vulnerability score of 8.2, raising egress and logistics concerns. Immediate priorities are evacuation of FZ-01 and FZ-02, medical surge staging at high-risk hospitals, and clearing road corridors for rescue access. These SAR-derived figures require ground-truth validation and should guide rapid mobilization rather than serve as official counts.",
+    "detailed_body": "Peshawar, Pakistan is experiencing a CRITICAL flood scenario with 153.37 km2 affected and 540,000 people exposed. Flood risk is classified as CRITICAL with hospitals, roads, and schools requiring immediate operational attention.",
+    "technical_analysis": "Sentinel-1 SAR VV/VH ratio analysis (mean 0.24) derived flood extent of 153.37 km\u00b2, with 24.3% of affected area classified as damaged. Critical deep-water zones (FZ-01, 12.4 km\u00b2) concentrate in urban core, posing high risk to vital infrastructure including two major hospitals. Population exposure exceeds half a million, with a vulnerability score of 8.2 compounded by only one designated evacuation route. Compromised road network (89 km blocked) and 67 schools further hinder response and recovery. Flood risk is rated CRITICAL (confidence 0.91) based on multi-index corroboration.",
+    "recommendations": [
+      "Prioritize evacuation in critical flood zones.",
+      "Deploy emergency medical support near hospitals at risk.",
+      "Clear blocked road corridors for rescue access.",
+      "Open temporary shelters for displaced families.",
+      "Monitor flood expansion using updated satellite imagery.",
+      "Evacuate critical flood zones FZ-01 and FZ-02",
+      "Secure Lady Reading Hospital and stage medical surge",
+      "Clear primary road corridors for emergency rescue access",
+      "Water rescue boats and high-clearance vehicles",
+      "Emergency medical supplies for at-risk hospitals"
+    ],
+    "response_priorities": [
+      "Activate evacuation support for FZ-01 and FZ-02.",
+      "Protect hospital access and stage medical surge teams near high-risk facilities.",
+      "Clear blocked road corridors needed for rescue and logistics movement."
+    ],
+    "assumptions": [
+      "Satellite, hazard, and impact values are local demo data until upstream agents publish live outputs.",
+      "Risk zone geometries are simplified mock polygons for dashboard and report demonstration.",
+      "Facility and route coordinates are approximate and intended for prototype visualization."
+    ],
+    "limitations": [
+      "No live Band messages are consumed in this local demo run.",
+      "No field validation, hydrologic model, or live basemap tiles are used for artifact generation.",
+      "Impact estimates should be treated as decision-support indicators, not official counts."
+    ],
+    "pdf_url": "/demo-results/demo-peshawar-flood-report.pdf",
+    "map_url": "https://hazardmind.vercel.app/map/demo-peshawar-flood",
+    "recommended_response_level": "NDMA Level-3"
+  },
+  "intelligence": {
+    "criticality": {
+      "criticality": "critical",
+      "overall_confidence": 0.91,
+      "escalation_required": true,
+      "rationale": "Peshawar faces a catastrophic flood with 153 km\u00b2 inundated, 540,000 people affected, 14 hospitals at risk, and only one evacuation route, demanding immediate intervention.",
+      "trigger_factors": [
+        "catastrophic flood extent",
+        "high population exposure",
+        "critical infrastructure at risk",
+        "limited evacuation capacity",
+        "high vulnerability score"
+      ]
+    },
+    "anomalies": {
+      "anomalies_detected": true,
+      "anomalies": [
+        {
+          "type": "other",
+          "severity": "medium",
+          "description": "Critical event with only one evacuation route for 540,000 people",
+          "recommended_handling": "Identify and establish alternative evacuation corridors immediately"
+        },
+        {
+          "type": "missing_area",
+          "severity": "low",
+          "description": "PDF and Map URLs are empty",
+          "recommended_handling": "Generate and link operational maps and PDF reports"
+        }
+      ]
+    },
+    "map_narrative": {
+      "map_narrative": "The static risk map identifies a critical flood emergency in Peshawar, with SAR-detected inundation covering 153.37 km\u00b2 and affecting approximately 540,000 people. The data highlights severe operational constraints, including 89 km of blocked roads and high-risk threats to 14 hospitals and 67 schools, necessitating immediate evacuation and medical surge staging.",
+      "key_spatial_findings": [
+        "24.3% damage across 22 identified flood zones",
+        "Critical deep-water concentrations within the urban core",
+        "Severe logistics bottleneck with only one viable evacuation route",
+        "High vulnerability score (8.2) indicating limited local resilience"
+      ],
+      "hotspots": [
+        "Flood Zones FZ-01 and FZ-02 (Priority Evacuation)",
+        "Lady Reading Hospital (High Risk)",
+        "Khyber Teaching Hospital (Medium Risk)"
+      ],
+      "map_limitations": [
+        "SAR-derived indicators require ground-truth validation",
+        "Static snapshot does not reflect real-time flood expansion",
+        "Confidence scores for secondary hazards (earthquake/landslide) are lower than flood data"
+      ]
+    },
+    "priority_timeline": {
+      "next_6_hours": [
+        "Evacuate critical flood zones FZ-01 and FZ-02",
+        "Secure Lady Reading Hospital and stage medical surge",
+        "Clear primary road corridors for emergency rescue access"
+      ],
+      "next_24_hours": [
+        "Establish temporary shelters for 540,000 affected persons",
+        "Deploy emergency medical teams to high-risk hospitals",
+        "Secure and stabilize remaining critical infrastructure"
+      ],
+      "next_72_hours": [
+        "Conduct ground-truth validation of SAR inundation data",
+        "Restore blocked road networks to improve logistics",
+        "Implement long-term displaced person support services"
+      ],
+      "resource_priorities": [
+        "Water rescue boats and high-clearance vehicles",
+        "Emergency medical supplies for at-risk hospitals",
+        "Temporary shelter kits and potable water"
+      ],
+      "coordination_priorities": [
+        "Sync SAR data with ground-level rescue teams",
+        "Manage traffic flow on the single evacuation route",
+        "Coordinate inter-agency medical surge capacity"
+      ]
+    },
+    "decision_brief": {
+      "decision_brief": "CRITICAL flood in Peshawar, Pakistan (event demo-peshawar-flood). Sentinel-1 SAR analysis confirms 153.37 km\u00b2 inundated with 24.3% damage across 22 zones at high flood confidence (0.91). An estimated 540,000 people are exposed, with 14 hospitals, 89 km of blocked roads, and 67 schools at immediate operational risk. Response is severely constrained by only one designated evacuation route and a high vulnerability score (8.2). Immediate priorities: evacuate flood zones FZ-01/FZ-02, secure Lady Reading Hospital with medical surge staging, and clear primary road corridors. SAR-derived figures are decision-support indicators pending ground-truth validation.",
+      "official_summary": "Peshawar is experiencing a CRITICAL flood event, with SAR analysis confirming 153.37 km\u00b2 inundated and 540,000 people exposed at 0.91 confidence. Critical deep-water zones concentrate in the urban core, placing 14 hospitals, 89 km of roads, and 67 schools at immediate risk. Response capacity is severely limited by a single evacuation route and a vulnerability score of 8.2, raising egress and logistics concerns. Immediate priorities are evacuation of FZ-01 and FZ-02, medical surge staging at high-risk hospitals, and clearing road corridors for rescue access. These SAR-derived figures require ground-truth validation and should guide rapid mobilization rather than serve as official counts.",
+      "key_decisions_required": [
+        "Authorize immediate evacuation of flood zones FZ-01 and FZ-02 within the next 6 hours",
+        "Approve establishment of additional evacuation corridors to relieve the single-route bottleneck for 540,000 people",
+        "Direct medical surge staging and protection measures at Lady Reading Hospital and Khyber Teaching Hospital",
+        "Commit resources to clear 89 km of blocked road corridors for rescue access",
+        "Authorize opening of temporary shelters and potable water distribution for displaced populations",
+        "Order ground-truth validation of SAR inundation data and generation of operational maps and reports"
+      ],
+      "human_review_required": true
+    },
+    "quality_check": {
+      "status": "not_ready",
+      "checks": {
+        "event_id_present": true,
+        "satellite_data_present": true,
+        "hazard_data_present": true,
+        "impact_data_present": true,
+        "map_artifacts_present": true,
+        "recommendations_present": true,
+        "confidence_above_threshold": true
+      },
+      "warnings": [
+        "GeoJSON artifact URL is not available in local demo mode.",
+        "Map URL is generated later by the local artifact step.",
+        "PDF and Map URLs are missing, preventing visual verification of the crisis zones."
+      ],
+      "blocking_issues": [
+        "Severe logistical failure: 0 designated evacuation routes in 'routes' data, contradicting reports of 'one route', creating a critical safety risk for 540,000 people."
+      ],
+      "review_note": "Critical safety data conflict regarding evacuation routes; requires immediate correction before deployment."
+    },
+    "band_ready_message": {
+      "target": "@muhammad-abdullah",
+      "message": "HazardMind Report Agent complete for demo-peshawar-flood (Peshawar, Pakistan, Flood). Criticality: critical; confidence: 91%. Summary: Peshawar is experiencing a CRITICAL flood event, with SAR analysis confirming 153.37 km\u00b2 inundated and 540,000 people exposed at 0.91 confidence. Critical deep-water zones concentrate in the urban core, placing 14 hospitals, 89 km of roads, and 67 schools at immediate risk. Response capacity is severely limited by a single evacuation route and a vulnerability score of 8.2, raising egress and logistics concerns. Immediate priorities are evacuation of FZ-01 and FZ-02, medical surge staging at high-risk hospitals, and clearing road corridors for rescue access. These SAR-derived figures require ground-truth validation and should guide rapid mobilization rather than serve as official counts.",
+      "status": "NEEDS_REVIEW",
+      "confidence": 0.91
+    }
+  },
+  "model_sources": {
+    "detailed_report": "featherless:composite",
+    "executive_summary": "aiml:opus-4.8",
+    "fallback_used": false,
+    "featherless_model": "moonshotai/Kimi-K2.6",
+    "intelligence": {
+      "criticality": "featherless:deepseek-v4-pro",
+      "anomaly_check": "featherless:gemma-4-31b-it",
+      "map_narrative": "featherless:gemma-4-31b-it",
+      "priority_recommendations": "featherless:gemma-4-31b-it",
+      "decision_brief": "aiml:opus-4.8",
+      "quality_check": "hybrid:deterministic+featherless:gemma-4-31b-it",
+      "band_ready_message": "template+intelligence"
+    }
+  },
+  "recommended_response_level": "NDMA Level-3",
+  "agent_log": [
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Report Agent received event context",
+      "timestamp": "2026-06-13T18:03:00Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Featherless composite generated detailed disaster report",
+      "timestamp": "2026-06-13T18:03:20Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "AI/ML generated executive summary",
+      "timestamp": "2026-06-13T18:03:40Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Criticality assessed",
+      "timestamp": "2026-06-13T18:03:45Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Anomalies checked",
+      "timestamp": "2026-06-13T18:03:50Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Map narrative generated",
+      "timestamp": "2026-06-13T18:03:55Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Priority timeline generated",
+      "timestamp": "2026-06-13T18:04:00Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Decision brief generated with Opus",
+      "timestamp": "2026-06-13T18:04:05Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Quality check completed",
+      "timestamp": "2026-06-13T18:04:10Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Band-ready final message prepared",
+      "timestamp": "2026-06-13T18:04:15Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "Static cartography map generated locally",
+      "timestamp": "2026-06-13T18:04:00Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "PDF generated locally",
+      "timestamp": "2026-06-13T18:04:20Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "JSON written locally",
+      "timestamp": "2026-06-13T18:04:40Z"
+    }
+  ]
+}

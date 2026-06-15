@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  background: #050b14;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(58, 162, 255, 0.14), transparent 28rem),
+    radial-gradient(circle at 86% 8%, rgba(133, 92, 255, 0.16), transparent 24rem),
+    linear-gradient(135deg, #050b14 0%, #07111f 48%, #050b14 100%);
+  color: #e8f4ff;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.glass-panel {
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(7, 17, 31, 0.86), rgba(5, 11, 20, 0.72));
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 34px rgba(34, 211, 238, 0.06);
+  backdrop-filter: blur(18px);
+}
+
+.panel-section {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.status-chip {
+  border: 1px solid rgba(103, 232, 249, 0.24);
+  border-radius: 999px;
+  background: rgba(34, 211, 238, 0.08);
+  padding: 2px 7px;
+  color: #a5f3fc;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.thin-scrollbar {
+  scrollbar-color: rgba(103, 232, 249, 0.28) rgba(15, 23, 42, 0.26);
+  scrollbar-width: thin;
+}
+
+.thin-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(103, 232, 249, 0.28);
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.26);
+}
+
+.command-grid {
+  background-image:
+    linear-gradient(rgba(125, 211, 252, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(125, 211, 252, 0.08) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+.scanline {
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.025),
+    rgba(255, 255, 255, 0.025) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+  mix-blend-mode: soft-light;
+}
+
+.maplibregl-popup-content {
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 8px;
+  background: rgba(5, 11, 20, 0.95);
+  color: #e8f4ff;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.38);
+}
+
+.maplibregl-popup-tip {
+  border-top-color: rgba(5, 11, 20, 0.95) !important;
+}
+
+.maplibregl-ctrl-group {
+  border: 1px solid rgba(103, 232, 249, 0.2) !important;
+  background: rgba(5, 11, 20, 0.78) !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32) !important;
+}
+
+.maplibregl-ctrl-group button {
+  height: 26px !important;
+  width: 26px !important;
+}
+
+.facility-marker {
+  display: grid;
+  height: 18px;
+  width: 18px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.78);
+}
+
+.facility-marker::after {
+  content: "";
+  height: 6px;
+  width: 6px;
+  border-radius: 999px;
+  background: white;
+}
