@@ -197,3 +197,7 @@ frontend/.env.local
 # Build outputs
 build/
 dist/
+
+# Local scratch / debug artifacts
+backend/last_job_id.txt
+clear_backlog.py
