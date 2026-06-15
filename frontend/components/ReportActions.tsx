@@ -3,11 +3,14 @@ import type { HazardMindResult } from "../lib/types";
 
 type ReportActionsProps = {
   result: HazardMindResult;
+  currentEventId?: string;
 };
 
-export function ReportActions({ result }: ReportActionsProps) {
+export function ReportActions({ result, currentEventId }: ReportActionsProps) {
   const pdfDisabled = !result.report.pdf_url;
   const mapDisabled = !result.report.map_url;
+  const currentMapPath = currentEventId ? `/map/${currentEventId}` : "";
+  const mapIsCurrentPage = Boolean(currentMapPath && result.report.map_url.includes(currentMapPath));
 
   return (
     <section className="mt-3 grid grid-cols-2 gap-2">
@@ -32,14 +35,14 @@ export function ReportActions({ result }: ReportActionsProps) {
           PDF Report
         </a>
       )}
-      {mapDisabled ? (
+      {mapDisabled || mapIsCurrentPage ? (
         <button
           className="flex cursor-not-allowed items-center justify-center gap-2 rounded-md border border-violet-300/24 bg-violet-300/10 px-2.5 py-1.5 text-xs font-semibold text-violet-50 opacity-55 transition"
           disabled
           type="button"
         >
           <MapPinned className="h-4 w-4" />
-          Map Pending
+          {mapIsCurrentPage ? "Current Map View" : "Map Pending"}
         </button>
       ) : (
         <a

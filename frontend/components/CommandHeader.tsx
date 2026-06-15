@@ -3,7 +3,7 @@ import type { HazardMindResult } from "../lib/types";
 
 type CommandHeaderProps = {
   result: HazardMindResult;
-  dataSource: "Report Agent JSON" | "Local fallback";
+  dataSource: string;
 };
 
 export function CommandHeader({ result, dataSource }: CommandHeaderProps) {

@@ -5,9 +5,10 @@ import type { HazardMindResult } from "../lib/types";
 
 type IntelligencePanelProps = {
   result: HazardMindResult;
+  currentEventId?: string;
 };
 
-export function IntelligencePanel({ result }: IntelligencePanelProps) {
+export function IntelligencePanel({ result, currentEventId }: IntelligencePanelProps) {
   return (
     <aside className="glass-panel thin-scrollbar min-h-0 overflow-y-auto p-3">
       <div className="mb-3 flex items-center justify-between">
@@ -22,7 +23,7 @@ export function IntelligencePanel({ result }: IntelligencePanelProps) {
         </div>
       </div>
 
-      <ReportActions result={result} />
+      <ReportActions result={result} currentEventId={currentEventId} />
 
       <StatsGrid result={result} />
 
