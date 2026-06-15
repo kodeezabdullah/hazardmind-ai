@@ -263,15 +263,17 @@ Detailed operational report:
 """.strip()
 
 
-async def generate_report(event_id: str):
-    if event_id != MOCK_EVENT_DATA["event_id"]:
+async def generate_report(event_id: str, context: dict | None = None):
+    if context is None and event_id != MOCK_EVENT_DATA["event_id"]:
         raise ValueError(
             f"Only local mock event '{MOCK_EVENT_DATA['event_id']}' is available right now."
         )
 
     load_dotenv(BASE_DIR / ".env")
 
-    result = json.loads(json.dumps(MOCK_EVENT_DATA))
+    source_context = context or MOCK_EVENT_DATA
+    result = json.loads(json.dumps(source_context))
+    result["event_id"] = event_id
     agent_log = [
         _report_log("Report Agent received event context", "2026-06-13T18:03:00Z"),
     ]

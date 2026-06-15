@@ -20,3 +20,4 @@ build/
 .mypy_cache/
 coverage/
 .coverage
+agents/report/generated/
