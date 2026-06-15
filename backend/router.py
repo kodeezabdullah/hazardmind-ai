@@ -1,15 +1,18 @@
+import asyncio
+import logging
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from band_client import BAND_ROOM_ID, get_room_messages, notify_satellite
+from band_client import BAND_ROOM_ID, get_room_messages
 from db import (
     create_disaster_event,
     get_event_results,
     get_event_status,
 )
+from orchestrator import OrchestratorAgent
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -20,11 +23,22 @@ from models import (
 
 router = APIRouter()
 
+logger = logging.getLogger("hazardmind.router")
+
+# Single orchestrator instance shared across requests.
+orchestrator = OrchestratorAgent()
+
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
     # event_id is generated ONCE here and reused by every agent.
     event_id = str(uuid.uuid4())
+
+    disaster_data = {
+        "location": request.location,
+        "disaster_type": request.disaster_type,
+        "magnitude": request.magnitude,
+    }
 
     await create_disaster_event(
         event_id=event_id,
@@ -33,18 +47,25 @@ async def analyze(request: AnalyzeRequest):
         magnitude=request.magnitude,
     )
 
-    await notify_satellite(
-        event_id=event_id,
-        location=request.location,
-        disaster_type=request.disaster_type,
-        magnitude=request.magnitude,
-    )
+    # Hand off to the orchestrator: sets status -> processing/satellite and
+    # mentions the satellite agent on Band.
+    await orchestrator.start_pipeline(event_id, disaster_data)
+
+    # Watch the pipeline in the background so the request returns immediately.
+    asyncio.create_task(_monitor(event_id))
 
     return AnalyzeResponse(
         job_id=event_id,
-        status="received",
+        status="processing",
         message="Pipeline started",
     )
+
+
+async def _monitor(event_id: str) -> None:
+    try:
+        await orchestrator.monitor_progress(event_id)
+    except Exception:  # noqa: BLE001 - background task must not crash silently
+        logger.exception("monitor_progress failed for event_id=%s", event_id)
 
 
 @router.get("/status/{job_id}", response_model=StatusResponse)
