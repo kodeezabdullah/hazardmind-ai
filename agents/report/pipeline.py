@@ -126,6 +126,8 @@ async def run_report_pipeline(
                 )
             except Exception as exc:
                 warnings.append(f"R2 upload failed: {_safe_error_message(exc)}")
+                report["report"]["pdf_url"] = None
+                _append_report_log(report, "R2 upload failed; pdf_url set to None", "2026-06-13T18:05:00Z")
             else:
                 report["report"]["pdf_url"] = pdf_url
                 r2_uploaded = True

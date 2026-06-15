@@ -49,11 +49,17 @@ CREATE TABLE IF NOT EXISTS impact_data (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS final_reports (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+DROP TABLE IF EXISTS final_reports CASCADE;
+CREATE TABLE final_reports (
+    id SERIAL PRIMARY KEY,
     event_id UUID REFERENCES disaster_events(event_id),
     pdf_url TEXT,
     map_url TEXT,
-    summary TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
+    executive_summary TEXT,
+    agent_log JSONB,
+    total_time_seconds INT,
+    confidence_level TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX idx_final_reports_event
+ON final_reports(event_id);

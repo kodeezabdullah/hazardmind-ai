@@ -1,4 +1,5 @@
 import math
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -98,8 +99,16 @@ def _fonts() -> dict[str, ImageFont.ImageFont]:
         candidates = [
             "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+            # Linux
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            # Mac
+            "/System/Library/Fonts/Helvetica.ttc",
         ]
         for candidate in candidates:
+            if not os.path.exists(candidate):
+                continue
             try:
                 return ImageFont.truetype(candidate, size)
             except OSError:
