@@ -12,10 +12,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 FEATHERLESS_MODELS = [
-    "google/gemma-4-31B-it",
-    "moonshotai/Kimi-K2.6",
-    "Qwen/Qwen3.6-35B-A3B",
-    "deepseek-ai/DeepSeek-V4-Pro",
+    "google/gemma-4-31B-it",       # primary
+    "moonshotai/Kimi-K2.6",        # fallback
+    "Qwen/Qwen3.6-35B-A3B",        # fallback
+    "deepseek-ai/DeepSeek-V4-Pro", # fallback
 ]
 
 featherless_client = openai.OpenAI(
@@ -330,11 +330,12 @@ async def quality_check(result: dict) -> dict:
     event_id = result.get("event_id")
 
     checks = {
-        "flood_risk": risks["flood_risk"] in {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
+        "flood_risk": risks["flood_risk"]
+        in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
         "earthquake_risk": risks["earthquake_risk"]
-        in {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
+        in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
         "landslide_risk": risks["landslide_risk"]
-        in {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
+        in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
         "overall_severity": risks["overall_severity"]
         in {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
         "confidence_scores": all(
@@ -530,7 +531,7 @@ def _normalize_risk(value: Any) -> str | None:
     if not value:
         return None
     risk = str(value).upper()
-    return risk if risk in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} else None
+    return risk if risk in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"} else None
 
 
 def _normalize_focus_hazard(value: Any) -> str | None:

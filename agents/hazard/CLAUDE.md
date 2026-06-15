@@ -46,15 +46,15 @@ BAND_AGENT_ID=783f0c33-9dba-43e9-83e6-197a59d76f8f
 BAND_API_KEY=<get from agent_config.yaml after first run>
 
 # AI/ML API — Band adapter uses this as Claude
-ANTHROPIC_API_KEY=3ee2a731c10e3eec1352ebdaeb58d65a
+ANTHROPIC_API_KEY=your_aiml_key_here
 ANTHROPIC_BASE_URL=https://api.aimlapi.com/v1
-AIML_API_KEY=3ee2a731c10e3eec1352ebdaeb58d65a
+AIML_API_KEY=your_aiml_key_here
 
 # Featherless — internal parallel analysis
-FEATHERLESS_API_KEY=rc_883c4333cb5da1cd0378e9710d5c4c9f150972121ec90b10c7fedb5e990c80d3
+FEATHERLESS_API_KEY=your_featherless_key_here
 
 # Shared DB
-NEON_DATABASE_URL=postgresql://neondb_owner:npg_5T2wDeFopSBY@ep-lingering-hat-atamspl7.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require
+NEON_DATABASE_URL=postgresql://user:password@host/db
 
 # R2 — READ ONLY, never write
 CLOUDFLARE_R2_PUBLIC=https://pub-720f47eaad2f4997a76a02f8bf14f58a.r2.dev
@@ -317,7 +317,7 @@ git push origin agent/hazard
 |--------|------|---------|-------------|
 | Abdullah | Satellite Agent + Backend + Lead | agent/satellite | @kodeezabdullah/hazardmind-satellite |
 | Hamza (ME) | Hazard Agent | agent/hazard | @khurramhamza120/hazardmind-hazard |
-| Hanan | Impact Agent | agent/impact | TBD |
+| Hanan | Impact Agent | agent/impact | @geospatial.9660/hazardmind-impact |
 | Zohair | Report Agent + Frontend | agent/report | TBD |
 
 GitHub repo: https://github.com/kodeezabdullah/hazardmind-ai
@@ -327,7 +327,7 @@ GitHub repo: https://github.com/kodeezabdullah/hazardmind-ai
 ## SHARED INFRASTRUCTURE
 
 ```
-Neon PostGIS: postgresql://neondb_owner:npg_5T2wDeFopSBY@ep-lingering-hat-atamspl7.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require
+Neon PostGIS: postgresql://user:password@host/db   ← real value in .env (gitignored)
 R2 Public:    https://pub-720f47eaad2f4997a76a02f8bf14f58a.r2.dev
 R2 Structure: events/{event_id}/true_color.png   ← Abdullah writes
               events/{event_id}/index_map.png    ← Abdullah writes
@@ -395,9 +395,10 @@ Rules:
 
 ## KNOWN ISSUES
 - BAND_API_KEY empty — agent cannot connect until Abdullah provides it
-- HANAN_HANDLE = "TBD_HANAN_HANDLE" — replace when Hanan shares her handle
-- AnthropicAdapter: change api_key= to provider_key= (deprecation warning)
-- openai pinned to 1.56.0 in requirements.txt — do not upgrade
+- HANAN_HANDLE wired to @geospatial.9660/hazardmind-impact (agent_id a9a1c74f-...)
+- AnthropicAdapter uses provider_key= (deprecation resolved)
+- DB write uses asyncpg against the real hazard_zones schema (flood/earthquake/
+  landslide_risk, overall_severity) — see shared/db/schema.sql
 
 ---
 
