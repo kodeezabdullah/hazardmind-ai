@@ -1,7 +1,8 @@
 # HazardMind AI
 
-Autonomous multi-agent disaster risk
-intelligence platform.
+HazardMind AI — Autonomous multi-agent disaster risk intelligence platform.
+Detects floods, earthquakes & landslides anywhere in the world using satellite
+imagery, GIS analysis & AI agents collaborating through Band.
 
 ## Agents
 - Satellite Agent — imagery processing
