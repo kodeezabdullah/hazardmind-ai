@@ -49,6 +49,38 @@ async def send_band_message(
         return resp.json()
 
 
+async def get_room_messages(room_id: str, event_id: str) -> list[dict]:
+    """Fetch a Band room's messages and return only those mentioning event_id.
+
+    GET /api/v1/agent/chats/{room_id}/messages
+
+    Every pipeline message carries the event_id in its content, so filtering by
+    substring keeps the transcript scoped to a single job.
+    """
+    room = room_id or BAND_ROOM_ID
+    if not room:
+        raise RuntimeError("BAND_ROOM_ID is not configured")
+    if not BAND_API_KEY:
+        raise RuntimeError("BAND_API_KEY is not configured")
+
+    url = f"{BAND_REST_URL}/api/v1/agent/chats/{room}/messages"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, headers={"X-API-Key": BAND_API_KEY})
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Band may wrap the list under "messages" (or return a bare list).
+    messages = data.get("messages", data) if isinstance(data, dict) else data
+    if not isinstance(messages, list):
+        return []
+
+    return [
+        msg
+        for msg in messages
+        if event_id in str(msg.get("content", ""))
+    ]
+
+
 async def notify_satellite(
     event_id: str,
     location: str,
