@@ -24,6 +24,7 @@ with a line like "satellite complete" / "hazard complete" / ... — that marker
 is what monitor_progress() keys off of to step the database forward.
 """
 import asyncio
+import json
 import logging
 import os
 
@@ -35,18 +36,21 @@ from band_client import (
     IMPACT_HANDLE,
     REPORT_HANDLE,
     SATELLITE_HANDLE,
+    all_handles_text,
     generate_natural_message,
     handoff_message,
     inbound_store,
     mentions_for,
+    mentions_for_all,
     notify_satellite,
+    poll_room_into_store,
     send_event,
     send_handoff,
     send_task_update,
     send_text_message,
     send_thought,
 )
-from db import update_event_status
+from db import insert_satellite_result, update_event_status
 
 load_dotenv()
 
@@ -62,10 +66,17 @@ ORCHESTRATOR_AGENT = "hazardmind-orchestrator"
 
 # How often monitor_progress() re-reads the Band room while waiting.
 POLL_INTERVAL_SECONDS = 5
-# Give up after this long with no further progress (safety net for the demo).
-MONITOR_TIMEOUT_SECONDS = 600
-# How long to pause after raising an anomaly so the other agent can respond.
+# No hard timeout — the satellite pipeline can take a long time for real imagery.
+# monitor_progress() waits indefinitely until each agent posts completion.
 DISCUSSION_WAIT_SECONDS = 30
+
+# While waiting on a real agent, if the room stays quiet for this long the
+# orchestrator nudges the agent ONCE for a status update. Kept infrequent and
+# capped (MAX_NUDGES) so nudges don't pile into the agent's own work queue and
+# slow it down. It NEVER advances the pipeline off a nudge — only a genuine
+# completion signal from the agent moves the stage forward.
+NUDGE_AFTER_SECONDS = 45
+MAX_NUDGES = 2
 
 # Cross-validation thresholds.
 GDACS_EXTENT_MULTIPLIER = 2.0   # satellite extent > GDACS estimate * this -> flag
@@ -121,12 +132,24 @@ PIPELINE_TRANSITIONS = [
 
 
 def _make_recording_adapter():
-    """Build an AnthropicAdapter that records every inbound message.
+    """Build an AnthropicAdapter that records every inbound message but does NOT
+    auto-reply to it.
 
     Band delivers room messages to the connected SDK agent over its WebSocket
     execution loop (the REST GET /messages history is empty for this agent), so
     we capture each inbound message into the shared inbound_store. That store is
     what monitor_progress() and GET /band-log read from.
+
+    Crucially, this adapter is RECORD-ONLY: it deliberately skips
+    ``super().on_event()`` (the call that runs the Anthropic tool loop and posts
+    a reply). The orchestrator's real messages — dispatch, cross-validation
+    discussions, nudges, handoffs, the closing summary — are all sent explicitly
+    via band_client REST posts from start_pipeline()/monitor_progress(). Letting
+    the LLM also auto-reply to every @mention created an endless chatter loop
+    with the satellite agent (each reply @mentioned the other, which triggered
+    another reply) and spawned phantom event_ids. The orchestrator only speaks
+    when the pipeline logic decides to — i.e. while a stage is incomplete, or on
+    an anomaly/discrepancy — never idle chatter once an agent is done.
     """
     from band.adapters import AnthropicAdapter
 
@@ -148,7 +171,8 @@ def _make_recording_adapter():
                 )
             except Exception:  # noqa: BLE001 - recording must not break delivery
                 logger.exception("Failed to record inbound Band message")
-            await super().on_event(inp)
+            # Intentionally do NOT call super().on_event(inp): the orchestrator
+            # does not converse via the LLM, it drives the pipeline explicitly.
 
     return RecordingAnthropicAdapter(model=ANTHROPIC_MODEL)
 
@@ -193,6 +217,7 @@ class OrchestratorAgent:
         urgency: str = "normal",
         anomalies=None,
         questions=None,
+        event_id: str | None = None,
     ) -> str:
         """Generate + post a natural orchestrator message to one agent."""
         msg = await generate_natural_message(
@@ -207,6 +232,8 @@ class OrchestratorAgent:
             questions=questions or [],
             personality=AGENT_PERSONALITIES[ORCHESTRATOR_AGENT],
         )
+        if event_id:
+            msg = f"{msg}\nevent_id: {event_id}"
         await send_text_message(msg, mentions=mentions_for(receiver_handle))
         return msg
 
@@ -221,7 +248,50 @@ class OrchestratorAgent:
             # Some agents nest results directly under data.
             if str(data.get("step", "")).lower() == agent and isinstance(data, dict):
                 return data
+        # Fall back to the flat completion payload the agent appends to the tail
+        # of its room message (natural prose + JSON), which parse_incoming_message
+        # does not surface under `data` when it is not nested.
+        flat = self._satellite_payload(event_id) if agent == "satellite" else {}
+        return flat
+
+    @staticmethod
+    def _satellite_payload(event_id: str) -> dict:
+        """Pull the satellite agent's flat result JSON off its room message tail.
+
+        The satellite agent relays a natural message and appends its full result
+        object (status=complete, event_id, urls, affected_area_km2, …). We scan
+        the recorded inbound messages for that JSON object so the orchestrator
+        can persist it and summarize the findings.
+        """
+        for parsed in inbound_store.for_event(event_id):
+            obj = _json_object_from_text(str(parsed.get("content", "")))
+            if (
+                isinstance(obj, dict)
+                and str(obj.get("event_id", "")) == event_id
+                and str(obj.get("status", "")).lower() == "complete"
+                and (
+                    "affected_area_km2" in obj
+                    or "true_color_url" in obj
+                    or "classification_url" in obj
+                )
+            ):
+                return obj
         return {}
+
+    async def _persist_satellite(self, event_id: str, data: dict) -> None:
+        """Write the satellite result row from its completion payload."""
+        if not data:
+            logger.info(
+                "event_id=%s: no structured satellite payload to persist", event_id
+            )
+            return
+        try:
+            await insert_satellite_result(event_id=event_id, data=data)
+            logger.info("event_id=%s: satellite_results written", event_id)
+        except Exception:  # noqa: BLE001 - DB write must not break the pipeline
+            logger.exception(
+                "event_id=%s: failed to write satellite_results", event_id
+            )
 
     # -- pipeline -------------------------------------------------------------
 
@@ -258,6 +328,7 @@ class OrchestratorAgent:
                 ),
                 urgency=urgency,
                 questions=["Please prioritize SAR coverage of the urban core."],
+                event_id=event_id,
             )
         except Exception:  # noqa: BLE001 - natural msg is best-effort
             logger.exception("event_id=%s: natural dispatch failed", event_id)
@@ -273,44 +344,99 @@ class OrchestratorAgent:
         logger.info("Pipeline started for event_id=%s", event_id)
 
     async def monitor_progress(self, event_id: str) -> str:
-        """Watch the Band room and advance the DB as each agent completes."""
+        """Watch the Band room and advance the DB as each agent completes.
+
+        On every poll cycle we first fetch the full room transcript via the
+        Band REST API (poll_room_into_store) to seed inbound_store with
+        messages from agents that address other participants (e.g. satellite
+        posting to @hazardmind-hazard). Without this, the orchestrator's
+        WebSocket adapter only sees messages directed *at itself*, and misses
+        completions from pipeline agents.
+
+        There is no hard timeout — the satellite pipeline can take several
+        minutes for real imagery downloads. We poll indefinitely until each
+        agent posts its completion signal. The pipeline is NEVER advanced off a
+        nudge or a guess — only a genuine completion signal from the agent moves
+        a stage forward.
+        """
         stage = 0
-        elapsed = 0
 
         while stage < len(PIPELINE_TRANSITIONS):
             t = PIPELINE_TRANSITIONS[stage]
             agent = t["agent"]
 
+            # Pull the full room transcript into inbound_store so we can see
+            # completions from agents that didn't @mention the orchestrator.
+            await poll_room_into_store(event_id)
+
             if await self._agent_completed(event_id, agent):
                 await self._advance(event_id, t)
                 stage += 1
-                elapsed = 0
                 continue
 
-            if elapsed >= MONITOR_TIMEOUT_SECONDS:
-                logger.warning(
-                    "event_id=%s: timed out waiting for %s to complete",
-                    event_id,
-                    agent,
-                )
-                await self.handle_failure(
-                    event_id,
-                    agent,
-                    f"timed out after {MONITOR_TIMEOUT_SECONDS}s waiting for {agent}",
-                )
-                return t["step"]
-
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            elapsed += POLL_INTERVAL_SECONDS
+            await self._wait_with_nudge(event_id, agent)
 
         await self.on_pipeline_complete(event_id)
         logger.info("event_id=%s: pipeline complete", event_id)
         return "complete"
 
+    async def _wait_with_nudge(self, event_id: str, agent: str) -> None:
+        """Sleep one poll cycle; nudge the agent if the room has gone quiet.
+
+        Keeps the room alive while a real agent (the satellite) is grinding
+        through a long job: if no new message referencing this event has
+        appeared for NUDGE_AFTER_SECONDS, the orchestrator asks the agent for a
+        status update. This NEVER advances the pipeline — only the agent's real
+        completion signal does that.
+        """
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+        seen = len(inbound_store.for_event(event_id))
+        last = self._context.setdefault(event_id, {})
+        if seen != last.get("_last_seen_count"):
+            # Activity since we last looked — reset the quiet timer.
+            last["_last_seen_count"] = seen
+            last["_quiet_seconds"] = 0
+            return
+
+        last["_quiet_seconds"] = last.get("_quiet_seconds", 0) + POLL_INTERVAL_SECONDS
+        nudges = last.get("_nudge_count", 0)
+        if last["_quiet_seconds"] >= NUDGE_AFTER_SECONDS and nudges < MAX_NUDGES:
+            last["_quiet_seconds"] = 0
+            last["_nudge_count"] = nudges + 1
+            handle = SATELLITE_HANDLE if agent == "satellite" else HAZARD_HANDLE
+            role = "Satellite Imagery Lead" if agent == "satellite" else "Pipeline Agent"
+            try:
+                await self._say(
+                    f"hazardmind-{agent}",
+                    handle,
+                    role,
+                    context={"event_id": event_id},
+                    findings="Checking in on your progress",
+                    urgency="normal",
+                    questions=[
+                        "What's your current status? Still processing the imagery, "
+                        "or do you need anything from the team?"
+                    ],
+                    event_id=event_id,
+                )
+            except Exception:  # noqa: BLE001 - nudge is best-effort
+                logger.exception("event_id=%s: nudge to %s failed", event_id, agent)
+
     async def _advance(self, event_id: str, transition: dict) -> None:
         """Apply one pipeline transition: cross-validate, DB update, handoff."""
         agent = transition["agent"]
         data = self._agent_data(event_id, agent)
+
+        # Reset the per-stage nudge budget/timer so the next agent starts fresh.
+        ctx = self._context.setdefault(event_id, {})
+        ctx["_nudge_count"] = 0
+        ctx["_quiet_seconds"] = 0
+
+        # Persist the satellite agent's result so GET /results can join it
+        # (the satellite agent reports over Band; it does not write the DB).
+        if agent == "satellite":
+            await self._persist_satellite(event_id, data)
 
         await update_event_status(
             event_id, status=transition["status"], step=transition["step"]
@@ -510,8 +636,9 @@ class OrchestratorAgent:
             if level == "CRITICAL":
                 urgency = "critical"
                 await send_text_message(
-                    "@all CRITICAL event confirmed. All agents prioritize speed.",
-                    mentions=mentions_for(SATELLITE_HANDLE),
+                    f"{all_handles_text()} CRITICAL event confirmed. "
+                    "All agents prioritize speed.",
+                    mentions=mentions_for_all(),
                 )
             # Trigger 4b: HIGH risk but few satellite zones.
             if level == "HIGH" and sat_zones is not None and sat_zones < MIN_SATELLITE_ZONES:
@@ -565,7 +692,7 @@ class OrchestratorAgent:
                 sender_agent=ORCHESTRATOR_AGENT,
                 sender_role=ORCHESTRATOR_ROLE,
                 receiver_agent="the response team",
-                receiver_handle="@all",
+                receiver_handle=all_handles_text(),
                 context={"disaster": disaster, "impact": impact},
                 findings=(
                     f"Pipeline complete. {location} response analysis delivered"
@@ -576,10 +703,11 @@ class OrchestratorAgent:
             )
         except Exception:  # noqa: BLE001
             summary = (
-                f"@all Pipeline complete. {location} response analysis delivered. "
-                "Report and map ready for NDMA dispatch. All agents performed well."
+                f"{all_handles_text()} Pipeline complete. {location} response "
+                "analysis delivered. Report and map ready for NDMA dispatch. "
+                "All agents performed well."
             )
-        await send_text_message(summary, mentions=mentions_for(SATELLITE_HANDLE))
+        await send_text_message(summary, mentions=mentions_for_all())
         await send_task_update("Pipeline", "complete")
 
     async def handle_failure(self, event_id: str, agent: str, error: str) -> None:
@@ -601,7 +729,7 @@ class OrchestratorAgent:
                     sender_agent=ORCHESTRATOR_AGENT,
                     sender_role=ORCHESTRATOR_ROLE,
                     receiver_agent="the response team",
-                    receiver_handle="@all",
+                    receiver_handle=all_handles_text(),
                     context={"event_id": event_id},
                     findings=(
                         f"Pipeline disruption — {agent} encountered an issue: {error}. "
@@ -620,7 +748,7 @@ class OrchestratorAgent:
                 alert = f"{alert} (agent: {agent})"
             if event_id not in alert:
                 alert = f"{alert}\nevent_id: {event_id}"
-            await send_text_message(alert, mentions=mentions_for(SATELLITE_HANDLE))
+            await send_text_message(alert, mentions=mentions_for_all())
         except Exception:  # noqa: BLE001 - alerting must never mask the failure
             logger.exception(
                 "event_id=%s: failed to post failure alert to Band", event_id
@@ -635,15 +763,38 @@ class OrchestratorAgent:
         and the plain-text "<agent> complete" marker.
         """
         marker = f"{agent} complete".lower()
+        # Natural phrasings the LLM-driven agents tend to use instead of the
+        # literal "<agent> complete" marker (e.g. "satellite analysis complete",
+        # "satellite phase ... complete"). Only counted when the message also
+        # references this event_id (inbound_store.for_event already scopes that).
+        natural_markers = (
+            f"{agent} analysis complete",
+            f"{agent} phase complete",
+            f"{agent} processing complete",
+            f"{agent} stage complete",
+            f"{agent} is complete",
+        )
         for parsed in inbound_store.for_event(event_id):
-            content = str(parsed.get("content", "")).lower()
+            raw_content = str(parsed.get("content", ""))
+            content = raw_content.lower()
             data = parsed.get("data") or {}
             if (
                 str(data.get("step", "")).lower() == agent
                 and str(data.get("status", "")).lower() == "complete"
             ):
                 return True
-            if marker in content:
+            if marker in content or any(nm in content for nm in natural_markers):
+                return True
+            # An agent may relay an LLM-written natural message (which may not
+            # contain a literal completion marker) with its flat result JSON
+            # appended. Recognize that tail payload as completion.
+            obj = _json_object_from_text(raw_content)
+            if (
+                isinstance(obj, dict)
+                and str(obj.get("event_id", "")) == event_id
+                and str(obj.get("status", "")).lower() == "complete"
+                and str(obj.get("step", agent)).lower() in (agent, "")
+            ):
                 return True
         return False
 
@@ -656,3 +807,47 @@ def _num(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_object_from_text(text: str):
+    """Extract the first balanced top-level JSON object embedded in text.
+
+    Agents append their structured result after a natural-language message, so
+    the JSON starts partway through the content. Scans from each '{' and returns
+    the first span that parses as a dict (bracket-balanced, string-aware), or
+    None if there is no JSON object.
+    """
+    import json as _json
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        obj = _json.loads(candidate)
+                    except (ValueError, TypeError):
+                        break  # malformed; try the next '{'
+                    if isinstance(obj, dict):
+                        return obj
+                    break
+        start = text.find("{", start + 1)
+    return None

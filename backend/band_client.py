@@ -47,6 +47,10 @@ AGENT_IDS: dict[str, Optional[str]] = {
     REPORT_HANDLE: REPORT_AGENT_ID,
 }
 
+# Every pipeline agent, in order. Band has no working "@all", so a broadcast
+# must explicitly @mention each agent by name.
+ALL_HANDLES = [SATELLITE_HANDLE, HAZARD_HANDLE, IMPACT_HANDLE, REPORT_HANDLE]
+
 # Agent personalities — fed to Featherless so each agent sounds like a distinct
 # expert colleague in the Band room rather than a generic assistant.
 AGENT_PERSONALITIES = {
@@ -480,10 +484,77 @@ async def get_room_messages(room_id: str, event_id: str) -> list[dict]:
     ]
 
 
+# Track which Band message IDs have already been seeded into inbound_store
+# from the REST poll path so we never add duplicates.
+_seeded_rest_ids: set[str] = set()
+_seeded_rest_lock = threading.Lock()
+
+
+async def poll_room_into_store(event_id: str, room_id: Optional[str] = None) -> None:
+    """Fetch the Band room REST history and seed inbound_store with new messages.
+
+    The orchestrator's WebSocket adapter (RecordingAnthropicAdapter) only fires
+    on_event() when Band routes a message *to the orchestrator* agent. Messages
+    posted by the satellite / hazard / impact / report agents that @mention a
+    *different* agent never trigger that hook, so monitor_progress() misses them
+    and times out waiting for a completion signal that was already posted.
+
+    This function is the complement: it reads the full room transcript via the
+    REST API (not gated on recipient) and adds any message that (a) references
+    event_id and (b) has not already been seeded. monitor_progress() calls this
+    on every poll cycle so completion signals always land in the store.
+    """
+    try:
+        messages = await get_room_messages(room_id or BAND_ROOM_ID or "", event_id)
+    except Exception:  # noqa: BLE001 – REST poll is best-effort
+        logger.debug("REST room poll failed for event_id=%s; skipping", event_id)
+        return
+
+    for msg in messages:
+        msg_id = str(msg.get("id") or msg.get("message_id") or "")
+        with _seeded_rest_lock:
+            if msg_id and msg_id in _seeded_rest_ids:
+                continue
+            if msg_id:
+                _seeded_rest_ids.add(msg_id)
+
+        inbound_store.add(msg)
+        logger.debug(
+            "REST-seeded inbound_store: msg id=%s for event_id=%s", msg_id, event_id
+        )
+
 def mentions_for(handle: str) -> list[str]:
     """Return the mention id list for a handle (empty -> anchor fallback)."""
     agent_id = AGENT_IDS.get(handle)
     return [agent_id] if agent_id else []
+
+
+def mentions_for_all(exclude: Optional[list[str]] = None) -> list[str]:
+    """Return mention ids for every configured pipeline agent, by name.
+
+    Band has no working "@all" — a broadcast has to @mention each agent
+    individually. Pass `exclude` (a list of handles) to drop agents the sender
+    cannot mention (e.g. itself). Any handle whose id is unset is skipped.
+    """
+    skip = set(exclude or [])
+    ids: list[str] = []
+    for handle in ALL_HANDLES:
+        if handle in skip:
+            continue
+        agent_id = AGENT_IDS.get(handle)
+        if agent_id and agent_id not in ids:
+            ids.append(agent_id)
+    return ids
+
+
+def all_handles_text(exclude: Optional[list[str]] = None) -> str:
+    """Space-joined @handles for every pipeline agent (for message bodies).
+
+    Mirrors mentions_for_all(): use this in the visible content so the names the
+    reader sees match the mention ids attached to the message.
+    """
+    skip = set(exclude or [])
+    return " ".join(h for h in ALL_HANDLES if h not in skip)
 
 
 # --- Natural-language message generation (Featherless) -----------------------

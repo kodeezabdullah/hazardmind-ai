@@ -183,4 +183,47 @@ REPORT_AGENT_ID    = agent 4 (blank -> @handle text fallback)
 - [x] Step 9.5: Natural messaging (Featherless) + agent discussion/cross-validation
 - [x] Step 9.6: Fix — events on /events channel (no JSON in chat); handoff
       @mentions match the natural message target (satellite/hazard/impact/report)
-- [ ] Step 10: Full test (live end-to-end with real agents)
+- [x] Step 10: Full end-to-end pipeline test — PASS (see below)
+
+## Step 10: End-to-end pipeline test — DONE
+
+The full Band pipeline was exercised end to end (POST /analyze →
+orchestrator dispatch → satellite over Band → cross-validation → handoffs →
+DB advance → completion) and **passed**. The temporary mock scaffolding used to
+drive the run has been removed — the orchestrator and satellite now run the real
+path only:
+- `MOCK_MODE` removed from `agents/satellite/.env` and all mock machinery
+  (`_mock_mode_enabled`, `_MOCK_RESULT`, `_run_mock_pipeline`, the MOCK_MODE
+  branch in `run_pipeline`) deleted from the satellite agent.
+- `MOCK_DOWNSTREAM` removed from `orchestrator.py` along with the simulated
+  downstream path (`_mock_downstream_enabled`, `SIMULATED_RESULTS`,
+  `_simulate_downstream_agent`, `_safe_send`). `monitor_progress` now always
+  waits for genuine completion signals from real agents.
+
+**Bug fixes found during the test (all kept):**
+1. **Record-only adapter** — `RecordingAnthropicAdapter.on_event` buffers every
+   inbound Band message into `inbound_store` but deliberately skips
+   `super().on_event()`, so the orchestrator never auto-replies via the LLM and
+   the satellite↔orchestrator @mention chatter loop (and its phantom event_ids)
+   is gone. The orchestrator speaks only when the pipeline logic decides to.
+2. **Direct completion signal** — the satellite posts its own authoritative
+   "satellite complete" marker + structured JSON tail to the room
+   (`_post_completion`) rather than relying on the LLM to relay the payload
+   verbatim, so detection is independent of LLM phrasing.
+3. **`asyncio.to_thread`** — the satellite's blocking pipeline (imagery I/O,
+   anomaly-recovery backoff) is offloaded to a worker thread so it never starves
+   the Band WebSocket keepalive and gets the agent dropped mid-job.
+4. **Skip-history startup drain** — inbound delivery is over the WebSocket
+   execution loop (REST `/messages` history is empty for these agents);
+   `poll_room_into_store` seeds `inbound_store` from the room transcript each
+   poll so completions addressed to other agents are still seen.
+5. **Process-once guard** — `_completed_event_ids` ensures each event_id is
+   analysed exactly once; a re-trigger (LLM seeing acks/nudges/summary echo)
+   returns a short "already complete" without re-running or re-posting.
+6. **DB schema fixes** — `insert_satellite_result` writes the satellite result
+   row from the completion payload (idempotent per event: DELETE-then-INSERT),
+   so GET /results can join it. Columns mirror the `satellite_results` table.
+7. **jsonb fixes** — the asyncpg connection registers a `jsonb` codec
+   (`encoder=json.dumps`, `decoder=json.loads`); jsonb columns
+   (`bounds`/`bbox`/`risk_cities`) are passed as raw list/dict and serialized by
+   the codec — NOT pre-dumped, which would double-encode them into a string.

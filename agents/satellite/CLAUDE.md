@@ -41,6 +41,27 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 15: Full Band pipeline integration test — DONE
+
+The satellite agent was exercised end to end over a live Band room as part of
+the backend's full-pipeline test (orchestrator dispatch → satellite analysis →
+completion signal → handoff to hazard) and **passed**. The temporary `MOCK_MODE`
+scaffolding used during early integration has been removed — the agent now runs
+the real Copernicus/CDSE pipeline only:
+- `MOCK_MODE` deleted from `.env`; `_mock_mode_enabled`, `_MOCK_RESULT`,
+  `_run_mock_pipeline` and the MOCK_MODE branch in `_run_pipeline_sync` removed.
+
+Real fixes from the integration pass, all retained:
+- **Direct completion signal** — `_post_completion` posts the agent's own
+  "satellite complete" marker + structured JSON tail to the room, so the
+  orchestrator detects completion regardless of how the LLM paraphrases its reply.
+- **`asyncio.to_thread` offload** — `run_pipeline` runs the blocking
+  `_run_pipeline_sync` on a worker thread so imagery I/O and anomaly-recovery
+  backoff never starve the Band WebSocket keepalive (which would drop the agent).
+- **Process-once guard** — `_completed_event_ids` makes each event_id analysed
+  exactly once; a re-trigger (the LLM seeing the orchestrator's acks/nudges echo
+  back) returns a short "already complete" without re-running or re-posting.
+
 ### Step 14: Intelligent expert layer — confidence, cross-validation, stance — DONE
 
 The agent is no longer a pipeline that emits whatever it computed — it is an

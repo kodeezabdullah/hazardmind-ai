@@ -97,6 +97,73 @@ async def update_event_status(event_id: str, status: str, step: str) -> None:
         )
 
 
+async def insert_satellite_result(event_id: str, data: dict) -> None:
+    """Write the satellite agent's result row from its completion payload.
+
+    The satellite agent reports its result over Band; the orchestrator parses
+    the completion signal (a dict with satellite_type / cloud_cover / scene_id /
+    the four artifact URLs / affected_area_km2 / damage_percent / total_zones /
+    bounds / bbox / risk_cities) and persists it here so GET /results can join
+    it. Columns mirror the satellite_results table; jsonb columns are passed as
+    JSON strings. Idempotent per event: an existing row is replaced so a re-run
+    does not accumulate duplicates. Missing fields are written as NULL.
+    """
+    data = data or {}
+
+    def _f(key):
+        value = data.get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _i(key):
+        value = data.get(key)
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # jsonb columns: pass the raw list/dict. The connection's jsonb codec
+    # (encoder=json.dumps) serializes it — do NOT pre-dump or it double-encodes
+    # and the value comes back as a JSON string instead of an object.
+    def _j(key):
+        return data.get(key)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM satellite_results WHERE event_id = $1",
+                event_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO satellite_results
+                    (event_id, satellite_type, cloud_cover, scene_id,
+                     true_color_url, index_url, classification_url, geojson_url,
+                     affected_area_km2, damage_percent, total_zones,
+                     bounds, bbox, risk_cities)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        $12, $13, $14)
+                """,
+                event_id,
+                data.get("satellite_type"),
+                _f("cloud_cover"),
+                data.get("scene_id"),
+                data.get("true_color_url"),
+                data.get("index_url"),
+                data.get("classification_url"),
+                data.get("geojson_url"),
+                _f("affected_area_km2"),
+                _f("damage_percent"),
+                _i("total_zones"),
+                _j("bounds"),
+                _j("bbox"),
+                _j("risk_cities"),
+            )
+
+
 async def get_event_status(event_id: str) -> Optional[dict]:
     """Return the event's status and step (plus progress/timestamps)."""
     pool = await get_pool()

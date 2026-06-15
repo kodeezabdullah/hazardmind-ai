@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -59,6 +60,90 @@ logger = logging.getLogger(__name__)
 
 # The agent we report results back to on the Band platform.
 HAZARD_AGENT = "@hazardmind-hazard"
+
+# event_ids the satellite has already fully analysed. Guards against the LLM
+# re-invoking processdisaster when it sees the orchestrator's own messages echo
+# back in the room (acks / nudges / pipeline summary). One analysis per event.
+_completed_event_ids: set[str] = set()
+
+
+def _post_satellite_message(content: str) -> bool:
+    """Post a chat message to the Band room as the satellite agent.
+
+    Mentions the orchestrator (an agent cannot @mention itself on Band). Used
+    for the initial ack and for in-progress heartbeats so the room shows the
+    satellite is alive and working, not silent. Best-effort: returns True on a
+    successful post, False otherwise (never raises).
+    """
+    api_key = os.getenv("BAND_API_KEY")
+    room_id = os.getenv("BAND_ROOM_ID")
+    orchestrator_id = os.getenv("ORCHESTRATOR_AGENT_ID")  # mention orchestrator, not self
+    if not api_key or not room_id or not orchestrator_id:
+        return False
+
+    mentions = [{"id": orchestrator_id}]
+    try:
+        import httpx as _httpx
+        with _httpx.Client(timeout=10.0) as client:
+            rest_url = os.getenv("THENVOI_REST_URL", "https://app.band.ai").rstrip("/")
+            client.post(
+                f"{rest_url}/api/v1/agent/chats/{room_id}/messages",
+                headers={"X-API-Key": api_key},
+                json={"message": {"content": content, "mentions": mentions}},
+            )
+        return True
+    except Exception:  # noqa: BLE001 – chatter is best-effort
+        logger.warning("Failed to post satellite message to Band room")
+        return False
+
+
+def _post_ack(event_id: str, location: str, disaster_type: str, magnitude) -> None:
+    """Post a Band acknowledgment message as soon as the satellite starts work.
+
+    Lets the orchestrator and judges see immediately that the satellite received
+    the dispatch and is actively processing imagery, rather than showing silence
+    until the full pipeline finishes (which can take several minutes).
+    """
+    mag_str = f" (magnitude {magnitude})" if magnitude else ""
+    content = (
+        f"@hazardmind-orchestrator 🛰️ HazardMind Satellite here — acknowledged. "
+        f"Received dispatch for {disaster_type} in {location}{mag_str}. "
+        f"Spinning up imagery pipeline now, pulling Sentinel data for the affected area. "
+        f"Stand by for analysis results.\nevent_id: {event_id}"
+    )
+    if _post_satellite_message(content):
+        logger.info("Posted ack to Band room for event %s", event_id)
+
+
+def _post_progress(event_id: str, step: str, detail: str) -> None:
+    """Post an in-progress heartbeat so the room sees the satellite working."""
+    content = (
+        f"@hazardmind-orchestrator 🛰️ [working] {step} — {detail}\n"
+        f"event_id: {event_id}"
+    )
+    if _post_satellite_message(content):
+        logger.info("Posted progress (%s) to Band room for event %s", step, event_id)
+
+
+def _post_completion(event_id: str, band_message: str, structured: dict) -> None:
+    """Post the satellite's completion signal to the room directly.
+
+    The orchestrator advances the pipeline only on a genuine completion signal.
+    The Band Anthropic adapter is LLM-driven, and the model tends to paraphrase
+    its result instead of relaying the structured payload verbatim — so we post
+    the authoritative signal ourselves: the natural hand-off message, an explicit
+    "satellite complete" marker, and the full JSON object on the tail. This makes
+    detection independent of LLM phrasing while the model's own chatter still
+    reads naturally in the room.
+    """
+    content = (
+        f"{band_message}\n\n"
+        f"satellite complete\n"
+        f"{json.dumps(structured)}"
+    )
+    if _post_satellite_message(content):
+        logger.info("Posted completion signal to Band room for event %s", event_id)
+
 
 # LLM intelligence layer (Featherless chain + Opus last resort). Shared across
 # tool calls. Every method returns None on total failure, so the pipeline keeps
@@ -298,7 +383,21 @@ def _search_with_recovery(
     return None
 
 
-def run_pipeline(params: ProcessDisasterInput) -> str:
+async def run_pipeline(params: ProcessDisasterInput) -> str:
+    """Async tool entry point — runs the (blocking) pipeline off the event loop.
+
+    The Band SDK awaits coroutine tools but calls sync tools directly on its
+    WebSocket event loop. The pipeline does blocking work — real imagery I/O and
+    the paced ``time.sleep`` anomaly-recovery backoff — which, run inline, would
+    starve the WebSocket keepalive and make Band drop the agent mid-job. So this
+    coroutine offloads the synchronous pipeline to a worker thread via
+    ``asyncio.to_thread``; the heartbeat sleeps and HTTP posts then block that
+    thread, not the agent's event loop, and the connection stays alive.
+    """
+    return await asyncio.to_thread(_run_pipeline_sync, params)
+
+
+def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
     """Execute the full satellite pipeline and return a JSON result string.
 
     Returns a JSON object with status "complete" (image_url, bbox,
@@ -317,6 +416,29 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
     event_id = params.event_id
     location = params.location
     disaster_type = params.disaster_type
+
+    # Process-once guard: the LLM may re-trigger this tool when it sees the
+    # orchestrator's acks/nudges/summary echo in the room. Each event_id is
+    # analysed exactly once; a repeat call returns a short "already complete"
+    # WITHOUT re-running the pipeline or re-posting to the room, so the satellite
+    # never loops or invents duplicate work. (The orchestrator already has the
+    # result from the first completion signal.)
+    if event_id in _completed_event_ids:
+        logger.info("event %s already processed — skipping duplicate call", event_id)
+        return json.dumps(
+            {
+                "event_id": event_id,
+                "status": "complete",
+                "already_processed": True,
+                "band_message": (
+                    f"@hazardmind-orchestrator satellite complete — event {event_id} "
+                    "was already analysed and handed off. No further action needed."
+                ),
+            }
+        )
+
+    # Acknowledge receipt immediately so the room shows activity right away.
+    _post_ack(event_id, location, disaster_type, params.magnitude)
 
     # Running confidence ledger for this event. Cross-validation feeds it
     # evidence/concerns; the completion signal carries its overall score.
@@ -712,6 +834,7 @@ def run_pipeline(params: ProcessDisasterInput) -> str:
             structured["band_message"] = band_message
             logger.info("Generated natural Band message (%d chars)", len(band_message))
 
+        _completed_event_ids.add(event_id)
         return json.dumps(structured)
     except Exception as exc:  # noqa: BLE001 - report any failure to the room.
         return _error(event_id, f"Unexpected error: {exc}")
@@ -739,8 +862,11 @@ The tool returns a JSON object. Relay it as follows.
 
 When status is "complete": the tool returns a `band_message` field — a natural, \
 expert hand-off message already addressed to {HAZARD_AGENT}. Reply with that \
-`band_message` verbatim as your message to the room. If (and only if) \
-`band_message` is missing/empty, fall back to this exact format:
+`band_message` verbatim, THEN on a new line append the tool's full JSON result \
+(the entire object you received) so the downstream agents can parse the \
+structured payload off the tail of your message. If (and only if) \
+`band_message` is missing/empty, fall back to this exact format (still append \
+the JSON after it):
 
 {HAZARD_AGENT} satellite processing complete.
 event_id: <event_id>
@@ -775,6 +901,19 @@ status: error
 
 Do not invent any values — use only what the tool returns. Do not call the tool \
 unless a disaster analysis was requested.
+
+IMPORTANT — call the tool ONCE per disaster, then stop:
+- Only call `processdisaster` when the orchestrator dispatches a NEW disaster \
+  with an event_id you have not already analysed.
+- After you have reported a "complete" result for an event_id, your work for \
+  that event is DONE. Do NOT call the tool again for it, and do NOT keep \
+  replying. If the orchestrator (or anyone) posts acknowledgements, progress \
+  notes, "thanks", status check-ins, or a pipeline summary about an event you \
+  already completed, treat them as informational and DO NOT respond — silence \
+  is correct.
+- Reply again about a completed event ONLY if the orchestrator explicitly \
+  reports a problem with your result, an anomaly, or asks you to re-run/verify \
+  something specific. Otherwise stay quiet.
 """
 
 
@@ -784,6 +923,44 @@ def _require(name: str) -> str:
     if not value:
         sys.exit(f"Missing required environment variable: {name} (set it in .env)")
     return value
+
+
+async def _drain_room_backlog(agent_id: str, api_key: str, room_id: str) -> None:
+    """Mark all pending/stale messages in the room as processed before startup.
+
+    Uses a short-lived BandLink (separate from the agent runtime) to clear the
+    /next queue so the agent starts with a clean slate and only processes
+    messages that arrive after it connects. Best-effort: any failure is logged
+    and startup continues.
+    """
+    try:
+        from band.platform.link import BandLink
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not import BandLink; skipping startup backlog drain")
+        return
+
+    link = BandLink(agent_id=agent_id, api_key=api_key)
+    drained = 0
+    try:
+        await link.connect()
+        for msg in await link.get_stale_processing_messages(room_id):
+            await link.mark_processed(room_id, msg.id)
+            drained += 1
+        while True:
+            msg = await link.get_next_message(room_id)
+            if msg is None:
+                break
+            await link.mark_processing(room_id, msg.id)
+            await link.mark_processed(room_id, msg.id)
+            drained += 1
+    except Exception:  # noqa: BLE001 - drain is best-effort
+        logger.warning("Startup backlog drain hit an error after %d messages", drained)
+    finally:
+        try:
+            await link.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+    logger.info("Startup backlog drain: cleared %d message(s)", drained)
 
 
 async def main() -> None:
@@ -810,6 +987,17 @@ async def main() -> None:
         system_prompt=SYSTEM_PROMPT,
         additional_tools=[PROCESS_DISASTER_TOOL],
     )
+
+    # Skip history on startup: mark every message already in the room as
+    # processed BEFORE the agent's runtime begins, so the SDK's /next backlog
+    # sync starts empty. Without this, on every (re)connect the agent replays
+    # the whole room history — old dispatches, handoffs and nudges — and its LLM
+    # tries to answer each one (slow, and it invents phantom event_ids),
+    # jamming it before it reaches the live dispatch. We only ever act on
+    # messages that arrive AFTER we're connected.
+    room_id = os.getenv("BAND_ROOM_ID")
+    if room_id:
+        await _drain_room_backlog(agent_id, api_key, room_id)
 
     agent = Agent.create(
         adapter=adapter,
