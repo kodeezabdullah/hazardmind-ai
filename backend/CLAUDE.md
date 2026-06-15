@@ -113,6 +113,44 @@ Report:
   "step":"report","data":{ "pdf_url":"...","map_url":"...",
   "executive_summary":"..." } }
 
+## Natural Messaging (Featherless) — COMPLETE
+Agents now talk like expert colleagues in a real emergency, not JSON dumps.
+band_client.generate_natural_message(...) calls Featherless to write ONE
+natural message (max 3-4 sentences, no JSON/brackets) addressed to @receiver.
+
+Featherless:
+- base_url: https://api.featherless.ai/v1  (FEATHERLESS_API_KEY in .env)
+- model fallback chain (first that returns wins):
+    1. google/gemma-4-31B-it
+    2. moonshotai/Kimi-K2.6
+    3. Qwen/Qwen3.6-35B-A3B
+- If no key / all models fail -> templated natural-English fallback
+  (still no JSON), so the pipeline never blocks on the LLM.
+
+Two-channel handoff (band_client.send_handoff):
+  1. Natural text message  -> visible in Band chat (what judges read)
+  2. Structured JSON event  -> send_event("data", "agent_result", data) for parsing
+Both are sent on every handoff; structured data stays separate from prose.
+
+## Agent Personalities (band_client.AGENT_PERSONALITIES)
+- hazardmind-orchestrator: Calm, authoritative coordinator. Clear, decisive.
+- hazardmind-satellite:    Technical, precise. Data + coordinates. Flags anomalies.
+- hazardmind-hazard:       Urgent, safety-focused. Never downplays risk.
+- hazardmind-impact:       Data-driven, methodical. Human numbers + infrastructure.
+- hazardmind-report:       Professional, concise. Government-ready language.
+
+## Discussion Triggers (orchestrator.cross_validate_and_discuss)
+The orchestrator cross-validates each agent's output and opens a Band
+discussion when something looks off:
+  1. satellite extent > GDACS estimate * 2  -> ask satellite to recheck (waits 30s)
+  2. confidence < 0.7                        -> warn the team about uncertainty
+  3. risk_level CRITICAL                     -> "@all CRITICAL ... prioritize speed"
+  4. HIGH risk but < 5 satellite zones       -> flag discrepancy to hazard
+  4b. zero satellite zones but GDACS risk    -> ask satellite to investigate
+  5. multiple disasters detected             -> ask team to prioritize
+Detected anomalies + questions are carried into the next agent's handoff.
+Area > 200 km² escalates handoff urgency to CRITICAL.
+
 ## Env Vars (Band agents)
 BAND_AGENT_ID      = orchestrator's own id
 SATELLITE_AGENT_ID = agent 1 (mention anchor for orchestrator events)
@@ -130,4 +168,5 @@ REPORT_AGENT_ID    = agent 4 (blank -> @handle text fallback)
 - [x] Step 7: GET /band-log
 - [x] Step 8: Orchestrator
 - [x] Step 9: Band integration (perfect messaging + SDK inbound)
+- [x] Step 9.5: Natural messaging (Featherless) + agent discussion/cross-validation
 - [ ] Step 10: Full test (live end-to-end with real agents)

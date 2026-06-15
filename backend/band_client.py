@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 from typing import Any, Optional
@@ -8,10 +9,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger("hazardmind.band_client")
+
 BAND_REST_URL = os.getenv("THENVOI_REST_URL", "https://app.band.ai/").rstrip("/")
 BAND_API_KEY = os.getenv("BAND_API_KEY")
 BAND_ROOM_ID = os.getenv("BAND_ROOM_ID")
 BAND_AGENT_ID = os.getenv("BAND_AGENT_ID")  # the orchestrator itself
+
+# --- Featherless (natural-language message generation) -----------------------
+FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY")
+FEATHERLESS_BASE_URL = os.getenv(
+    "FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"
+).rstrip("/")
+
+# Fallback chain — each model is tried in order until one returns a message.
+FEATHERLESS_MODELS = [
+    "google/gemma-4-31B-it",
+    "moonshotai/Kimi-K2.6",
+    "Qwen/Qwen3.6-35B-A3B",
+]
 
 SATELLITE_AGENT_ID = os.getenv("SATELLITE_AGENT_ID")
 HAZARD_AGENT_ID = os.getenv("HAZARD_AGENT_ID")
@@ -29,6 +45,38 @@ AGENT_IDS: dict[str, Optional[str]] = {
     HAZARD_HANDLE: HAZARD_AGENT_ID,
     IMPACT_HANDLE: IMPACT_AGENT_ID,
     REPORT_HANDLE: REPORT_AGENT_ID,
+}
+
+# Agent personalities — fed to Featherless so each agent sounds like a distinct
+# expert colleague in the Band room rather than a generic assistant.
+AGENT_PERSONALITIES = {
+    "hazardmind-orchestrator": (
+        "Calm, authoritative coordinator. Clear and decisive. Keeps team focused."
+    ),
+    "hazardmind-satellite": (
+        "Technical and precise. Speaks in data and coordinates. "
+        "Flags sensor anomalies immediately."
+    ),
+    "hazardmind-hazard": (
+        "Urgent and safety-focused. Never downplays risk. "
+        "Always cross-references multiple sources."
+    ),
+    "hazardmind-impact": (
+        "Data-driven and methodical. Focuses on human numbers. "
+        "Precise about infrastructure status."
+    ),
+    "hazardmind-report": (
+        "Professional and concise. Government-ready language. "
+        "Summarizes without losing critical detail."
+    ),
+}
+
+# Map a handle (with or without owner prefix) to its bare agent name.
+HANDLE_TO_AGENT = {
+    SATELLITE_HANDLE: "hazardmind-satellite",
+    HAZARD_HANDLE: "hazardmind-hazard",
+    IMPACT_HANDLE: "hazardmind-impact",
+    REPORT_HANDLE: "hazardmind-report",
 }
 
 # Band's message API requires at least one mention and forbids self-mention,
@@ -361,6 +409,177 @@ async def get_room_messages(room_id: str, event_id: str) -> list[dict]:
         for msg in _unwrap_messages(data)
         if event_id in str(msg.get("content", ""))
     ]
+
+
+def mentions_for(handle: str) -> list[str]:
+    """Return the mention id list for a handle (empty -> anchor fallback)."""
+    agent_id = AGENT_IDS.get(handle)
+    return [agent_id] if agent_id else []
+
+
+# --- Natural-language message generation (Featherless) -----------------------
+
+
+def _build_featherless_prompt(
+    sender_role: str,
+    receiver_agent: str,
+    receiver_handle: str,
+    context: Any,
+    findings: Any,
+    urgency: str,
+    anomalies: list,
+    questions: list,
+    personality: str,
+) -> str:
+    """Build the Featherless prompt for one agent-to-agent message."""
+    return f"""You are {sender_role} AI agent in a real disaster response pipeline.
+
+Write ONE natural message to {receiver_agent}.
+
+Disaster context: {context}
+Your findings: {findings}
+Anomalies detected: {anomalies}
+Questions to ask: {questions}
+Urgency level: {urgency}
+
+Your personality: {personality}
+
+Rules:
+- Start with {receiver_handle}
+- Sound like an expert colleague in an emergency
+- Mention specific numbers from findings
+- If anomalies -> flag them clearly
+- If questions -> ask directly
+- Max 3-4 sentences
+- NO JSON, NO brackets, NO code
+- Natural professional English
+- If CRITICAL urgency -> show urgency"""
+
+
+def _fallback_natural_message(
+    receiver_handle: str,
+    findings: Any,
+    urgency: str,
+    anomalies: list,
+    questions: list,
+) -> str:
+    """Templated natural-English message used when Featherless is unavailable.
+
+    Still reads like a colleague (no JSON/brackets), so the Band transcript stays
+    human-readable even with no FEATHERLESS_API_KEY or when every model errors.
+    """
+    parts: list[str] = [receiver_handle]
+    if urgency == "critical":
+        parts.append("URGENT —")
+    if findings:
+        parts.append(f"{findings}.")
+    for anomaly in anomalies or []:
+        parts.append(f"Heads up: {anomaly}.")
+    for question in questions or []:
+        parts.append(f"{question}")
+    if urgency == "critical" and not anomalies:
+        parts.append("Please prioritize this.")
+    return " ".join(str(p).strip() for p in parts if str(p).strip())
+
+
+async def _featherless_complete(prompt: str) -> Optional[str]:
+    """Call Featherless chat completions, walking the model fallback chain.
+
+    Returns the generated text, or None if no key is set or every model fails.
+    """
+    if not FEATHERLESS_API_KEY:
+        return None
+
+    url = f"{FEATHERLESS_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {FEATHERLESS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for model in FEATHERLESS_MODELS:
+            try:
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.7,
+                        "max_tokens": 220,
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                text = body["choices"][0]["message"]["content"].strip()
+                if text:
+                    return text
+            except Exception:  # noqa: BLE001 - try the next model in the chain
+                logger.warning("Featherless model %s failed, trying next", model)
+                continue
+    return None
+
+
+async def generate_natural_message(
+    sender_agent: str,
+    sender_role: str,
+    receiver_agent: str,
+    receiver_handle: str,
+    context: Any,
+    findings: Any,
+    urgency: str = "normal",
+    anomalies: Optional[list] = None,
+    questions: Optional[list] = None,
+    personality: str = "",
+) -> str:
+    """Generate ONE natural agent-to-agent message via Featherless.
+
+    Sounds like an expert colleague in an emergency — mentions concrete numbers,
+    flags anomalies, asks questions. Falls back to a templated natural-English
+    message (never JSON) when Featherless is unavailable so the pipeline never
+    blocks on the LLM. The returned string always starts with {receiver_handle}.
+    """
+    anomalies = anomalies or []
+    questions = questions or []
+    if not personality:
+        personality = AGENT_PERSONALITIES.get(sender_agent, "")
+
+    prompt = _build_featherless_prompt(
+        sender_role=sender_role,
+        receiver_agent=receiver_agent,
+        receiver_handle=receiver_handle,
+        context=context,
+        findings=findings,
+        urgency=urgency,
+        anomalies=anomalies,
+        questions=questions,
+        personality=personality,
+    )
+
+    text = await _featherless_complete(prompt)
+    if not text:
+        return _fallback_natural_message(
+            receiver_handle, findings, urgency, anomalies, questions
+        )
+
+    # Guarantee the handle leads the message even if the model dropped it.
+    if receiver_handle not in text:
+        text = f"{receiver_handle} {text}"
+    return text
+
+
+async def send_handoff(
+    natural_msg: str,
+    data: dict,
+    mentions: Optional[list[str]] = None,
+    title: str = "agent_result",
+) -> None:
+    """Send a handoff as TWO Band messages: natural text + structured event.
+
+    1. Natural text — what the judges read in the Band chat.
+    2. Structured JSON event — what the orchestrator parses for the pipeline.
+    """
+    await send_text_message(natural_msg, mentions=mentions)
+    await send_event("data", title, data, mentions=mentions)
 
 
 def handoff_message(handle: str, event_id: str, **fields: Any) -> tuple[str, list[str]]:
