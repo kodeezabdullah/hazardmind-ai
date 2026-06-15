@@ -2,6 +2,8 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
+from band_client import notify_satellite
+from db import create_disaster_event
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -15,12 +17,27 @@ router = APIRouter()
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
+    # event_id is generated ONCE here and reused by every agent.
     event_id = str(uuid.uuid4())
-    # TODO: persist to disaster_events and kick off orchestrator
+
+    await create_disaster_event(
+        event_id=event_id,
+        location=request.location,
+        disaster_type=request.disaster_type,
+        magnitude=request.magnitude,
+    )
+
+    await notify_satellite(
+        event_id=event_id,
+        location=request.location,
+        disaster_type=request.disaster_type,
+        magnitude=request.magnitude,
+    )
+
     return AnalyzeResponse(
         job_id=event_id,
         status="received",
-        message="Pipeline queued (stub).",
+        message="Pipeline started",
     )
 
 
