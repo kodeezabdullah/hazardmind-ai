@@ -1,0 +1,131 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-multi-critical-001",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 18.9
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                71.455,
+                33.975
+              ],
+              [
+                71.475,
+                33.975
+              ],
+              [
+                71.475,
+                33.995
+              ],
+              [
+                71.455,
+                33.995
+              ],
+              [
+                71.455,
+                33.975
+              ]
+            ]
+          ],
+          [
+            [
+              [
+                71.505,
+                34.01
+              ],
+              [
+                71.523,
+                34.01
+              ],
+              [
+                71.523,
+                34.028
+              ],
+              [
+                71.505,
+                34.028
+              ],
+              [
+                71.505,
+                34.01
+              ]
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-multi-high-001",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 9.6
+      },
+      "geometry": {
+        "type": "MultiPolygon",
+        "coordinates": [
+          [
+            [
+              [
+                71.555,
+                33.94
+              ],
+              [
+                71.571,
+                33.94
+              ],
+              [
+                71.571,
+                33.956
+              ],
+              [
+                71.555,
+                33.956
+              ],
+              [
+                71.555,
+                33.94
+              ]
+            ]
+          ],
+          [
+            [
+              [
+                71.6,
+                33.99
+              ],
+              [
+                71.614,
+                33.99
+              ],
+              [
+                71.614,
+                34.004
+              ],
+              [
+                71.6,
+                34.004
+              ],
+              [
+                71.6,
+                33.99
+              ]
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
