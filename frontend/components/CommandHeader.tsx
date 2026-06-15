@@ -1,4 +1,5 @@
 import { Activity, AlertTriangle, Cpu, RadioTower } from "lucide-react";
+import Image from "next/image";
 import type { HazardMindResult } from "../lib/types";
 
 type CommandHeaderProps = {
@@ -10,14 +11,16 @@ export function CommandHeader({ result, dataSource }: CommandHeaderProps) {
   return (
     <header className="glass-panel flex shrink-0 flex-col gap-2 px-3.5 py-2.5 lg:flex-row lg:items-center lg:justify-between">
       <div className="flex min-w-0 items-center gap-2.5">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-cyan-300/30 bg-cyan-300/10 shadow-[0_0_20px_rgba(34,211,238,0.2)]">
-          <Cpu className="h-5 w-5 text-cyan-200" />
-        </div>
+        <Image
+          src="/hazardmind-logo.png"
+          alt="HazardMind AI"
+          width={44}
+          height={44}
+          priority
+          className="h-11 w-auto shrink-0 object-contain drop-shadow-[0_0_14px_rgba(34,211,238,0.25)]"
+        />
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg font-semibold tracking-[0.16em] text-cyan-50">
-              HAZARDMIND AI
-            </h1>
             <span className="rounded border border-violet-300/30 bg-violet-400/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.2em] text-violet-100">
               Command Center
             </span>
