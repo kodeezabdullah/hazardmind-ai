@@ -63,6 +63,63 @@ final_reports     <- Agent 4 writes
 - NO other contributors
 - Every commit: kodeezabdullah only
 
+## Band Messaging Pattern (Step 9)
+Native Band messaging via band_client.py:
+- send_text_message(content, mentions) -> human-readable discussion
+- send_event(type,title,data)          -> structured event (JSON in content)
+- send_thought(content)                -> agent reasoning (event type=thought)
+- send_task_update(task,status,result) -> task progress (event type=task)
+- parse_incoming_message(raw)          -> normalize text/event -> dict
+
+Band REST message API is strict:
+- POST .../messages body: {"message":{"content":str,"mentions":[{"id"}]}}
+- `type` field is REJECTED -> events encode structure as JSON in `content`
+- mentions is REQUIRED, minItems 1, and an agent CANNOT mention itself
+  -> orchestrator-origin messages anchor a mention on the satellite agent
+- Handoffs @mention the target agent when its *_AGENT_ID is set in .env,
+  else anchor on satellite and rely on the @handle in the content.
+
+INBOUND path (important):
+- GET .../messages REST history is EMPTY for this agent (total_count 0).
+- Band delivers inbound messages to the connected SDK agent over its
+  WebSocket execution loop (GET .../messages/next, drained by the runtime).
+- orchestrator.connect() installs a RecordingAnthropicAdapter whose on_event
+  buffers every inbound message into band_client.inbound_store.
+- monitor_progress() and GET /band-log read from inbound_store, NOT REST.
+- An agent only receives messages where it is mentioned by ANOTHER agent;
+  Band does not echo your own messages back to you. (So a live inbound test
+  requires the real satellite agent to post mentioning the orchestrator.)
+
+## Agent Completion Signal Format
+Each agent posts to the room mentioning @hazardmind-orchestrator when done.
+Detection accepts EITHER a plain-text "<step> complete" marker OR the
+structured JSON signal below (event_id + step + status=complete):
+
+Satellite:
+{ "event_id":"uuid","agent":"hazardmind-satellite","status":"complete",
+  "step":"satellite","data":{ "true_color_url":"...","index_url":"...",
+  "classification_url":"...","geojson_url":"...","bounds":{},
+  "affected_area_km2":0.0,"risk_cities":[] } }
+Hazard:
+{ "event_id":"uuid","agent":"hazardmind-hazard","status":"complete",
+  "step":"hazard","data":{ "risk_level":"HIGH","hazard_zones_url":"...",
+  "flood_depth":"...","confirmed_by":[] } }
+Impact:
+{ "event_id":"uuid","agent":"hazardmind-impact","status":"complete",
+  "step":"impact","data":{ "total_affected":0,"hospitals_at_risk":0,
+  "roads_blocked":0,"evacuation_routes":[] } }
+Report:
+{ "event_id":"uuid","agent":"hazardmind-report","status":"complete",
+  "step":"report","data":{ "pdf_url":"...","map_url":"...",
+  "executive_summary":"..." } }
+
+## Env Vars (Band agents)
+BAND_AGENT_ID      = orchestrator's own id
+SATELLITE_AGENT_ID = agent 1 (mention anchor for orchestrator events)
+HAZARD_AGENT_ID    = agent 2 (blank -> @handle text fallback)
+IMPACT_AGENT_ID    = agent 3 (blank -> @handle text fallback)
+REPORT_AGENT_ID    = agent 4 (blank -> @handle text fallback)
+
 ## Checklist
 - [x] Step 1: Branch + structure
 - [x] Step 2: DB connection
@@ -72,5 +129,5 @@ final_reports     <- Agent 4 writes
 - [x] Step 6: GET /results
 - [x] Step 7: GET /band-log
 - [x] Step 8: Orchestrator
-- [ ] Step 9: Band integration
-- [ ] Step 10: Full test
+- [x] Step 9: Band integration (perfect messaging + SDK inbound)
+- [ ] Step 10: Full test (live end-to-end with real agents)

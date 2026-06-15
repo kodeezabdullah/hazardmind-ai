@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from db import close_pool
+from db import close_pool, ping as db_ping
 from router import orchestrator, router
 
 logging.basicConfig(level=logging.INFO)
@@ -41,4 +41,12 @@ app.include_router(router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "hazardmind-backend"}
+    db_ok = await db_ping()
+    band_ok = bool(getattr(orchestrator, "connected", False))
+    return {
+        "status": "ok",
+        "service": "hazardmind-backend",
+        "band": "connected" if band_ok else "disconnected",
+        "db": "connected" if db_ok else "disconnected",
+        "version": app.version,
+    }

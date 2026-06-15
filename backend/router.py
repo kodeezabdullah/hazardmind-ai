@@ -1,12 +1,11 @@
 import asyncio
 import logging
 import uuid
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from band_client import BAND_ROOM_ID, get_room_messages
+from band_client import inbound_store
 from db import (
     create_disaster_event,
     get_event_results,
@@ -116,24 +115,16 @@ async def get_band_log(job_id: str):
     if event is None:
         raise HTTPException(status_code=404, detail="job not found")
 
-    raw_messages = await get_room_messages(BAND_ROOM_ID, job_id)
-
+    # Inbound messages are buffered by the orchestrator's recording adapter;
+    # Band's REST history is empty for this agent.
     messages = [
         {
-            "agent": _message_agent(msg),
+            "agent": msg.get("agent"),
             "content": msg.get("content", ""),
-            "timestamp": msg.get("created_at") or msg.get("timestamp"),
+            "timestamp": msg.get("timestamp"),
             "type": msg.get("type", "text"),
         }
-        for msg in raw_messages
+        for msg in inbound_store.for_event(job_id)
     ]
 
     return BandLogResponse(job_id=job_id, messages=messages)
-
-
-def _message_agent(msg: dict) -> Optional[str]:
-    """Pull a human-readable agent name out of a Band message payload."""
-    sender = msg.get("sender") or msg.get("author") or msg.get("agent")
-    if isinstance(sender, dict):
-        return sender.get("handle") or sender.get("name") or sender.get("id")
-    return sender

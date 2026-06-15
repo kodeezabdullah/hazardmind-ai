@@ -31,6 +31,8 @@ def test_unknown_job_id_returns_404() -> None:
 
 
 def test_known_job_id_returns_messages() -> None:
+    import band_client as bc
+
     job_id = str(uuid.uuid4())
 
     async def fake_get_event_status(event_id: str):
@@ -41,20 +43,25 @@ def test_known_job_id_returns_messages() -> None:
             "progress": 20,
         }
 
-    async def fake_get_room_messages(room_id, event_id):
-        return [
-            {
-                "content": f"event_id: {event_id}\nStarting analysis.",
-                "created_at": "2026-06-15T10:00:00Z",
-                "type": "text",
-                "sender": {"handle": "hazardmind-satellite"},
-            }
-        ]
-
     router_module.get_event_status = fake_get_event_status
-    router_module.get_room_messages = fake_get_room_messages
 
-    resp = client.get(f"/band-log/{job_id}")
+    # The /band-log endpoint reads the inbound_store (Band's REST history is
+    # empty for this agent), so seed a recorded message for this job.
+    bc.inbound_store._messages.clear()
+    bc.inbound_store.add(
+        {
+            "content": f"event_id: {job_id}\nStarting analysis.",
+            "created_at": "2026-06-15T10:00:00Z",
+            "type": "text",
+            "sender": {"handle": "hazardmind-satellite"},
+        }
+    )
+
+    try:
+        resp = client.get(f"/band-log/{job_id}")
+    finally:
+        bc.inbound_store._messages.clear()
+
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["job_id"] == job_id, body

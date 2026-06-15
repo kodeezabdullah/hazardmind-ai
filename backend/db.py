@@ -47,6 +47,17 @@ async def close_pool() -> None:
         _pool = None
 
 
+async def ping() -> bool:
+    """Return True if the database answers a trivial query."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return True
+    except Exception:  # noqa: BLE001 - health check must not raise
+        return False
+
+
 async def create_disaster_event(
     event_id: str,
     location: str,
