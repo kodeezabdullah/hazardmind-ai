@@ -29,23 +29,67 @@ THENVOI_WS_URL = os.getenv(
 
 
 async def write_to_db(result: dict) -> None:
-    """Write hazard results to the hazard_zones table (matches shared/db/schema.sql)."""
+    """Write hazard results to the hazard_zones table (matches shared/db/schema.sql).
+
+    The schema is one row per hazard type, so we write a flood, earthquake, and
+    landslide row for the event. Columns: risk_level, hazard_type, severity,
+    confirmed_by, flood_depth_estimate, earthquake_mmi, landslide_probability,
+    overall_confidence.
+    """
+    confidence_scores = result.get("confidence_scores", {})
+    severity = result["overall_severity"]
+    confirmed_by = json.dumps(confidence_scores)
+
+    rows = [
+        {
+            "hazard_type": "flood",
+            "risk_level": result["flood_risk"],
+            "overall_confidence": confidence_scores.get("flood", 0.0),
+            "flood_depth_estimate": result.get("flood_depth_estimate"),
+            "earthquake_mmi": None,
+            "landslide_probability": None,
+        },
+        {
+            "hazard_type": "earthquake",
+            "risk_level": result["earthquake_risk"],
+            "overall_confidence": confidence_scores.get("earthquake", 0.0),
+            "flood_depth_estimate": None,
+            "earthquake_mmi": result.get("earthquake_mmi"),
+            "landslide_probability": None,
+        },
+        {
+            "hazard_type": "landslide",
+            "risk_level": result["landslide_risk"],
+            "overall_confidence": confidence_scores.get("landslide", 0.0),
+            "flood_depth_estimate": None,
+            "earthquake_mmi": None,
+            "landslide_probability": result.get("landslide_probability"),
+        },
+    ]
+
+    created_at = datetime.now(timezone.utc)
     conn = await asyncpg.connect(NEON_DATABASE_URL)
     try:
-        await conn.execute(
-            """
-            INSERT INTO hazard_zones (
-                event_id, flood_risk, earthquake_risk,
-                landslide_risk, overall_severity, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            result["event_id"],
-            result["flood_risk"],
-            result["earthquake_risk"],
-            result["landslide_risk"],
-            result["overall_severity"],
-            datetime.now(timezone.utc),
-        )
+        for row in rows:
+            await conn.execute(
+                """
+                INSERT INTO hazard_zones (
+                    event_id, risk_level, hazard_type, severity,
+                    confirmed_by, flood_depth_estimate, earthquake_mmi,
+                    landslide_probability, overall_confidence, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                result["event_id"],
+                row["risk_level"],
+                row["hazard_type"],
+                severity,
+                confirmed_by,
+                row["flood_depth_estimate"],
+                row["earthquake_mmi"],
+                row["landslide_probability"],
+                row["overall_confidence"],
+                created_at,
+            )
     finally:
         await conn.close()
 

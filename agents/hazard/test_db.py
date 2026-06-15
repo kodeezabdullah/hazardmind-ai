@@ -11,22 +11,22 @@ def test_db_write():
     with engine.connect() as conn:
         conn.execute(text("""
             INSERT INTO hazard_zones
-              (event_id, flood_risk, earthquake_risk, landslide_risk,
-               overall_severity, created_at)
+              (event_id, risk_level, hazard_type, severity,
+               overall_confidence, created_at)
             VALUES
-              (CAST(:event_id AS uuid), :flood_risk, :earthquake_risk, :landslide_risk,
-               :overall_severity, :created_at)
+              (CAST(:event_id AS uuid), :risk_level, :hazard_type, :severity,
+               :overall_confidence, :created_at)
         """), {
             "event_id": test_id,
-            "flood_risk": "HIGH",
-            "earthquake_risk": "LOW",
-            "landslide_risk": "MEDIUM",
-            "overall_severity": "HIGH",
+            "risk_level": "HIGH",
+            "hazard_type": "flood",
+            "severity": "HIGH",
+            "overall_confidence": 0.91,
             "created_at": datetime.now(timezone.utc)
         })
         conn.commit()
         result = conn.execute(text(
-            "SELECT event_id, flood_risk, overall_severity FROM hazard_zones WHERE event_id = CAST(:id AS uuid)"
+            "SELECT event_id, hazard_type, risk_level, severity FROM hazard_zones WHERE event_id = CAST(:id AS uuid)"
         ), {"id": test_id})
         row = result.fetchone()
         print("DB write confirmed:", row)

@@ -180,16 +180,23 @@ Exact format Zohair requires — do not change this structure:
 I write to ONE table only: `hazard_zones`
 I NEVER touch: `disaster_events`, `satellite_results`, `impact_data`, `final_reports`
 
+One row per hazard type (flood, earthquake, landslide) per event.
+
 ```sql
 hazard_zones:
-  - disaster_event_id  (FK — comes from event_id in Band message)
-  - flood_risk         (TEXT: CRITICAL/HIGH/MEDIUM/LOW)
-  - earthquake_risk    (TEXT)
-  - landslide_risk     (TEXT)
-  - overall_severity   (TEXT)
-  - risk_polygons      (GEOGRAPHY(MULTIPOLYGON, 4326))
-  - confidence_scores  (JSONB)
-  - created_at         (TIMESTAMP)
+  - id                     (SERIAL PK)
+  - event_id               (FK — comes from event_id in Band message)
+  - geometry               (GEOMETRY(POLYGON, 4326))
+  - risk_level             (TEXT: CRITICAL/HIGH/MEDIUM/LOW)
+  - hazard_type            (TEXT: flood/earthquake/landslide)
+  - area_km2               (FLOAT)
+  - severity               (TEXT — overall_severity for the event)
+  - confirmed_by           (JSONB — confidence_scores)
+  - flood_depth_estimate   (TEXT)
+  - earthquake_mmi         (FLOAT)
+  - landslide_probability  (TEXT)
+  - overall_confidence     (FLOAT — this hazard's confidence)
+  - created_at             (TIMESTAMPTZ)
 ```
 
 Rules:
@@ -397,8 +404,10 @@ Rules:
 - BAND_API_KEY empty — agent cannot connect until Abdullah provides it
 - HANAN_HANDLE wired to @geospatial.9660/hazardmind-impact (agent_id a9a1c74f-...)
 - AnthropicAdapter uses provider_key= (deprecation resolved)
-- DB write uses asyncpg against the real hazard_zones schema (flood/earthquake/
-  landslide_risk, overall_severity) — see shared/db/schema.sql
+- DB write uses asyncpg against the real hazard_zones schema (risk_level,
+  hazard_type, severity, confirmed_by, flood_depth_estimate, earthquake_mmi,
+  landslide_probability, overall_confidence) — one row per hazard type per
+  event — see shared/db/schema.sql
 
 ---
 
