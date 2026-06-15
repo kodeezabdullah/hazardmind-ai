@@ -1,7 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 CREATE TABLE IF NOT EXISTS disaster_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     disaster_type VARCHAR(50),
     location VARCHAR(200),
     bbox FLOAT[],
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS disaster_events (
 
 CREATE TABLE IF NOT EXISTS satellite_results (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_id UUID REFERENCES disaster_events(id),
+    event_id UUID REFERENCES disaster_events(event_id),
     image_url TEXT,
     affected_area_km2 FLOAT,
     land_cover TEXT,
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS satellite_results (
 DROP TABLE IF EXISTS hazard_zones CASCADE;
 CREATE TABLE hazard_zones (
     id SERIAL PRIMARY KEY,
-    event_id UUID REFERENCES disaster_events(id),
+    event_id UUID REFERENCES disaster_events(event_id),
     geometry GEOMETRY(POLYGON, 4326),
     risk_level TEXT,
     hazard_type TEXT,
@@ -41,7 +41,7 @@ ON hazard_zones USING GIST(geometry);
 
 CREATE TABLE IF NOT EXISTS impact_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_id UUID REFERENCES disaster_events(id),
+    event_id UUID REFERENCES disaster_events(event_id),
     population_affected INTEGER,
     hospitals_at_risk INTEGER,
     roads_blocked_km FLOAT,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS impact_data (
 
 CREATE TABLE IF NOT EXISTS final_reports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_id UUID REFERENCES disaster_events(id),
+    event_id UUID REFERENCES disaster_events(event_id),
     pdf_url TEXT,
     map_url TEXT,
     summary TEXT,
