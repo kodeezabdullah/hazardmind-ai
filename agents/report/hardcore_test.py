@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,7 +20,15 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from band_contract import build_report_completion_message, extract_trailing_json, parse_report_trigger_message
-from generator import MOCK_EVENT_DATA
+from db_client import (
+    build_final_report_db_values,
+    build_structured_report_context,
+    calculate_confidence_level,
+    db_context_to_report_context,
+    hazard_zones_to_feature_collection,
+    normalize_bbox,
+)
+from generator import MOCK_EVENT_DATA, _assert_live_intelligence_sources
 from geometry_utils import (
     calculate_bbox_from_geojson,
     explain_shapefile_handling,
@@ -28,7 +37,7 @@ from geometry_utils import (
     validate_polygon_coordinates,
     validate_report_geometries,
 )
-from intelligence import detect_anomalies
+from intelligence import build_cartographic_data_summary, detect_anomalies, generate_map_narrative
 from llm_clients import featherless_health_check
 from map_generator import generate_static_map
 from pdf_generator import generate_pdf_report, model_source_note
@@ -71,7 +80,9 @@ async def main() -> int:
     run_report_geometry_tests(harness, fixtures)
     run_artifact_tests(harness, fixtures, output_dir)
     await run_pipeline_safety_tests(harness, output_dir, include_r2=args.include_r2, include_db=args.include_db)
+    run_db_schema_alignment_tests(harness)
     await run_anomaly_validation_tests(harness)
+    await run_map_narrative_tests(harness)
     await run_offline_contract_tests(harness, output_dir)
     await run_strict_production_failure_tests(harness, output_dir)
 
@@ -334,6 +345,140 @@ async def run_pipeline_safety_tests(
     print()
 
 
+def run_db_schema_alignment_tests(harness: Harness) -> None:
+    print("Latest DB Schema Alignment")
+    event_id = "8f4f7c66-7d9c-4df8-8a4f-78c9bfaeaf21"
+    timestamp = datetime(2026, 6, 13, 18, 0, tzinfo=timezone.utc)
+    event = {
+        "event_id": event_id,
+        "disaster_type": "Flood",
+        "location": "Peshawar, Pakistan",
+        "magnitude": 6.2,
+        "bbox": [71.4, 33.9, 71.65, 34.1],
+        "status": "CRITICAL",
+        "step": "impact",
+        "progress": 80,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    satellites = [
+        {
+            "id": 2,
+            "event_id": event_id,
+            "satellite_type": "sentinel-1",
+            "cloud_cover": 42.0,
+            "scene_id": "S1A_TEST",
+            "true_color_url": "https://example.test/true.png",
+            "index_url": "https://example.test/index.png",
+            "classification_url": "https://example.test/class.png",
+            "geojson_url": "https://example.test/zones.geojson",
+            "affected_area_km2": 153.37,
+            "damage_percent": 24.3,
+            "total_zones": 2,
+            "bounds": {"west": 71.4, "south": 33.9, "east": 71.65, "north": 34.1},
+            "bbox": {"bbox": [71.4, 33.9, 71.65, 34.1]},
+            "risk_cities": ["Peshawar"],
+            "created_at": timestamp,
+        }
+    ]
+    hazard_zones = [
+        {
+            "id": 1,
+            "event_id": event_id,
+            "geometry_geojson": {
+                "type": "Polygon",
+                "coordinates": [[[71.45, 33.96], [71.52, 33.96], [71.52, 34.02], [71.45, 34.02], [71.45, 33.96]]],
+            },
+            "risk_level": "HIGH",
+            "hazard_type": "flood",
+            "area_km2": 12.3,
+            "severity": "CRITICAL",
+            "confirmed_by": ["GDACS", "USGS"],
+            "overall_confidence": 0.91,
+            "created_at": timestamp,
+        },
+        {
+            "id": 2,
+            "event_id": event_id,
+            "geometry_geojson": json.dumps(
+                {
+                    "type": "Polygon",
+                    "coordinates": [[[71.52, 33.94], [71.59, 33.94], [71.59, 34.0], [71.52, 34.0], [71.52, 33.94]]],
+                }
+            ),
+            "risk_level": "MEDIUM",
+            "hazard_type": "flood",
+            "area_km2": 8.1,
+            "severity": "HIGH",
+            "confirmed_by": ["Sentinel-1"],
+            "overall_confidence": 0.72,
+            "created_at": timestamp,
+        },
+    ]
+    impact = {
+        "id": 1,
+        "event_id": event_id,
+        "total_affected": 2300000,
+        "high_risk_people": 450000,
+        "medium_risk_people": 1200000,
+        "hospitals_at_risk": 14,
+        "schools_at_risk": 67,
+        "roads_blocked": 89,
+        "bridges_at_risk": 3,
+        "vulnerability_score": "HIGH",
+        "evacuation_routes": [
+            {
+                "name": "Route 1",
+                "distance_km": 45,
+                "status": "open",
+                "geojson": {"type": "LineString", "coordinates": [[71.49, 33.97], [71.59, 34.06]]},
+            }
+        ],
+        "estimated_evacuation_time": "4-6 hours",
+        "overall_confidence": 0.85,
+        "created_at": timestamp,
+    }
+
+    structured = build_structured_report_context(event_id, event, satellites, hazard_zones, impact)
+    harness.check("DB context has structured top-level keys", all(key in structured for key in ("event", "satellite_results", "hazard_zones", "impact_data", "spatial", "confidence")))
+    harness.check("DB context preserves multiple hazard zones", len(structured["hazard_zones"]) == 2)
+    hazard_geojson = structured["spatial"]["hazard_geojson"]
+    harness.check("hazard zones become FeatureCollection", hazard_geojson.get("type") == "FeatureCollection" and len(hazard_geojson.get("features", [])) == 2)
+    harness.check("hazard feature properties preserve confidence", hazard_geojson["features"][0]["properties"].get("overall_confidence") == 0.91)
+    report_context = db_context_to_report_context(structured)
+    harness.check("DB report context uses hazard FeatureCollection", len(report_context["analysis"]["zones"]["features"]) == 2)
+    harness.check("hazard and impact confidence produce HIGH", calculate_confidence_level(report_context) == "HIGH")
+    low_context = deepcopy(report_context)
+    low_context["impact"]["overall_confidence"] = 0.55
+    harness.check("low hazard/impact confidence produces LOW", calculate_confidence_level(low_context) == "LOW")
+    harness.check("bbox ARRAY normalization works", normalize_bbox(event["bbox"]) == [71.4, 33.9, 71.65, 34.1])
+    harness.check("bbox jsonb bounds normalization works", normalize_bbox(satellites[0]["bounds"]) == [71.4, 33.9, 71.65, 34.1])
+    harness.check("bbox coordinate normalization works", normalize_bbox(hazard_zones[0]["geometry_geojson"]) == [71.45, 33.96, 71.52, 34.02])
+    json.dumps(structured)
+    harness.check("DB context datetime values serialize safely", isinstance(structured["event"]["created_at"], str))
+
+    final_values = build_final_report_db_values(
+        {
+            **report_context,
+            "report": {
+                "pdf_url": "https://example.test/report.pdf",
+                "map_url": "https://example.test/map",
+                "summary": "Executive summary.",
+            },
+            "agent_log": [{"timestamp": timestamp, "message": "done"}],
+        },
+        total_time_seconds=12,
+    )
+    old_name = "total_time_" + "secs"
+    python_text = "\n".join(path.read_text(encoding="utf-8") for path in BASE_DIR.glob("*.py"))
+    harness.check("final_reports payload includes total_time_seconds", final_values.get("total_time_seconds") == 12)
+    harness.check("final_reports agent_log records elapsed time", any(item.get("total_time_seconds") == 12 for item in final_values.get("agent_log", []) if isinstance(item, dict)))
+    harness.check("final_reports payload avoids old elapsed column", old_name not in json.dumps(final_values))
+    harness.check("report code does not use old elapsed column", old_name not in python_text)
+    harness.check("standalone hazard conversion handles rows", hazard_zones_to_feature_collection(hazard_zones)["type"] == "FeatureCollection")
+    print()
+
+
 async def run_anomaly_validation_tests(harness: Harness) -> None:
     print("Anomaly Validation")
     clear_context = deepcopy(MOCK_EVENT_DATA)
@@ -368,6 +513,49 @@ async def run_anomaly_validation_tests(harness: Harness) -> None:
 
     harness.check("LLM-required anomaly failure is explicit", failed_result.get("_source") == "llm_required_failed")
     harness.check("LLM-required anomaly preserves raw anomalies", bool(failed_result.get("anomalies")))
+    print()
+
+
+async def run_map_narrative_tests(harness: Harness) -> None:
+    print("Map Narrative Honesty")
+    context = deepcopy(MOCK_EVENT_DATA)
+    context.setdefault("report", {})["map_url"] = "https://hazardmind.test/map/demo"
+    summary = build_cartographic_data_summary(context, context)
+    harness.check("cartographic summary source is explicit", summary.get("source") == "cartographic_data_summary")
+    harness.check("cartographic summary does not claim LLM use", summary.get("llm_used") is False)
+    harness.check("cartographic summary includes hazard zone count", summary.get("hazard_zone_count") >= 1)
+    harness.check("cartographic summary includes route count", summary.get("route_count") >= 1)
+
+    import intelligence
+
+    original_cascade = intelligence.featherless_json_cascade
+
+    async def failing_map_cascade(*args, **kwargs):
+        del args, kwargs
+        return {}, "deterministic_fallback"
+
+    intelligence.featherless_json_cascade = failing_map_cascade
+    try:
+        map_result = await intelligence.generate_map_narrative(context)
+    finally:
+        intelligence.featherless_json_cascade = original_cascade
+
+    harness.check("map LLM failure uses cartographic summary", map_result.get("_source") == "cartographic_data_summary")
+    harness.check("map LLM failure records honest source", map_result.get("source") == "cartographic_data_summary")
+    harness.check("map LLM failure is not marked live", map_result.get("llm_used") is False)
+    harness.check(
+        "map LLM failure adds warning",
+        "Live map narrative unavailable; using cartographic data summary." in map_result.get("warnings", []),
+    )
+    try:
+        _assert_live_intelligence_sources(
+            {"map_narrative": "cartographic_data_summary", "anomaly_check": "data_validation"},
+            {"anomalies": {"status": "clear"}},
+        )
+    except Exception as exc:
+        harness.check("cartographic map narrative does not fail strict validation", False, type(exc).__name__)
+    else:
+        harness.check("cartographic map narrative does not fail strict validation", True)
     print()
 
 

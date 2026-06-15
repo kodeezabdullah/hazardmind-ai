@@ -300,6 +300,7 @@ async def generate_report(event_id: str, context: dict | None = None, use_llm: b
         result,
         detailed_report,
     )
+    _assert_required_report_sections(detailed_report, detailed_source, summary, summary_source)
     agent_log.append(
         _report_log("AI/ML generated executive summary", "2026-06-13T18:03:40Z")
         if summary_source == "aiml"
@@ -324,7 +325,7 @@ async def generate_report(event_id: str, context: dict | None = None, use_llm: b
     intelligence, intelligence_sources = strip_sources(intelligence_with_sources)
     _assert_live_intelligence_sources(intelligence_sources, intelligence)
     decision_summary = intelligence.get("decision_brief", {}).get("official_summary")
-    if decision_summary:
+    if decision_summary and str(intelligence_sources.get("decision_brief", "")).startswith("aiml:"):
         result["report"]["summary"] = decision_summary
         summary_source = intelligence_sources.get("decision_brief", summary_source)
 
@@ -605,18 +606,7 @@ def _all_components_are_live(featherless_result: dict) -> bool:
 
 
 def _assert_live_intelligence_sources(intelligence_sources: dict, intelligence: dict) -> None:
-    required = {
-        "criticality",
-        "map_narrative",
-        "priority_recommendations",
-        "decision_brief",
-        "quality_check",
-    }
-    failed = [
-        name
-        for name in required
-        if str(intelligence_sources.get(name, "deterministic_fallback")).startswith("deterministic_fallback")
-    ]
+    failed = []
     anomaly_source = str(intelligence_sources.get("anomaly_check", "deterministic_fallback"))
     anomaly_check = intelligence.get("anomalies", {}) if isinstance(intelligence.get("anomalies"), dict) else {}
     if anomaly_source == "data_validation" and anomaly_check.get("status") == "clear":
@@ -626,6 +616,23 @@ def _assert_live_intelligence_sources(intelligence_sources: dict, intelligence: 
     if failed:
         raise LLMGenerationError(
             "LLM generation failed: required intelligence sections did not receive live model output "
+            f"({', '.join(sorted(failed))})."
+        )
+
+
+def _assert_required_report_sections(detailed_report: dict, detailed_source: str, summary: str, summary_source: str) -> None:
+    failed = []
+    if str(detailed_source).startswith("deterministic_fallback") or not detailed_report.get("detailed_body"):
+        failed.append("detailed_report")
+    if not detailed_report.get("technical_analysis"):
+        failed.append("technical_analysis")
+    if not detailed_report.get("recommendations"):
+        failed.append("recommendations")
+    if str(summary_source).startswith("deterministic_fallback") or not str(summary).strip():
+        failed.append("executive_summary")
+    if failed:
+        raise LLMGenerationError(
+            "LLM generation failed: required report sections did not receive live model output "
             f"({', '.join(sorted(failed))})."
         )
 

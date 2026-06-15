@@ -90,8 +90,11 @@ async def detect_anomalies(report_context: dict) -> dict:
 async def generate_map_narrative(report_context: dict) -> dict:
     """
     Explains what the map means in operational terms.
+
+    LLM enhancement path: Featherless Gemma first, then Kimi/DeepSeek.
+    If that live map narration fails, this section falls back to an honest
+    cartographic_data_summary built from spatial metadata, not fake LLM text.
     """
-    fallback = _fallback_map_narrative(report_context)
     data, source = await featherless_json_cascade(
         purpose="map_narrative",
         prompt=
@@ -112,7 +115,16 @@ async def generate_map_narrative(report_context: dict) -> dict:
         timeout_seconds=45,
         required_keys=["map_narrative", "key_spatial_findings", "hotspots", "map_limitations"],
     )
-    result = _coerce_map_narrative(data, fallback)
+    cartographic_summary = build_cartographic_data_summary(report_context, report_context)
+    if source == "deterministic_fallback":
+        cartographic_summary["warnings"].append("Live map narrative unavailable; using cartographic data summary.")
+        cartographic_summary["_source"] = "cartographic_data_summary"
+        return cartographic_summary
+
+    result = _coerce_map_narrative(data, cartographic_summary)
+    result["source"] = source
+    result["llm_used"] = True
+    result["cartographic_summary"] = cartographic_summary
     result["_source"] = source
     return result
 
@@ -338,6 +350,74 @@ Context:
 """.strip()
 
 
+def build_cartographic_data_summary(report_context: dict, report: dict) -> dict:
+    """
+    Build an honest map narrative from actual spatial/map metadata.
+    """
+    del report
+    analysis = report_context.get("analysis", {})
+    impact = report_context.get("impact", {})
+    boundaries = report_context.get("boundaries", {})
+    routes = report_context.get("routes", {})
+    report_section = report_context.get("report", {})
+    zones = analysis.get("zones", {}) if isinstance(analysis.get("zones"), dict) else {}
+    zone_features = zones.get("features", []) if isinstance(zones.get("features"), list) else []
+    bbox = boundaries.get("bbox") if isinstance(boundaries.get("bbox"), list) else []
+    route_count = _feature_count(routes.get("evacuation_routes"))
+    facility_count = len(impact.get("critical_facilities", [])) if isinstance(impact.get("critical_facilities"), list) else 0
+    hazard_zone_count = len(zone_features)
+    satellite_total_zones = analysis.get("total_zones")
+    affected_area = analysis.get("affected_area_km2")
+    risk_levels = _risk_levels(zone_features)
+    layers = _map_layers(report_context, hazard_zone_count, route_count, facility_count)
+    warnings = []
+    if not bbox:
+        warnings.append("Map bbox is not available.")
+    if hazard_zone_count == 0 and not satellite_total_zones:
+        warnings.append("Hazard-zone geometry is not available for map narration.")
+    if route_count == 0:
+        warnings.append("No evacuation route geometry is available.")
+    if not report_section.get("map_url"):
+        warnings.append("Map URL is not assigned yet; static map generation runs later in the pipeline.")
+
+    findings = []
+    if affected_area not in (None, ""):
+        findings.append(f"Affected area metadata reports {affected_area} km2.")
+    if satellite_total_zones not in (None, ""):
+        findings.append(f"Satellite analysis reports {satellite_total_zones} total zones.")
+    if hazard_zone_count:
+        findings.append(f"GeoJSON contains {hazard_zone_count} hazard-zone features.")
+    if route_count:
+        findings.append(f"Evacuation route layer contains {route_count} route feature(s).")
+    if facility_count:
+        findings.append(f"Critical facility layer contains {facility_count} facility marker(s).")
+    if risk_levels:
+        findings.append(f"Hazard risk levels present: {', '.join(risk_levels)}.")
+
+    summary_parts = [
+        f"The map metadata describes {report_context.get('hazard_type', 'hazard')} conditions for {report_context.get('location', 'the event area')}."
+    ]
+    summary_parts.extend(findings[:3])
+    summary = " ".join(summary_parts)
+    if not findings:
+        summary += " Spatial layers are limited, so the map narrative is restricted to available metadata."
+
+    return {
+        "source": "cartographic_data_summary",
+        "llm_used": False,
+        "summary": summary,
+        "map_narrative": summary,
+        "layers": layers,
+        "bbox": bbox,
+        "hazard_zone_count": hazard_zone_count,
+        "route_count": route_count,
+        "warnings": warnings,
+        "key_spatial_findings": findings,
+        "hotspots": _hotspots(zone_features),
+        "map_limitations": warnings or ["Map narrative is derived from available cartographic metadata."],
+    }
+
+
 def _prompt_context(context: dict) -> dict:
     if "event" in context or "intelligence" in context:
         return {
@@ -417,6 +497,54 @@ def _merge_lists(first: list[str], second) -> list[str]:
             merged.append(text)
             seen.add(text.lower())
     return merged
+
+
+def _feature_count(feature_collection) -> int:
+    if isinstance(feature_collection, dict) and isinstance(feature_collection.get("features"), list):
+        return len(feature_collection["features"])
+    return 0
+
+
+def _risk_levels(features: list[dict]) -> list[str]:
+    levels = []
+    seen = set()
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties", {}) if isinstance(feature.get("properties"), dict) else {}
+        level = str(properties.get("severity") or properties.get("risk_level") or "").upper()
+        if level and level not in seen:
+            levels.append(level)
+            seen.add(level)
+    return levels
+
+
+def _map_layers(context: dict, hazard_zone_count: int, route_count: int, facility_count: int) -> list[dict]:
+    artifacts = context.get("artifacts", {})
+    layers = []
+    if context.get("boundaries", {}).get("bbox"):
+        layers.append({"name": "analysis_bbox", "status": "available"})
+    layers.append({"name": "hazard_zones", "status": "available" if hazard_zone_count else "missing", "count": hazard_zone_count})
+    layers.append({"name": "evacuation_routes", "status": "available" if route_count else "missing", "count": route_count})
+    if facility_count:
+        layers.append({"name": "critical_facilities", "status": "available", "count": facility_count})
+    for key in ("true_color_url", "index_url", "classification_url", "geojson_url"):
+        if artifacts.get(key):
+            layers.append({"name": key.replace("_url", ""), "status": "available"})
+    return layers
+
+
+def _hotspots(features: list[dict]) -> list[str]:
+    hotspots = []
+    for index, feature in enumerate(features, start=1):
+        if not isinstance(feature, dict):
+            continue
+        properties = feature.get("properties", {}) if isinstance(feature.get("properties"), dict) else {}
+        severity = str(properties.get("severity") or properties.get("risk_level") or "").upper()
+        if severity in {"CRITICAL", "HIGH"}:
+            label = properties.get("zone_id") or properties.get("id") or properties.get("name") or f"zone {index}"
+            hotspots.append(f"{label} ({severity})")
+    return hotspots[:5]
 
 
 def _validate_anomaly_inputs(context: dict) -> dict:
@@ -615,10 +743,18 @@ def _coerce_anomalies(data: dict, fallback: dict) -> dict:
 
 def _coerce_map_narrative(data: dict, fallback: dict) -> dict:
     return {
+        "source": fallback.get("source", "cartographic_data_summary"),
+        "llm_used": False,
+        "summary": str(data.get("summary") or data.get("map_narrative") or fallback.get("summary") or fallback["map_narrative"]),
         "map_narrative": str(data.get("map_narrative") or fallback["map_narrative"]),
         "key_spatial_findings": _as_list(data.get("key_spatial_findings"), fallback["key_spatial_findings"]),
         "hotspots": _as_list(data.get("hotspots"), fallback["hotspots"]),
         "map_limitations": _as_list(data.get("map_limitations"), fallback["map_limitations"]),
+        "layers": fallback.get("layers", []),
+        "bbox": fallback.get("bbox", []),
+        "hazard_zone_count": fallback.get("hazard_zone_count", 0),
+        "route_count": fallback.get("route_count", 0),
+        "warnings": fallback.get("warnings", []),
     }
 
 

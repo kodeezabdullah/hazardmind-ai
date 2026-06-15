@@ -15,13 +15,25 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 try:
-    from .db_client import fetch_report_context_from_db, is_valid_uuid, write_final_report_metadata
+    from .db_client import (
+        calculate_confidence_level,
+        db_context_to_report_context,
+        fetch_report_context_from_db,
+        is_valid_uuid,
+        write_final_report_metadata,
+    )
     from .generator import MOCK_EVENT_DATA, determine_recommended_response_level, generate_report
     from .map_generator import generate_static_map
     from .pdf_generator import generate_pdf_report
     from .storage_client import upload_file_to_r2
 except ImportError:
-    from db_client import fetch_report_context_from_db, is_valid_uuid, write_final_report_metadata
+    from db_client import (
+        calculate_confidence_level,
+        db_context_to_report_context,
+        fetch_report_context_from_db,
+        is_valid_uuid,
+        write_final_report_metadata,
+    )
     from generator import MOCK_EVENT_DATA, determine_recommended_response_level, generate_report
     from map_generator import generate_static_map
     from pdf_generator import generate_pdf_report
@@ -58,19 +70,23 @@ async def run_report_pipeline(
                 status="failed",
                 error="Contract test mode blocks R2/DB side effects unless explicitly allowed.",
                 warnings=["Contract test mode cannot upload R2 or write DB by default."],
+                total_time_seconds=_elapsed_seconds(started_at),
             )
 
         context = None
+        db_context = None
         if fetch_from_db:
             if not is_valid_uuid(event_id):
                 return _result(
                     event_id=event_id,
                     status="failed",
                     warnings=["Cannot fetch DB context because event_id is not UUID."],
+                    total_time_seconds=_elapsed_seconds(started_at),
                 )
-            context = await fetch_report_context_from_db(event_id)
-            missing_context = _missing_context_warnings(context)
+            db_context = await fetch_report_context_from_db(event_id)
+            missing_context = _missing_context_warnings(db_context)
             warnings.extend(missing_context)
+            context = db_context_to_report_context(db_context)
 
         if incoming_payload:
             if context is None:
@@ -115,18 +131,22 @@ async def run_report_pipeline(
                 r2_uploaded = True
                 _append_report_log(report, "PDF uploaded to Cloudflare R2", "2026-06-13T18:05:00Z")
 
-        total_time_secs = round(time.perf_counter() - started_at)
+        total_time_seconds = _elapsed_seconds(started_at)
+        report["total_time_seconds"] = total_time_seconds
+        report.setdefault("report", {})["total_time_seconds"] = total_time_seconds
+        _append_report_log(report, f"Pipeline completed in {total_time_seconds} seconds", "2026-06-13T18:05:20Z")
+
         if write_db:
             if not is_valid_uuid(event_id):
                 warnings.append("DB write skipped: event_id is not a UUID. Real Band/backend event IDs must be UUIDs.")
             else:
-                await write_final_report_metadata(report, total_time_secs=total_time_secs)
+                await write_final_report_metadata(report, total_time_seconds=total_time_seconds)
                 db_written = True
                 _append_report_log(report, "Final report metadata written to Neon", "2026-06-13T18:05:40Z")
 
         _append_report_log(report, "JSON written locally", "2026-06-13T18:04:40Z")
         paths["json"].parent.mkdir(parents=True, exist_ok=True)
-        paths["json"].write_text(f"{json.dumps(report, indent=2)}\n", encoding="utf-8")
+        paths["json"].write_text(f"{json.dumps(report, indent=2, default=_json_default)}\n", encoding="utf-8")
 
         status = "complete_with_warnings" if warnings else "complete"
         return _result(
@@ -144,6 +164,7 @@ async def run_report_pipeline(
             model_sources=report.get("model_sources", {}),
             confidence_level=_confidence_level(report),
             recommended_response_level=_recommended_response_level(report),
+            total_time_seconds=total_time_seconds,
             report=report,
         )
     except Exception as exc:
@@ -153,6 +174,7 @@ async def run_report_pipeline(
             status="failed",
             error=error_message if error_message.startswith("LLM generation failed") else f"Report pipeline failed: {type(exc).__name__}: {error_message}",
             warnings=[error_message if error_message.startswith("LLM generation failed") else f"Report pipeline failed: {type(exc).__name__}: {error_message}"],
+            total_time_seconds=_elapsed_seconds(started_at),
         )
 
 
@@ -219,6 +241,17 @@ def _append_report_log(report: dict, message: str, timestamp: str) -> None:
 
 def _missing_context_warnings(context: dict) -> list[str]:
     warnings = []
+    if "event" in context and "satellite_results" in context:
+        if not context.get("event"):
+            warnings.append("DB context warning: disaster event row is missing.")
+        if not context.get("satellite_results"):
+            warnings.append("DB context warning: satellite results are missing.")
+        if not context.get("spatial", {}).get("hazard_geojson", {}).get("features"):
+            warnings.append("DB context warning: hazard zones are missing.")
+        if not context.get("impact_data"):
+            warnings.append("DB context warning: impact data is missing.")
+        return warnings
+
     if not context.get("satellite", {}).get("scene_id"):
         warnings.append("DB context warning: satellite scene is missing.")
     if not context.get("analysis", {}).get("zones", {}).get("features"):
@@ -333,19 +366,7 @@ def _routes_from_incoming(routes) -> dict | None:
 
 
 def _confidence_level(report: dict) -> str:
-    criticality = report.get("intelligence", {}).get("criticality", {})
-    confidence = criticality.get("overall_confidence")
-    if confidence is None:
-        confidence = report.get("impact", {}).get("overall_confidence")
-    try:
-        confidence_value = float(confidence)
-    except (TypeError, ValueError):
-        return "UNKNOWN"
-    if confidence_value >= 0.8:
-        return "HIGH"
-    if confidence_value >= 0.6:
-        return "MEDIUM"
-    return "LOW"
+    return calculate_confidence_level(report)
 
 
 def _recommended_response_level(report: dict) -> str:
@@ -354,6 +375,10 @@ def _recommended_response_level(report: dict) -> str:
         or report.get("report", {}).get("recommended_response_level")
         or determine_recommended_response_level(report)
     )
+
+
+def _elapsed_seconds(started_at: float) -> int:
+    return int(round(time.perf_counter() - started_at))
 
 
 def _safe_path_part(value: str) -> str:
@@ -377,6 +402,12 @@ def _safe_error_message(exc: Exception) -> str:
     return message[:500]
 
 
+def _json_default(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 def _result(
     *,
     event_id: str,
@@ -393,6 +424,7 @@ def _result(
     model_sources: dict | None = None,
     confidence_level: str = "",
     recommended_response_level: str = "",
+    total_time_seconds: int = 0,
     error: str = "",
     report: dict | None = None,
 ) -> dict:
@@ -411,6 +443,7 @@ def _result(
         "model_sources": model_sources or {},
         "confidence_level": confidence_level,
         "recommended_response_level": recommended_response_level,
+        "total_time_seconds": total_time_seconds,
         "error": error,
     }
     if report is not None:
