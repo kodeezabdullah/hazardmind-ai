@@ -1,9 +1,10 @@
 import asyncio
 import argparse
 import json
+import time
 from pathlib import Path
 
-from db_client import ensure_final_reports_table, write_final_report_metadata
+from db_client import is_valid_uuid, write_final_report_metadata
 from generator import generate_report
 from llm_clients import featherless_health_check
 from map_generator import generate_static_map
@@ -24,6 +25,7 @@ def parse_args():
 
 
 async def main():
+    started_at = time.perf_counter()
     args = parse_args()
     if args.llm_health_check:
         for label, status in await featherless_health_check():
@@ -74,10 +76,13 @@ async def main():
         print("Map uploaded to R2")
 
     if args.write_db:
-        await ensure_final_reports_table()
-        await write_final_report_metadata(report)
-        append_report_log(report, "Final report metadata written to Neon", "2026-06-13T18:05:40Z")
-        print("Final report metadata written to Neon")
+        if not is_valid_uuid(str(report.get("event_id", ""))):
+            print("DB write skipped: event_id is not a UUID. Real Band/backend event IDs must be UUIDs.")
+        else:
+            total_time_secs = round(time.perf_counter() - started_at)
+            await write_final_report_metadata(report, total_time_secs=total_time_secs)
+            append_report_log(report, "Final report metadata written to Neon", "2026-06-13T18:05:40Z")
+            print("Final report metadata written to Neon")
 
     if args.output:
         append_report_log(report, "JSON written locally", "2026-06-13T18:04:40Z")
