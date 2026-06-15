@@ -70,7 +70,7 @@ export default function Home() {
       <div className="command-grid fixed inset-0 opacity-35" />
       <div className="scanline fixed inset-0 pointer-events-none" />
 
-      <div className="relative z-10 flex h-screen flex-col gap-2 p-2.5 xl:p-3">
+      <div className="relative z-10 flex h-screen flex-col gap-2 p-2.5 pb-16 xl:p-3 xl:pb-16">
         <CommandHeader result={result} dataSource={dataSource} />
 
         <section className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[280px_minmax(0,1fr)_350px] xl:grid-cols-[300px_minmax(0,1fr)_370px]">

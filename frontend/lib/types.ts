@@ -91,11 +91,61 @@ export type HazardMindResult = {
     pdf_url: string;
     map_url: string;
   };
+  intelligence?: {
+    criticality: {
+      criticality: "low" | "normal" | "high" | "critical";
+      overall_confidence: number;
+      escalation_required: boolean;
+      rationale: string;
+      trigger_factors: string[];
+    };
+    anomalies: {
+      anomalies_detected: boolean;
+      anomalies: Array<{
+        type: string;
+        severity: "low" | "medium" | "high" | "critical";
+        description: string;
+        recommended_handling: string;
+      }>;
+    };
+    map_narrative: {
+      map_narrative: string;
+      key_spatial_findings: string[];
+      hotspots: string[];
+      map_limitations: string[];
+    };
+    priority_timeline: {
+      next_6_hours: string[];
+      next_24_hours: string[];
+      next_72_hours: string[];
+      resource_priorities: string[];
+      coordination_priorities: string[];
+    };
+    decision_brief: {
+      decision_brief: string;
+      official_summary: string;
+      key_decisions_required: string[];
+      human_review_required: boolean;
+    };
+    quality_check: {
+      status: "ready" | "ready_with_warnings" | "not_ready";
+      checks: Record<string, boolean>;
+      warnings: string[];
+      blocking_issues: string[];
+    };
+    band_ready_message: {
+      target: string;
+      message: string;
+      status: "COMPLETE" | "COMPLETE_WITH_WARNINGS" | "NEEDS_REVIEW";
+      confidence: number;
+    };
+  };
   model_sources?: {
     detailed_report: string;
     executive_summary: string;
     fallback_used: boolean;
     featherless_model?: string;
+    intelligence?: Record<string, string>;
   };
   agent_log: AgentLogEntry[];
 };

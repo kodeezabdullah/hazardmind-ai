@@ -85,6 +85,29 @@ def generate_pdf_report(
             Paragraph("Executive Summary", heading_style),
             _paragraph(report["report"]["summary"], normal_style),
             Spacer(1, 0.18 * inch),
+            Paragraph("Intelligence Assessment", heading_style),
+            _intelligence_summary_table(report),
+            Spacer(1, 0.14 * inch),
+            Paragraph("Map Narrative", heading_style),
+            _paragraph(report.get("intelligence", {}).get("map_narrative", {}).get("map_narrative", ""), normal_style),
+            Spacer(1, 0.08 * inch),
+            _bullet_list(
+                report.get("intelligence", {}).get("map_narrative", {}).get("key_spatial_findings", []),
+                normal_style,
+            ),
+            Spacer(1, 0.18 * inch),
+            Paragraph("Priority Timeline", heading_style),
+            _priority_timeline_table(report),
+            Spacer(1, 0.18 * inch),
+            Paragraph("Anomalies and Warnings", heading_style),
+            _bullet_list(_anomaly_warning_items(report), normal_style),
+            Spacer(1, 0.18 * inch),
+            Paragraph("Quality Check", heading_style),
+            _quality_check_table(report),
+            Spacer(1, 0.18 * inch),
+            Paragraph("Band-Ready Final Message", heading_style),
+            _paragraph(report.get("intelligence", {}).get("band_ready_message", {}).get("message", ""), normal_style),
+            Spacer(1, 0.18 * inch),
             Paragraph("Detailed Incident Analysis", heading_style),
             _paragraph(report["report"].get("detailed_body", ""), normal_style),
             Spacer(1, 0.18 * inch),
@@ -112,6 +135,15 @@ def generate_pdf_report(
                     ("Executive Summary", report.get("model_sources", {}).get("executive_summary", "unknown")),
                     ("Fallback Used", report.get("model_sources", {}).get("fallback_used", "unknown")),
                     ("Featherless Model", report.get("model_sources", {}).get("featherless_model", "unknown")),
+                    ("Criticality", report.get("model_sources", {}).get("intelligence", {}).get("criticality", "unknown")),
+                    ("Map Narrative", report.get("model_sources", {}).get("intelligence", {}).get("map_narrative", "unknown")),
+                    (
+                        "Priority Timeline",
+                        report.get("model_sources", {}).get("intelligence", {}).get(
+                            "priority_recommendations", "unknown"
+                        ),
+                    ),
+                    ("Quality Check", report.get("model_sources", {}).get("intelligence", {}).get("quality_check", "unknown")),
                 ]
             ),
             Spacer(1, 0.18 * inch),
@@ -153,12 +185,24 @@ def _section_table(rows: list[tuple[str, object]]) -> Table:
 
 def model_source_note(report: dict) -> str:
     sources = report.get("model_sources", {})
+    intelligence_sources = sources.get("intelligence", {})
+    intelligence_note = ", ".join(
+        f"{label}: {source}" for label, source in intelligence_sources.items() if source
+    )
     if sources.get("fallback_used"):
-        return "Featherless detailed generation failed; AI/ML fallback was used. Executive summary generated using AI/ML API."
-    return "Detailed report generated using Featherless Kimi K2.6. Executive summary generated using AI/ML API."
+        return (
+            "Featherless detailed generation failed; AI/ML fallback was used. "
+            f"Executive and intelligence outputs were generated with safe fallbacks where needed. {intelligence_note}"
+        )
+    return (
+        "Detailed report generated using Featherless Kimi K2.6. Executive summary generated using AI/ML API. "
+        f"Intelligence sources: {intelligence_note}"
+    )
 
 
 def _bullet_list(items: list[str], style) -> ListFlowable:
+    if not items:
+        items = ["None reported."]
     return ListFlowable(
         [ListItem(_paragraph(item, style)) for item in items],
         bulletType="bullet",
@@ -211,3 +255,53 @@ def _agent_log_table(agent_log: list[dict]) -> Table:
         )
     )
     return table
+
+
+def _intelligence_summary_table(report: dict) -> Table:
+    intelligence = report.get("intelligence", {})
+    criticality = intelligence.get("criticality", {})
+    decision = intelligence.get("decision_brief", {})
+    return _section_table(
+        [
+            ("Criticality", criticality.get("criticality", "unknown")),
+            ("Overall Confidence", f"{round(float(criticality.get('overall_confidence', 0)) * 100)}%"),
+            ("Escalation Required", criticality.get("escalation_required", "unknown")),
+            ("Rationale", criticality.get("rationale", "")),
+            ("Key Decisions", "; ".join(decision.get("key_decisions_required", []))),
+            ("Human Review Required", decision.get("human_review_required", "unknown")),
+        ]
+    )
+
+
+def _priority_timeline_table(report: dict) -> Table:
+    timeline = report.get("intelligence", {}).get("priority_timeline", {})
+    return _section_table(
+        [
+            ("Next 6 Hours", "; ".join(timeline.get("next_6_hours", []))),
+            ("Next 24 Hours", "; ".join(timeline.get("next_24_hours", []))),
+            ("Next 72 Hours", "; ".join(timeline.get("next_72_hours", []))),
+            ("Resources", "; ".join(timeline.get("resource_priorities", []))),
+            ("Coordination", "; ".join(timeline.get("coordination_priorities", []))),
+        ]
+    )
+
+
+def _quality_check_table(report: dict) -> Table:
+    quality = report.get("intelligence", {}).get("quality_check", {})
+    checks = quality.get("checks", {})
+    rows = [("Status", quality.get("status", "unknown"))]
+    rows.extend((label.replace("_", " ").title(), value) for label, value in checks.items())
+    rows.append(("Warnings", "; ".join(quality.get("warnings", []))))
+    rows.append(("Blocking Issues", "; ".join(quality.get("blocking_issues", []))))
+    return _section_table(rows)
+
+
+def _anomaly_warning_items(report: dict) -> list[str]:
+    anomalies = report.get("intelligence", {}).get("anomalies", {})
+    items = [
+        f"{item.get('severity', 'low').upper()}: {item.get('description', '')} "
+        f"Handling: {item.get('recommended_handling', '')}"
+        for item in anomalies.get("anomalies", [])
+    ]
+    items.extend(report.get("intelligence", {}).get("quality_check", {}).get("warnings", []))
+    return items or ["No blocking anomalies detected."]
