@@ -2,6 +2,7 @@ import asyncio
 import ast
 import json
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,6 +32,9 @@ MAX_RETRY_TOKENS = 2500
 FEATHERLESS_CONCURRENCY = 2
 _FEATHERLESS_SEMAPHORE = asyncio.Semaphore(FEATHERLESS_CONCURRENCY)
 BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_REPORT_LLM_TIMEOUT_SECONDS = 30
+_RUNTIME_TIMEOUT_SECONDS: float | None = None
+_MODEL_CASCADE_ENABLED = True
 
 FALLBACK_RECOMMENDATIONS = [
     "Prioritize evacuation in critical flood zones.",
@@ -57,6 +61,55 @@ FALLBACK_LIMITATIONS = [
     "No field validation, hydrologic model, or live basemap tiles are used for artifact generation.",
     "Impact estimates should be treated as decision-support indicators, not official counts.",
 ]
+
+
+def configure_llm_runtime(timeout_seconds: float | None = None, model_cascade: bool = True) -> None:
+    global _RUNTIME_TIMEOUT_SECONDS, _MODEL_CASCADE_ENABLED
+    _RUNTIME_TIMEOUT_SECONDS = float(timeout_seconds) if timeout_seconds else None
+    _MODEL_CASCADE_ENABLED = model_cascade
+
+
+def model_cascade_enabled() -> bool:
+    return _MODEL_CASCADE_ENABLED
+
+
+def report_llm_timeout_seconds(default: int | float | None = None) -> float:
+    if _RUNTIME_TIMEOUT_SECONDS:
+        return _RUNTIME_TIMEOUT_SECONDS
+    env_value = os.getenv("REPORT_LLM_TIMEOUT_SECONDS")
+    if env_value:
+        try:
+            parsed = float(env_value)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+    fallback = float(default) if default else DEFAULT_REPORT_LLM_TIMEOUT_SECONDS
+    return min(fallback, DEFAULT_REPORT_LLM_TIMEOUT_SECONDS)
+
+
+def _log_llm_attempt(section: str, model: str, status: str, elapsed_seconds: float) -> None:
+    safe_section = str(section or "llm_call").replace("\n", " ").replace("|", "/").strip()
+    safe_model = str(model or "unknown").replace("\n", " ").replace("|", "/").strip()
+    safe_status = str(status or "unknown").replace("\n", " ").replace("|", "/").strip()
+    outcome = "ok" if safe_status == "ok" else f"failed={safe_status}"
+    print(f"[LLM] {safe_section} | model={safe_model} | {outcome} | elapsed={elapsed_seconds:.1f}s")
+
+
+def _failure_label(error: str | None) -> str:
+    text = str(error or "").strip()
+    lowered = text.lower()
+    if not text:
+        return "unknown"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "cancelled" in lowered:
+        return "cancelled"
+    if "empty_content" in lowered:
+        return "empty_content"
+    if "api_key" in lowered and "not set" in lowered:
+        return "missing_api_key"
+    return text.split(":", 1)[0].strip() or "error"
 
 
 async def generate_detailed_report_with_featherless(context: dict) -> dict:
@@ -89,6 +142,7 @@ async def generate_detailed_report_with_aiml_fallback(context: dict) -> dict:
         build_detailed_report_prompt(context),
         system="You generate structured disaster response reports as strict JSON.",
         max_tokens=FEATHERLESS_DETAILED_TOKENS,
+        purpose="detailed_report",
     )
     if response["ok"]:
         data = normalize_detailed_report(response["content"], context)
@@ -107,18 +161,43 @@ async def generate_composite_detailed_report_with_featherless(context: dict) -> 
     incident_task = generate_incident_interpretation(context)
     technical_task = generate_technical_analysis(context)
     assumptions_task = generate_assumptions_limitations(context)
-    incident, technical, assumptions = await asyncio.gather(incident_task, technical_task, assumptions_task)
+    results = await asyncio.gather(
+        incident_task,
+        technical_task,
+        assumptions_task,
+        return_exceptions=True,
+    )
 
-    incident_data, incident_source = incident
-    technical_data, technical_source = technical
-    assumptions_data, assumptions_source = assumptions
+    fallback = deterministic_detailed_report(context)
+    incident_data, incident_source = _safe_component_result(
+        results[0],
+        {
+            "detailed_body": fallback["detailed_body"],
+            "situation_interpretation": "",
+            "operational_concern": "",
+        },
+    )
+    technical_data, technical_source = _safe_component_result(
+        results[1],
+        {
+            "technical_analysis": fallback["technical_analysis"],
+            "data_confidence_notes": ["Satellite-derived estimates require field validation."],
+            "spatial_risk_drivers": ["Critical and high flood zones intersect exposed population and hospital corridors."],
+        },
+    )
+    assumptions_data, assumptions_source = _safe_component_result(
+        results[2],
+        {
+            "assumptions": fallback["assumptions"],
+            "limitations": fallback["limitations"],
+        },
+    )
     component_sources = {
         "incident_interpretation": incident_source,
         "technical_analysis": technical_source,
         "assumptions_limitations": assumptions_source,
     }
     any_featherless = any(source.startswith("featherless:") for source in component_sources.values())
-    fallback = deterministic_detailed_report(context)
     if not any_featherless:
         return {
             "ok": False,
@@ -153,6 +232,19 @@ async def generate_composite_detailed_report_with_featherless(context: dict) -> 
         "component_sources": component_sources,
         "data": data,
     }
+
+
+def _safe_component_result(result, fallback: dict) -> tuple[dict, str]:
+    if isinstance(result, KeyboardInterrupt):
+        raise result
+    if isinstance(result, BaseException):
+        return fallback, f"deterministic_fallback:{type(result).__name__}"
+    if not isinstance(result, tuple) or len(result) != 2:
+        return fallback, "deterministic_fallback:invalid_component"
+    data, source = result
+    if not isinstance(data, dict):
+        return fallback, "deterministic_fallback:invalid_component_data"
+    return data, str(source or "deterministic_fallback")
 
 
 async def generate_incident_interpretation(context: dict) -> tuple[dict, str]:
@@ -222,6 +314,7 @@ async def generate_executive_summary_with_aiml(context: dict, detailed_report: d
         build_executive_summary_prompt(context, detailed_report),
         system="You write clear, concise executive disaster response summaries.",
         max_tokens=900,
+        purpose="executive_summary",
     )
     if response["ok"] and response["content"]:
         return {
@@ -282,19 +375,22 @@ async def call_aiml(
     model: str | None = None,
     max_tokens: int = 1200,
     timeout_seconds: int | None = None,
+    purpose: str = "aiml_call",
 ) -> dict:
     api_key = os.getenv("AIML_API_KEY")
     selected_model = model or AIML_MODEL
     if not api_key:
+        _log_llm_attempt(purpose, selected_model, "missing_api_key", 0.0)
         return {
             "ok": False,
             "provider": "aiml",
             "model": selected_model,
             "content": "",
             "error": "AIML_API_KEY is not set",
+            "elapsed_seconds": 0.0,
         }
 
-    return await _call_openai_compatible(
+    response = await _call_openai_compatible(
         provider="aiml",
         api_key=api_key,
         base_url=AIML_BASE_URL,
@@ -304,6 +400,13 @@ async def call_aiml(
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
     )
+    _log_llm_attempt(
+        purpose,
+        selected_model,
+        "ok" if response["ok"] and response["content"] else _failure_label(response.get("error")),
+        response.get("elapsed_seconds", 0.0),
+    )
+    return response
 
 
 async def featherless_json_cascade(
@@ -319,27 +422,62 @@ async def featherless_json_cascade(
     """
     Try primary and fallback Featherless models until strict-enough JSON is produced.
     """
-    del purpose
-    models = [primary_model, *fallback_models]
+    models = [primary_model, *fallback_models] if _MODEL_CASCADE_ENABLED else [primary_model]
+    effective_timeout = report_llm_timeout_seconds(timeout_seconds)
     for selected_model in models:
-        async with _FEATHERLESS_SEMAPHORE:
-            response = await call_featherless_model(
-                prompt,
-                system=system,
-                model=selected_model,
-                max_tokens=max_tokens,
-                timeout_seconds=timeout_seconds,
-            )
+        started_at = time.perf_counter()
+        try:
+            async with _FEATHERLESS_SEMAPHORE:
+                response = await call_featherless_model(
+                    prompt,
+                    system=system,
+                    model=selected_model,
+                    max_tokens=max_tokens,
+                    timeout_seconds=effective_timeout,
+                )
+        except KeyboardInterrupt:
+            raise
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            _log_llm_attempt(purpose, selected_model, "timeout", time.perf_counter() - started_at)
+            continue
+        except Exception as exc:
+            _log_llm_attempt(purpose, selected_model, type(exc).__name__, time.perf_counter() - started_at)
+            continue
         if not response["ok"]:
+            _log_llm_attempt(
+                purpose,
+                selected_model,
+                _failure_label(response.get("error")),
+                response.get("elapsed_seconds", time.perf_counter() - started_at),
+            )
             continue
         try:
             parsed = parse_json_object(response["content"])
         except (json.JSONDecodeError, ValueError, SyntaxError):
+            _log_llm_attempt(
+                purpose,
+                selected_model,
+                "invalid_json",
+                response.get("elapsed_seconds", time.perf_counter() - started_at),
+            )
             continue
         if not parsed:
+            _log_llm_attempt(
+                purpose,
+                selected_model,
+                "empty_json",
+                response.get("elapsed_seconds", time.perf_counter() - started_at),
+            )
             continue
         if required_keys and any(key not in parsed for key in required_keys):
+            _log_llm_attempt(
+                purpose,
+                selected_model,
+                "missing_keys",
+                response.get("elapsed_seconds", time.perf_counter() - started_at),
+            )
             continue
+        _log_llm_attempt(purpose, selected_model, "ok", response.get("elapsed_seconds", time.perf_counter() - started_at))
         return parsed, f"featherless:{_model_label(selected_model)}"
 
     return {}, "deterministic_fallback"
@@ -372,12 +510,18 @@ async def aiml_text_call(prompt: str, system: str, model: str | None = None, max
     Calls AI/ML API and returns text. Tries GPT-4.5 as a last-resort fallback if Opus fails.
     """
     selected_model = model or AIML_OPUS
-    response = await call_aiml(prompt, system=system, model=selected_model, max_tokens=max_tokens)
+    response = await call_aiml(prompt, system=system, model=selected_model, max_tokens=max_tokens, purpose="aiml_text")
     if response["ok"] and response["content"]:
         return response["content"]
 
-    if selected_model != AIML_GPT_LAST_RESORT:
-        fallback = await call_aiml(prompt, system=system, model=AIML_GPT_LAST_RESORT, max_tokens=max_tokens)
+    if _MODEL_CASCADE_ENABLED and selected_model != AIML_GPT_LAST_RESORT:
+        fallback = await call_aiml(
+            prompt,
+            system=system,
+            model=AIML_GPT_LAST_RESORT,
+            max_tokens=max_tokens,
+            purpose="aiml_text",
+        )
         if fallback["ok"] and fallback["content"]:
             return fallback["content"]
 
@@ -451,14 +595,19 @@ async def _call_openai_compatible(
     max_tokens: int,
     timeout_seconds: int | None = None,
 ) -> dict:
-    effective_timeout = timeout_seconds or (FEATHERLESS_TIMEOUT_SECONDS if provider == "featherless" else AIML_TIMEOUT_SECONDS)
-    retry_timeout = FEATHERLESS_RETRY_TIMEOUT_SECONDS if provider == "featherless" else effective_timeout
+    effective_timeout = report_llm_timeout_seconds(
+        timeout_seconds or (FEATHERLESS_TIMEOUT_SECONDS if provider == "featherless" else AIML_TIMEOUT_SECONDS)
+    )
+    retry_timeout = report_llm_timeout_seconds(
+        FEATHERLESS_RETRY_TIMEOUT_SECONDS if provider == "featherless" else effective_timeout
+    )
     client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=float(max(effective_timeout, retry_timeout)))
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    started_at = time.perf_counter()
     try:
         response = await _create_completion_with_retry(
             client=client,
@@ -476,6 +625,7 @@ async def _call_openai_compatible(
                 "model": model,
                 "content": "",
                 "error": "empty_content",
+                "elapsed_seconds": time.perf_counter() - started_at,
             }
         return {
             "ok": True,
@@ -483,6 +633,18 @@ async def _call_openai_compatible(
             "model": model,
             "content": content.strip(),
             "error": "",
+            "elapsed_seconds": time.perf_counter() - started_at,
+        }
+    except KeyboardInterrupt:
+        raise
+    except asyncio.CancelledError as exc:
+        return {
+            "ok": False,
+            "provider": provider,
+            "model": model,
+            "content": "",
+            "error": f"CancelledError: {exc}",
+            "elapsed_seconds": time.perf_counter() - started_at,
         }
     except Exception as exc:
         return {
@@ -491,6 +653,7 @@ async def _call_openai_compatible(
             "model": model,
             "content": "",
             "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_seconds": time.perf_counter() - started_at,
         }
     finally:
         await client.close()

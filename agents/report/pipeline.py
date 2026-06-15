@@ -37,6 +37,8 @@ async def run_report_pipeline(
     output_dir: str | None = None,
     frontend_demo_mode: bool = False,
     incoming_payload: dict | None = None,
+    use_llm: bool = True,
+    allow_contract_side_effects: bool = False,
     json_output_path: str | None = None,
     pdf_output_path: str | None = None,
     map_output_path: str | None = None,
@@ -50,6 +52,14 @@ async def run_report_pipeline(
     db_written = False
 
     try:
+        if not use_llm and (upload_r2 or write_db) and not allow_contract_side_effects:
+            return _result(
+                event_id=event_id,
+                status="failed",
+                error="Contract test mode blocks R2/DB side effects unless explicitly allowed.",
+                warnings=["Contract test mode cannot upload R2 or write DB by default."],
+            )
+
         context = None
         if fetch_from_db:
             if not is_valid_uuid(event_id):
@@ -68,7 +78,7 @@ async def run_report_pipeline(
             _merge_incoming_payload_into_context(context, incoming_payload)
             warnings.extend(_incoming_payload_warnings(incoming_payload))
 
-        report = await generate_report(event_id, context=context)
+        report = await generate_report(event_id, context=context, use_llm=use_llm)
         if incoming_payload:
             _preserve_incoming_payload(report, incoming_payload)
 
@@ -137,10 +147,12 @@ async def run_report_pipeline(
             report=report,
         )
     except Exception as exc:
+        error_message = _safe_error_message(exc)
         return _result(
             event_id=event_id,
             status="failed",
-            warnings=[f"Report pipeline failed: {type(exc).__name__}: {_safe_error_message(exc)}"],
+            error=error_message if error_message.startswith("LLM generation failed") else f"Report pipeline failed: {type(exc).__name__}: {error_message}",
+            warnings=[error_message if error_message.startswith("LLM generation failed") else f"Report pipeline failed: {type(exc).__name__}: {error_message}"],
         )
 
 
@@ -236,6 +248,8 @@ def _merge_incoming_payload_into_context(context: dict, incoming_payload: dict) 
             impact[target_key] = data[source_key]
     if "total_affected" in data:
         impact["total_affected"] = data["total_affected"]
+
+    context["incoming_anomalies"] = incoming_payload.get("anomalies") or []
 
     routes = _routes_from_incoming(data.get("evacuation_routes"))
     if routes is not None:
@@ -379,6 +393,7 @@ def _result(
     model_sources: dict | None = None,
     confidence_level: str = "",
     recommended_response_level: str = "",
+    error: str = "",
     report: dict | None = None,
 ) -> dict:
     result = {
@@ -396,6 +411,7 @@ def _result(
         "model_sources": model_sources or {},
         "confidence_level": confidence_level,
         "recommended_response_level": recommended_response_level,
+        "error": error,
     }
     if report is not None:
         result["report"] = report

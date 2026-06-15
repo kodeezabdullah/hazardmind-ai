@@ -51,33 +51,38 @@ async def detect_anomalies(report_context: dict) -> dict:
     """
     Detects abnormal or suspicious conditions in the pipeline data.
     """
-    fallback = _fallback_anomalies(report_context)
+    validation = _validate_anomaly_inputs(report_context)
+    if not validation["anomalies"] and not validation["warnings"]:
+        return {
+            "source": "data_validation",
+            "status": "clear",
+            "priority": "low",
+            "anomalies_detected": False,
+            "anomalies": [],
+            "warnings": [],
+            "summary": "Data validation found no incoming anomalies, missing required sections, or consistency conflicts.",
+            "_source": "data_validation",
+        }
+
     data, source = await featherless_json_cascade(
         purpose="anomaly_check",
-        prompt=
-        _json_prompt(
-            "Detect abnormal, missing, conflicting, or suspicious disaster-pipeline conditions.",
-            report_context,
-            {
-                "anomalies_detected": "boolean",
-                "anomalies": [
-                    {
-                        "type": "no_data|low_confidence|conflicting_data|extreme_values|missing_area|api_timeout|cascade_failure|other",
-                        "severity": "low|medium|high|critical",
-                        "description": "short explanation",
-                        "recommended_handling": "short operational handling instruction",
-                    }
-                ],
-            },
-        ),
+        prompt=_anomaly_prompt(report_context, validation),
         system=_json_system("You are a disaster data quality analyst."),
         primary_model=FEATHERLESS_QWEN,
         fallback_models=[FEATHERLESS_KIMI, FEATHERLESS_GEMMA],
         max_tokens=FEATHERLESS_CHECK_TOKENS,
         timeout_seconds=45,
-        required_keys=None,
+        required_keys=["status", "priority", "anomalies", "summary"],
     )
-    result = _coerce_anomalies(data, fallback)
+    if source == "deterministic_fallback":
+        result = _coerce_anomalies({}, validation)
+        result["source"] = "llm_required"
+        result["_source"] = "llm_required_failed"
+        result["summary"] = "Rule-based validation detected anomalies, but live LLM interpretation did not complete."
+        return result
+
+    result = _coerce_anomalies(data, validation)
+    result["source"] = "llm_interpretation"
     result["_source"] = source
     return result
 
@@ -160,10 +165,16 @@ async def generate_decision_brief(report_context: dict, intelligence: dict) -> d
     )
     system = _json_system("You are Opus writing official high-stakes emergency briefs. Return strict JSON only.")
 
-    response = await call_aiml(prompt, system=system, model=AIML_OPUS, max_tokens=1000)
+    response = await call_aiml(prompt, system=system, model=AIML_OPUS, max_tokens=1000, purpose="decision_brief")
     source = "aiml:opus-4.8"
     if not response["ok"] or not response["content"]:
-        response = await call_aiml(prompt, system=system, model=AIML_GPT_LAST_RESORT, max_tokens=1000)
+        response = await call_aiml(
+            prompt,
+            system=system,
+            model=AIML_GPT_LAST_RESORT,
+            max_tokens=1000,
+            purpose="decision_brief",
+        )
         source = "aiml:gpt-4.5" if response["ok"] and response["content"] else "deterministic_fallback"
 
     try:
@@ -285,6 +296,48 @@ Context:
 """.strip()
 
 
+def _anomaly_prompt(context: dict, validation: dict) -> str:
+    schema = {
+        "status": "clear | watch | critical",
+        "priority": "low | medium | high",
+        "anomalies": [
+            {
+                "type": "low_confidence | data_conflict | critical_infrastructure | missing_data | unusual_extent",
+                "description": "short factual description",
+                "action": "short handling instruction",
+            }
+        ],
+        "summary": "one concise sentence",
+    }
+    prompt_context = {
+        "event_id": context.get("event_id"),
+        "disaster_type": context.get("hazard_type"),
+        "location": context.get("location"),
+        "severity": context.get("overall_severity"),
+        "confidence": _confidence_snapshot(context),
+        "incoming_anomalies": context.get("incoming_anomalies", []),
+        "affected_area_km2": context.get("analysis", {}).get("affected_area_km2"),
+        "total_affected": _first_present(
+            context.get("impact", {}).get("population_affected"),
+            context.get("impact", {}).get("total_affected"),
+        ),
+        "hospitals_at_risk": context.get("impact", {}).get("hospitals_at_risk"),
+        "data_conflicts": validation.get("anomalies", []),
+        "warnings": validation.get("warnings", []),
+    }
+    return f"""
+Interpret and prioritize the detected disaster-data anomalies.
+Return JSON only. No markdown. No reasoning.
+Match this schema:
+{json.dumps(schema, indent=2)}
+
+Use only the compact context below. Do not invent new facts.
+
+Context:
+{json.dumps(prompt_context, indent=2)}
+""".strip()
+
+
 def _prompt_context(context: dict) -> dict:
     if "event" in context or "intelligence" in context:
         return {
@@ -366,6 +419,152 @@ def _merge_lists(first: list[str], second) -> list[str]:
     return merged
 
 
+def _validate_anomaly_inputs(context: dict) -> dict:
+    anomalies: list[dict] = []
+    warnings: list[str] = []
+
+    incoming_anomalies = context.get("incoming_anomalies") or []
+    if isinstance(incoming_anomalies, list):
+        for item in incoming_anomalies:
+            if isinstance(item, dict):
+                anomalies.append(
+                    _anomaly_item(
+                        item.get("type") or "data_conflict",
+                        item.get("description") or item.get("message") or "Incoming upstream anomaly was reported.",
+                        item.get("action") or item.get("recommended_handling") or "Review upstream anomaly before final response.",
+                        item.get("severity") or "medium",
+                    )
+                )
+            elif str(item).strip():
+                anomalies.append(
+                    _anomaly_item(
+                        "data_conflict",
+                        str(item).strip(),
+                        "Review upstream anomaly before final response.",
+                        "medium",
+                    )
+                )
+    elif incoming_anomalies:
+        anomalies.append(
+            _anomaly_item(
+                "data_conflict",
+                "Incoming anomalies field is not a list.",
+                "Ask upstream agent to resend anomalies as a list.",
+                "medium",
+            )
+        )
+
+    impact = context.get("impact")
+    analysis = context.get("analysis") or {}
+    hazard = context.get("hazard") or {}
+    zones = analysis.get("zones", {}).get("features", []) if isinstance(analysis.get("zones"), dict) else []
+
+    if not isinstance(impact, dict) or not impact:
+        anomalies.append(
+            _anomaly_item(
+                "missing_data",
+                "Impact data is missing.",
+                "Do not finalize operational impact claims until impact data is available.",
+                "high",
+            )
+        )
+    if not zones:
+        anomalies.append(
+            _anomaly_item(
+                "missing_data",
+                "Hazard zone geometry is missing.",
+                "Require hazard-zone GeoJSON before using map outputs operationally.",
+                "high",
+            )
+        )
+
+    confidence = _minimum_confidence(context)
+    if confidence is not None and confidence < 0.7:
+        anomalies.append(
+            _anomaly_item(
+                "low_confidence",
+                f"One or more confidence scores are below 70% ({round(confidence * 100)}%).",
+                "Escalate for human review before issuing final response guidance.",
+                "medium",
+            )
+        )
+
+    affected_area = _as_float(analysis.get("affected_area_km2"))
+    population = _as_float((impact or {}).get("population_affected") or (impact or {}).get("total_affected"))
+    if affected_area is not None and population is not None and affected_area > 500 and population < 10000:
+        anomalies.append(
+            _anomaly_item(
+                "unusual_extent",
+                "Affected area is unusually large compared with exposed population.",
+                "Validate spatial extent and exposure overlay before publication.",
+                "medium",
+            )
+        )
+
+    satellite = context.get("satellite") or {}
+    cloud_cover = _as_float(satellite.get("cloud_cover"))
+    if cloud_cover is not None and cloud_cover > 30 and satellite.get("type") != "sentinel-1":
+        anomalies.append(
+            _anomaly_item(
+                "data_conflict",
+                "Cloud cover is high but selected satellite source is not SAR.",
+                "Verify sensor selection before finalizing map products.",
+                "medium",
+            )
+        )
+
+    return {"anomalies": anomalies, "warnings": warnings}
+
+
+def _anomaly_item(item_type: str, description: str, action: str, severity: str = "medium") -> dict:
+    return {
+        "type": str(item_type or "data_conflict"),
+        "severity": str(severity or "medium"),
+        "description": str(description or ""),
+        "action": str(action or ""),
+        "recommended_handling": str(action or ""),
+    }
+
+
+def _confidence_snapshot(context: dict) -> dict:
+    hazard_scores = context.get("hazard", {}).get("confidence_scores", {})
+    return {
+        "overall": _first_present(
+            context.get("impact", {}).get("overall_confidence"),
+            hazard_scores.get("overall"),
+            hazard_scores.get("flood"),
+        ),
+        "flood": hazard_scores.get("flood"),
+        "earthquake": hazard_scores.get("earthquake"),
+        "landslide": hazard_scores.get("landslide"),
+    }
+
+
+def _minimum_confidence(context: dict) -> float | None:
+    snapshot = _confidence_snapshot(context)
+    active_hazard = str(context.get("hazard_type") or "").lower()
+    active_key = "flood" if "flood" in active_hazard else active_hazard
+    values = [_as_float(snapshot.get("overall"))]
+    if active_key:
+        values.append(_as_float(snapshot.get(active_key)))
+    values = [value for value in values if value is not None]
+    return min(values) if values else None
+
+
+def _first_present(*values):
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_criticality(data: dict, fallback: dict) -> dict:
     criticality = str(data.get("criticality") or fallback["criticality"]).lower()
     if criticality not in {"low", "normal", "high", "critical"}:
@@ -387,17 +586,30 @@ def _coerce_anomalies(data: dict, fallback: dict) -> dict:
     for item in anomalies:
         if not isinstance(item, dict):
             continue
+        action = str(item.get("action") or item.get("recommended_handling") or "")
         cleaned.append(
             {
                 "type": str(item.get("type") or "other"),
                 "severity": str(item.get("severity") or "low"),
                 "description": str(item.get("description") or ""),
-                "recommended_handling": str(item.get("recommended_handling") or ""),
+                "action": action,
+                "recommended_handling": action,
             }
         )
+    status = str(data.get("status") or ("watch" if cleaned else "clear")).lower()
+    if status not in {"clear", "watch", "critical"}:
+        status = "watch" if cleaned else "clear"
+    priority = str(data.get("priority") or ("medium" if cleaned else "low")).lower()
+    if priority not in {"low", "medium", "high"}:
+        priority = "medium" if cleaned else "low"
+    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else fallback.get("warnings", [])
     return {
         "anomalies_detected": _as_bool(data.get("anomalies_detected"), bool(cleaned)),
+        "status": status,
+        "priority": priority,
         "anomalies": cleaned,
+        "warnings": [str(item) for item in warnings if str(item).strip()],
+        "summary": str(data.get("summary") or ("Detected anomalies require review." if cleaned else "No anomalies detected.")),
     }
 
 

@@ -66,6 +66,9 @@ def build_report_completion_message(result: dict) -> str:
     """
     Build natural text + JSON completion signal for Band.
     """
+    if result.get("status") == "failed":
+        return build_report_failure_message(result)
+
     report = result.get("report", {}) if isinstance(result, dict) else {}
     report_section = report.get("report", {}) if isinstance(report, dict) else {}
     impact = report.get("impact", {}) if isinstance(report, dict) else {}
@@ -110,6 +113,26 @@ def build_report_completion_message(result: dict) -> str:
         },
     }
     return f"{natural_text}\n{json.dumps(completion, indent=2)}"
+
+
+def build_report_failure_message(result: dict) -> str:
+    event_id = str(result.get("event_id") or "")
+    error = str(result.get("error") or "LLM generation failed")
+    natural_text = (
+        f"{ORCHESTRATOR_MENTION} Report Agent failed for event {event_id}. "
+        "No production disaster report was completed."
+    )
+    failure = {
+        "event_id": event_id,
+        "agent": REPORT_AGENT_NAME,
+        "status": "failed",
+        "step": "report",
+        "data": {
+            "error": error,
+            "confidence_level": "LOW",
+        },
+    }
+    return f"{natural_text}\n{json.dumps(failure, indent=2)}"
 
 
 def _json_object_candidates(text: str) -> list[str]:

@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -27,6 +28,7 @@ from geometry_utils import (
     validate_polygon_coordinates,
     validate_report_geometries,
 )
+from intelligence import detect_anomalies
 from llm_clients import featherless_health_check
 from map_generator import generate_static_map
 from pdf_generator import generate_pdf_report, model_source_note
@@ -69,6 +71,9 @@ async def main() -> int:
     run_report_geometry_tests(harness, fixtures)
     run_artifact_tests(harness, fixtures, output_dir)
     await run_pipeline_safety_tests(harness, output_dir, include_r2=args.include_r2, include_db=args.include_db)
+    await run_anomaly_validation_tests(harness)
+    await run_offline_contract_tests(harness, output_dir)
+    await run_strict_production_failure_tests(harness, output_dir)
 
     if args.include_llm:
         await run_llm_health_check(harness)
@@ -329,6 +334,145 @@ async def run_pipeline_safety_tests(
     print()
 
 
+async def run_anomaly_validation_tests(harness: Harness) -> None:
+    print("Anomaly Validation")
+    clear_context = deepcopy(MOCK_EVENT_DATA)
+    clear_context["incoming_anomalies"] = []
+    clear_context.setdefault("impact", {})["overall_confidence"] = 0.85
+    clear_result = await detect_anomalies(clear_context)
+    harness.check("clear anomaly check uses data validation", clear_result.get("_source") == "data_validation")
+    harness.check("clear anomaly check status is clear", clear_result.get("status") == "clear")
+    harness.check("clear anomaly check has no anomalies", clear_result.get("anomalies") == [])
+
+    import intelligence
+
+    original_cascade = intelligence.featherless_json_cascade
+
+    async def failing_cascade(*args, **kwargs):
+        del args, kwargs
+        return {}, "deterministic_fallback"
+
+    anomaly_context = deepcopy(MOCK_EVENT_DATA)
+    anomaly_context["incoming_anomalies"] = [
+        {
+            "type": "data_conflict",
+            "description": "Upstream impact totals conflict with hazard-zone exposure.",
+            "action": "Review upstream impact overlay.",
+        }
+    ]
+    intelligence.featherless_json_cascade = failing_cascade
+    try:
+        failed_result = await intelligence.detect_anomalies(anomaly_context)
+    finally:
+        intelligence.featherless_json_cascade = original_cascade
+
+    harness.check("LLM-required anomaly failure is explicit", failed_result.get("_source") == "llm_required_failed")
+    harness.check("LLM-required anomaly preserves raw anomalies", bool(failed_result.get("anomalies")))
+    print()
+
+
+async def run_offline_contract_tests(harness: Harness, output_dir: Path) -> None:
+    print("Offline Contract Mode")
+    message_path = FIXTURE_DIR / "report_trigger_message.txt"
+    parsed_payload = parse_report_trigger_message(message_path.read_text(encoding="utf-8"))
+    result = await run_report_pipeline(
+        parsed_payload["event_id"],
+        incoming_payload=parsed_payload,
+        use_llm=False,
+        output_dir=str(output_dir / "offline-contract"),
+    )
+    sources = result.get("model_sources", {})
+    report_json_path = Path(result.get("json_path", ""))
+    harness.check("offline pipeline completes without LLM", result.get("status") == "complete")
+    harness.check("offline model source for detailed report", sources.get("detailed_report") == "offline_contract_test")
+    harness.check("offline model source for summary", sources.get("executive_summary") == "offline_contract_test")
+    harness.check("offline report JSON written", report_json_path.exists())
+
+    response_path = output_dir / "test-band-response.txt"
+    if response_path.exists():
+        response_path.unlink()
+    command = [
+        sys.executable,
+        str(BASE_DIR / "agent.py"),
+        "--band-message-file",
+        str(message_path),
+        "--emit-band-response",
+        "--band-response-output",
+        str(response_path),
+        "--contract-test",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    harness.check("agent.py --band-message-file --contract-test exits cleanly", completed.returncode == 0, _short_output(completed))
+    harness.check("offline Band response file created", response_path.exists() and response_path.stat().st_size > 0)
+    if response_path.exists():
+        completion_json = extract_trailing_json(response_path.read_text(encoding="utf-8"))
+        data = completion_json.get("data", {})
+        harness.check("offline completion JSON valid", completion_json.get("agent") == "hazardmind-report")
+        harness.check("offline completion JSON has response level", bool(data.get("recommended_response_level")))
+
+    alias_path = output_dir / "test-band-response-alias.txt"
+    if alias_path.exists():
+        alias_path.unlink()
+    alias_command = [
+        sys.executable,
+        str(BASE_DIR / "agent.py"),
+        "--band-message-file",
+        str(message_path),
+        "--band-response-output",
+        str(alias_path),
+        "--no-llm",
+    ]
+    alias_completed = subprocess.run(alias_command, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60)
+    harness.check("--no-llm remains contract-test alias", alias_completed.returncode == 0, _short_output(alias_completed))
+    harness.check("--no-llm alias writes response file", alias_path.exists() and alias_path.stat().st_size > 0)
+
+    blocked = await run_report_pipeline(
+        parsed_payload["event_id"],
+        incoming_payload=parsed_payload,
+        use_llm=False,
+        upload_r2=True,
+        write_db=True,
+        output_dir=str(output_dir / "blocked-contract"),
+    )
+    harness.check("contract mode blocks R2/DB side effects by default", blocked.get("status") == "failed" and not blocked.get("r2_uploaded") and not blocked.get("db_written"))
+    print()
+
+
+async def run_strict_production_failure_tests(harness: Harness, output_dir: Path) -> None:
+    print("Strict Production Failure")
+    import pipeline
+
+    original_generate_report = pipeline.generate_report
+
+    async def failing_generate_report(event_id: str, context: dict | None = None, use_llm: bool = True) -> dict:
+        del event_id, context, use_llm
+        raise RuntimeError("LLM generation failed: simulated strict production failure")
+
+    pipeline.generate_report = failing_generate_report
+    try:
+        result = await run_report_pipeline(
+            "8f4f7c66-7d9c-4df8-8a4f-78c9bfaeaf21",
+            use_llm=True,
+            output_dir=str(output_dir / "strict-failure"),
+        )
+    finally:
+        pipeline.generate_report = original_generate_report
+
+    harness.check("production LLM failure returns failed status", result.get("status") == "failed")
+    harness.check("production LLM failure does not return fake report", "report" not in result)
+    completion = build_report_completion_message(result)
+    completion_json = extract_trailing_json(completion)
+    harness.check("failed production result emits failed Band status", completion_json.get("status") == "failed")
+    harness.check("failed production result does not emit complete Band status", completion_json.get("status") != "complete")
+    print()
+
+
 async def run_full_local_pipeline_test(harness: Harness, output_dir: Path) -> None:
     print("Full Local Pipeline")
     result = await run_report_pipeline(
@@ -363,8 +507,8 @@ async def _run_pipeline_with_fake_report(output_dir: Path, *, upload_r2: bool, w
 
     original_generate_report = pipeline.generate_report
 
-    async def fake_generate_report(event_id: str, context: dict | None = None) -> dict:
-        del context
+    async def fake_generate_report(event_id: str, context: dict | None = None, use_llm: bool = True) -> dict:
+        del context, use_llm
         report = build_report_context(_load_fixture("valid_zones.geojson"))
         report["event_id"] = event_id
         return report
@@ -484,6 +628,11 @@ def _polygon_errors(feature_collection: dict) -> list[str]:
             if not valid:
                 errors.extend(f"features[{index}]: {error}" for error in geometry_errors)
     return errors
+
+
+def _short_output(completed: subprocess.CompletedProcess) -> str:
+    text = (completed.stderr or completed.stdout or "").strip().replace("\n", " ")
+    return text[:180]
 
 
 if __name__ == "__main__":
