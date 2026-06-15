@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HazardMind AI — Agent 3</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+  <style>
+    :root {
+      --color-background-primary: #0f1117;
+      --color-background-secondary: #161b27;
+      --color-background-tertiary: #1e2535;
+      --color-text-primary: #e2e8f0;
+      --color-text-secondary: #94a3b8;
+      --color-text-info: #60a5fa;
+      --color-text-danger: #f87171;
+      --color-text-success: #4ade80;
+      --color-text-warning: #fbbf24;
+      --color-background-info: rgba(96, 165, 250, 0.1);
+      --color-background-danger: rgba(248, 113, 113, 0.1);
+      --color-background-success: rgba(74, 222, 128, 0.1);
+      --color-background-warning: rgba(251, 191, 36, 0.1);
+      --color-border-secondary: rgba(255,255,255,0.08);
+      --color-border-tertiary: rgba(255,255,255,0.04);
+      --border-radius-lg: 12px;
+      --font-mono: 'Menlo', 'Consolas', 'SF Mono', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      font-weight: 400;
+      background: var(--color-background-primary);
+      color: var(--color-text-primary);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    header {
+      background: var(--color-background-secondary);
+      border-bottom: 0.5px solid var(--color-border-secondary);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 500;
+    }
+
+    .header-badge {
+      font-size: 10px;
+      background: var(--color-background-info);
+      border: 0.5px solid var(--color-text-info);
+      color: var(--color-text-info);
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+    }
+
+    .chat-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .chat-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      color: var(--color-text-secondary);
+      min-height: 200px;
+    }
+
+    .chat-empty i {
+      font-size: 44px;
+      opacity: 0.3;
+    }
+
+    .chat-empty p {
+      font-size: 13px;
+      text-align: center;
+      max-width: 300px;
+      line-height: 1.6;
+      opacity: 0.7;
+    }
+
+    .msg-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .msg-row.user {
+      flex-direction: row-reverse;
+    }
+
+    .msg-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--color-background-tertiary);
+      border: 0.5px solid var(--color-border-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 15px;
+      color: var(--color-text-secondary);
+    }
+
+    .msg-row.user .msg-avatar {
+      background: var(--color-background-info);
+      border-color: var(--color-text-info);
+      color: var(--color-text-info);
+    }
+
+    .msg-bubble {
+      max-width: 74%;
+      min-width: 0;
+    }
+
+    .msg-row.user .msg-bubble {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+
+    .bubble-label {
+      font-size: 10px;
+      color: var(--color-text-secondary);
+      margin-bottom: 5px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .user-json {
+      background: var(--color-background-info);
+      border: 0.5px solid var(--color-text-info);
+      border-radius: var(--border-radius-lg);
+      padding: 12px 14px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text-info);
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 200px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+
+    .agent-sections {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+    }
+
+    .section-block {
+      background: var(--color-background-secondary);
+      border: 0.5px solid var(--color-border-secondary);
+      border-radius: var(--border-radius-lg);
+      padding: 14px 16px;
+    }
+
+    .section-label {
+      font-size: 10px;
+      color: var(--color-text-secondary);
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .section-label i { font-size: 13px; }
+
+    .parse-text {
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--color-text-primary);
+    }
+
+    .pf { color: var(--color-text-secondary); }
+    .pv-high   { color: var(--color-text-danger);  font-weight: 500; }
+    .pv-medium { color: var(--color-text-warning); font-weight: 500; }
+    .pv-low    { color: var(--color-text-success); font-weight: 500; }
+    .pv        { color: var(--color-text-primary);  font-weight: 500; }
+
+    .log-lines {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 8px;
+      line-height: 1.5;
+    }
+
+    .lt-task    { color: var(--color-text-info); }
+    .lt-par     { color: var(--color-text-warning); }
+    .lt-esc     { color: var(--color-text-danger); font-weight: 500; }
+    .lt-done    { color: var(--color-text-success); font-weight: 500; }
+    .lt-default { color: var(--color-text-secondary); }
+
+    .log-msg { color: var(--color-text-primary); }
+
+    .summary-text {
+      font-size: 13px;
+      line-height: 1.75;
+      color: var(--color-text-primary);
+    }
+
+    .json-output-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .json-ready-label {
+      font-size: 10px;
+      color: var(--color-text-success);
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .copy-btn {
+      background: var(--color-background-tertiary);
+      border: 0.5px solid var(--color-border-secondary);
+      border-radius: 6px;
+      color: var(--color-text-secondary);
+      font-size: 11px;
+      font-family: system-ui, sans-serif;
+      padding: 4px 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: color 0.15s, border-color 0.15s;
+      font-weight: 400;
+    }
+
+    .copy-btn:hover { color: var(--color-text-primary); }
+
+    .copy-btn.copied {
+      color: var(--color-text-success);
+      border-color: var(--color-text-success);
+    }
+
+    .json-pre {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--color-text-primary);
+      background: var(--color-background-tertiary);
+      border: 0.5px solid var(--color-border-tertiary);
+      border-radius: 8px;
+      padding: 12px 14px;
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 360px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+
+    .typing-dots {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      padding: 12px 16px;
+      background: var(--color-background-secondary);
+      border: 0.5px solid var(--color-border-secondary);
+      border-radius: var(--border-radius-lg);
+      width: fit-content;
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-text-secondary);
+      animation: bounce 1.2s infinite;
+    }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+      30% { transform: translateY(-5px); opacity: 1; }
+    }
+
+    .input-area {
+      border-top: 0.5px solid var(--color-border-secondary);
+      background: var(--color-background-secondary);
+      padding: 14px 20px 16px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    textarea {
+      flex: 1;
+      background: var(--color-background-tertiary);
+      border: 0.5px solid var(--color-border-secondary);
+      border-radius: 10px;
+      color: var(--color-text-primary);
+      font-size: 12px;
+      font-family: var(--font-mono);
+      padding: 10px 12px;
+      resize: none;
+      outline: none;
+      height: 72px;
+      line-height: 1.5;
+    }
+
+    textarea::placeholder {
+      color: var(--color-text-secondary);
+      opacity: 0.5;
+    }
+
+    textarea:focus {
+      border-color: var(--color-text-info);
+    }
+
+    .send-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--color-background-info);
+      border: 0.5px solid var(--color-text-info);
+      color: var(--color-text-info);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: opacity 0.2s;
+    }
+
+    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .input-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .input-error {
+      font-size: 11px;
+      color: var(--color-text-danger);
+      display: none;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .input-error.visible { display: flex; }
+
+    .input-hint {
+      font-size: 11px;
+      color: var(--color-text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      opacity: 0.7;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinning { display: inline-block; animation: spin 0.9s linear infinite; }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--color-border-secondary); border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <i class="ti ti-brand-speedtest" style="font-size:18px;color:var(--color-text-info)"></i>
+  <h1>HazardMind AI</h1>
+  <span class="header-badge">Agent 3 — Impact assessment</span>
+</header>
+
+<div class="chat-area" id="chatArea">
+  <div class="chat-empty" id="chatEmpty">
+    <i class="ti ti-hexagon-letter-a"></i>
+    <p>Paste Agent 2 hazard JSON or a full Band message below to begin impact assessment</p>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-row">
+    <textarea
+      id="inputBox"
+      placeholder='Paste raw hazard JSON  {"event_id":"demo-dhaka","flood_risk":"HIGH","bbox":[90.3,23.7,90.5,23.9]}  OR Band message format  {"event_id":"evt-001","step":"hazard","data":{"flood_risk":"HIGH","bounds":{"west":90.3,"south":23.7,"east":90.5,"north":23.9},"risk_cities":["Dhaka"],"severity":"HIGH"}}'
+      onkeydown="handleKey(event)"
+    ></textarea>
+    <button class="send-btn" id="sendBtn" onclick="send()" title="Send (Ctrl+Enter)">
+      <i class="ti ti-send" id="sendIcon"></i>
+    </button>
+  </div>
+  <div class="input-meta">
+    <div class="input-error" id="inputError">
+      <i class="ti ti-alert-circle"></i>
+      <span id="inputErrorMsg">Invalid JSON — paste Agent 2 output</span>
+    </div>
+    <div class="input-hint">
+      <i class="ti ti-arrow-right"></i>
+      Input: raw hazard JSON or Band message format &nbsp;·&nbsp; Output: Agent 4 impact data &nbsp;·&nbsp; Ctrl+Enter to send
+    </div>
+  </div>
+</div>
+
+<script>
+  let running = false;
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      send();
+    }
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  function setRunning(yes) {
+    running = yes;
+    document.getElementById('sendBtn').disabled = yes;
+    document.getElementById('sendIcon').className = yes
+      ? 'ti ti-loader-2 spinning'
+      : 'ti ti-send';
+  }
+
+  function showError(msg) {
+    document.getElementById('inputErrorMsg').textContent = msg;
+    document.getElementById('inputError').classList.add('visible');
+  }
+
+  function clearError() {
+    document.getElementById('inputError').classList.remove('visible');
+  }
+
+  function riskClass(v) {
+    const u = (v || '').toUpperCase();
+    if (u === 'HIGH')   return 'pv-high';
+    if (u === 'MEDIUM') return 'pv-medium';
+    if (u === 'LOW')    return 'pv-low';
+    return 'pv';
+  }
+
+  function avgConf(scores) {
+    if (!scores || typeof scores !== 'object') return '—';
+    const vals = Object.values(scores).filter(v => typeof v === 'number');
+    if (!vals.length) return '—';
+    return (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2);
+  }
+
+  function scoreLabel(s) {
+    const n = parseFloat(s);
+    if (n >= 8) return 'critical — immediate intervention needed';
+    if (n >= 6) return 'severe — coordinated response required';
+    if (n >= 4) return 'moderate — proactive measures advised';
+    return 'low — routine monitoring sufficient';
+  }
+
+  function critSummary(levels) {
+    const vals = Object.values(levels || {});
+    if (vals.includes('critical')) return 'critical — mass-casualty scenario detected';
+    if (vals.includes('high'))     return 'high — significant infrastructure or population exposure';
+    if (vals.includes('normal'))   return 'normal — moderate exposure across impact zone';
+    return 'low — limited direct impact identified';
+  }
+
+  function scrollBottom() {
+    const area = document.getElementById('chatArea');
+    area.scrollTop = area.scrollHeight;
+  }
+
+  function appendToChat(el) {
+    const area = document.getElementById('chatArea');
+    const empty = document.getElementById('chatEmpty');
+    if (empty) empty.remove();
+    area.appendChild(el);
+    scrollBottom();
+  }
+
+  function makeUserBubble(raw) {
+    const row = document.createElement('div');
+    row.className = 'msg-row user';
+    row.innerHTML = `
+      <div class="msg-avatar"><i class="ti ti-user"></i></div>
+      <div class="msg-bubble">
+        <div class="bubble-label">You — Agent 2 output</div>
+        <div class="user-json">${esc(raw)}</div>
+      </div>`;
+    return row;
+  }
+
+  function makeAgentRow() {
+    const row = document.createElement('div');
+    row.className = 'msg-row';
+    row.innerHTML = `
+      <div class="msg-avatar">
+        <i class="ti ti-robot" style="color:var(--color-text-info)"></i>
+      </div>
+      <div class="msg-bubble" style="flex:1;min-width:0">
+        <div class="bubble-label">Agent 3 — Impact assessment</div>
+        <div class="agent-sections" id="agentSections">
+          <div class="typing-dots" id="typingDots">
+            <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+          </div>
+        </div>
+      </div>`;
+    return row;
+  }
+
+  function removeTyping() {
+    const d = document.getElementById('typingDots');
+    if (d) d.remove();
+  }
+
+  function addSection(html) {
+    const s = document.getElementById('agentSections');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    s.appendChild(wrap.firstElementChild);
+    scrollBottom();
+  }
+
+  async function addLogLine(tag, cls, msg) {
+    const block = document.getElementById('logLines');
+    if (!block) return;
+    const line = document.createElement('div');
+    line.className = 'log-line';
+    line.innerHTML = `<span class="${cls}">[${esc(tag)}]</span><span class="log-msg">&nbsp;${esc(msg)}</span>`;
+    block.appendChild(line);
+    scrollBottom();
+    await sleep(300);
+  }
+
+  async function streamResponse(hz, apiPromise) {
+    await sleep(500);
+    removeTyping();
+
+    const eventId  = hz.event_id || 'unknown';
+    const flood    = hz.flood_risk || hz.risk_level || '—';
+    const eq       = hz.earthquake_risk || '—';
+    const ls       = hz.landslide_risk || '—';
+    const bbox     = JSON.stringify(hz.bbox || []);
+    const conf     = avgConf(hz.confidence_scores);
+    const cities   = (hz.risk_cities || []).join(', ') || '—';
+
+    addSection(`
+      <div class="section-block">
+        <div class="section-label"><i class="ti ti-file-search"></i>Parsing input</div>
+        <div class="parse-text">
+          Received hazard data for <strong>${esc(eventId)}</strong><br>
+          <span class="pf">Cities:</span>&nbsp;<span class="pv">${esc(cities)}</span><br>
+          <span class="pf">Flood:</span>&nbsp;<span class="${riskClass(flood)}">${esc(flood)}</span>
+          &nbsp;·&nbsp;
+          <span class="pf">Earthquake:</span>&nbsp;<span class="${riskClass(eq)}">${esc(eq)}</span>
+          &nbsp;·&nbsp;
+          <span class="pf">Landslide:</span>&nbsp;<span class="${riskClass(ls)}">${esc(ls)}</span><br>
+          <span class="pf">Bbox:</span>&nbsp;<span class="pv">${esc(bbox)}</span>
+          &nbsp;·&nbsp;
+          <span class="pf">Confidence avg:</span>&nbsp;<span class="pv">${esc(conf)}</span>
+        </div>
+      </div>`);
+
+    await sleep(800);
+
+    addSection(`
+      <div class="section-block">
+        <div class="section-label"><i class="ti ti-terminal-2"></i>Task execution</div>
+        <div class="log-lines" id="logLines"></div>
+      </div>`);
+
+    await addLogLine('Task 1',   'lt-task',    'Population analysis → gemma-4-31B-it');
+    await addLogLine('Task 2',   'lt-task',    'Infrastructure OSM → Kimi-K2.6');
+    await addLogLine('parallel', 'lt-par',     'asyncio.gather() running...');
+
+    const apiData = await apiPromise;
+
+    if (apiData) {
+      if ((apiData.population_affected || 0) > 500000) {
+        await addLogLine('ESCALATE', 'lt-esc', `Population > 500k → Opus 4.8`);
+      }
+      if ((apiData.hospitals_at_risk || 0) > 5) {
+        await addLogLine('ESCALATE', 'lt-esc', `Hospitals > 5 → Opus 4.8`);
+      }
+    }
+
+    await addLogLine('Task 3',   'lt-task',    'Vulnerability scoring → Qwen3-35B');
+    await addLogLine('complete', 'lt-done',    'All tasks finished');
+
+    await sleep(800);
+
+    if (!apiData) {
+      addSection(`
+        <div class="section-block" style="border-color:var(--color-text-danger)">
+          <div class="section-label" style="color:var(--color-text-danger)">
+            <i class="ti ti-alert-triangle"></i>Error
+          </div>
+          <div class="parse-text" style="color:var(--color-text-danger)">
+            Assessment failed — check server logs and retry.
+          </div>
+        </div>`);
+      return;
+    }
+
+    const pop      = (apiData.population_affected  || 0).toLocaleString();
+    const vulnPop  = (apiData.vulnerable_population || 0).toLocaleString();
+    const hosp     = apiData.hospitals_at_risk ?? 0;
+    const bridgesN = apiData.bridges_at_risk   ?? 0;
+    const roads    = (apiData.roads_blocked_km  || 0).toFixed(1);
+    const evacTime = apiData.estimated_evacuation_time || '—';
+    const score    = (apiData.vulnerability_score || 0).toFixed(1);
+    const crit     = critSummary(apiData.criticality_levels);
+    const interp   = scoreLabel(score);
+
+    addSection(`
+      <div class="section-block">
+        <div class="section-label"><i class="ti ti-report-analytics"></i>Intelligence summary</div>
+        <div class="summary-text">
+          Assessment complete. <strong>${esc(pop)}</strong> people affected in the impact zone
+          (${esc(vulnPop)} classified as vulnerable).<br><br>
+          Criticality: <strong>${esc(crit)}</strong>.<br>
+          ${esc(String(hosp))} hospital${hosp !== 1 ? 's' : ''},
+          ${esc(String(bridgesN))} bridge${bridgesN !== 1 ? 's' : ''} and
+          <strong>${esc(roads)} km</strong> of roads at risk.<br>
+          Estimated evacuation time: <strong>${esc(evacTime)}</strong>.<br><br>
+          Vulnerability score <strong>${esc(score)}/10</strong> — ${esc(interp)}.
+        </div>
+      </div>`);
+
+    await sleep(800);
+
+    const out = {
+      agent:                      apiData.agent,
+      status:                     apiData.status,
+      event_id:                   apiData.event_id,
+      population_affected:        apiData.population_affected,
+      high_risk_people:           apiData.high_risk_people,
+      medium_risk_people:         apiData.medium_risk_people,
+      vulnerable_population:      apiData.vulnerable_population,
+      hospitals_at_risk:          apiData.hospitals_at_risk,
+      schools_at_risk:            apiData.schools_at_risk,
+      roads_blocked_km:           apiData.roads_blocked_km,
+      roads_blocked:              apiData.roads_blocked,
+      bridges_at_risk:            apiData.bridges_at_risk,
+      vulnerability_score:        apiData.vulnerability_score,
+      estimated_evacuation_time:  apiData.estimated_evacuation_time,
+      evacuation_routes:          apiData.evacuation_routes,
+      priority_zones:             apiData.priority_zones,
+      criticality_levels:         apiData.criticality_levels,
+      satellite_urls:             apiData.satellite_urls,
+      models_used:                apiData.models_used,
+      cost_summary:               apiData.cost_summary,
+    };
+
+    const jsonStr = JSON.stringify(out, null, 2);
+    const bid = 'jb' + Date.now();
+
+    addSection(`
+      <div class="section-block" style="border-color:var(--color-text-success)">
+        <div class="json-output-row">
+          <div class="json-ready-label">
+            <i class="ti ti-circle-check"></i>Agent 4 input ready
+          </div>
+          <button class="copy-btn" id="${bid}-btn" onclick="copyBlock('${bid}')">
+            <i class="ti ti-copy"></i> Copy
+          </button>
+        </div>
+        <pre class="json-pre" id="${bid}">${esc(jsonStr)}</pre>
+      </div>`);
+  }
+
+  function copyBlock(bid) {
+    const pre = document.getElementById(bid);
+    const btn = document.getElementById(bid + '-btn');
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+      btn.classList.add('copied');
+      btn.innerHTML = '<i class="ti ti-check"></i> Copied';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = '<i class="ti ti-copy"></i> Copy';
+      }, 2000);
+    });
+  }
+
+  function parseBandOrJson(raw) {
+    // Try direct JSON parse first
+    try { return JSON.parse(raw); } catch {}
+    // Band message format: find the last top-level { ... } block in the text
+    const lastBrace = raw.lastIndexOf('{');
+    if (lastBrace !== -1) {
+      try { return JSON.parse(raw.slice(lastBrace)); } catch {}
+    }
+    return null;
+  }
+
+  function normaliseParsed(parsed) {
+    // Unwrap Band message wrapper: {"event_id":..., "step":"hazard", "data":{...}}
+    let h = parsed;
+    if (h.data && typeof h.data === 'object') {
+      h = { ...h.data, event_id: h.event_id || h.data.event_id };
+    }
+    // Convert bounds dict → bbox list: {"west":..., "south":..., "east":..., "north":...}
+    if (h.bounds && !h.bbox) {
+      const b = h.bounds;
+      h = { ...h, bbox: [b.west, b.south, b.east, b.north] };
+    }
+    // Normalise risk_level → flood_risk
+    if (!h.flood_risk && h.risk_level) {
+      h = { ...h, flood_risk: h.risk_level };
+    }
+    return h;
+  }
+
+  async function send() {
+    if (running) return;
+    clearError();
+
+    const raw = document.getElementById('inputBox').value.trim();
+    if (!raw) return;
+
+    const parsed = parseBandOrJson(raw);
+    if (!parsed) {
+      showError('Invalid input — paste Agent 2 JSON output or a Band message containing JSON');
+      return;
+    }
+
+    const hz = normaliseParsed(parsed);
+    const hasLocation = hz.bbox || hz.bounds;
+    const hasRisk     = hz.flood_risk || hz.risk_level || (hz.risk_cities && hz.risk_cities.length);
+    if (!hasLocation || !hasRisk) {
+      showError('Missing required fields — need location (bbox or bounds) and risk data (flood_risk / risk_level / risk_cities)');
+      return;
+    }
+
+    setRunning(true);
+    document.getElementById('inputBox').value = '';
+
+    appendToChat(makeUserBubble(raw));
+    const agentRow = makeAgentRow();
+    appendToChat(agentRow);
+
+    // Send the original parsed object — server's _normalise_hazard() handles unwrapping
+    const apiPromise = fetch('/assess-impact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hazard_data: parsed }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null);
+
+    try {
+      await streamResponse(hz, apiPromise);
+    } finally {
+      setRunning(false);
+    }
+  }
+</script>
+</body>
+</html>

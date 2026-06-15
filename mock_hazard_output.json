@@ -1,0 +1,35 @@
+{
+  "agent": "hazard",
+  "status": "complete",
+  "event_id": "demo-dhaka",
+  "flood_risk": "HIGH",
+  "earthquake_risk": "MEDIUM",
+  "landslide_risk": "LOW",
+  "bbox": [90.3, 23.7, 90.5, 23.9],
+  "risk_polygons": {
+    "type": "FeatureCollection",
+    "features": [
+      {
+        "type": "Feature",
+        "properties": { "risk_type": "flood", "severity": "HIGH", "confidence": 0.91 },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [[[90.30, 23.70],[90.45, 23.70],[90.45, 23.85],[90.30, 23.85],[90.30, 23.70]]]
+        }
+      },
+      {
+        "type": "Feature",
+        "properties": { "risk_type": "earthquake", "severity": "MEDIUM", "confidence": 0.74 },
+        "geometry": {
+          "type": "Polygon",
+          "coordinates": [[[90.35, 23.75],[90.50, 23.75],[90.50, 23.90],[90.35, 23.90],[90.35, 23.75]]]
+        }
+      }
+    ]
+  },
+  "confidence_scores": {
+    "flood": 0.91,
+    "earthquake": 0.74,
+    "landslide": 0.62
+  }
+}
