@@ -7,7 +7,7 @@ natural-message + discussion pipeline behaves:
   ✅ Agent personalities visible
   ✅ Anomaly discussion triggered (extent >> GDACS)
   ✅ Low confidence warning sent
-  ✅ Structured JSON also sent (separate)
+  ✅ Handoff = ONE message: natural text + JSON appended at end
 
 It captures every outbound message via a spy around send_text_message /
 send_event, drives start_pipeline + the satellite->hazard transition with a
@@ -125,23 +125,30 @@ async def main() -> None:
 
     # 5. Assertions.
     texts = [m["content"] for m in captured if m["kind"] == "text"]
-    events = [m for m in captured if m["kind"] == "event"]
     blob = "\n".join(texts).lower()
 
     assert any("@" in t for t in texts), "no @-addressed natural messages"
-    assert not any(t.strip().startswith("{") for t in texts), "a text msg was raw JSON"
+    assert not any(t.strip().startswith("{") for t in texts), "a text msg led with raw JSON"
     assert "gdacs" in blob or "larger" in blob or "extent" in blob, \
         "extent anomaly discussion not triggered"
     assert "confidence" in blob, "low confidence warning not sent"
-    assert any(e["event_type"] == "data" for e in events), \
-        "no structured data event sent alongside natural handoff"
+
+    # The handoff is now ONE message: natural prose first, JSON appended at end.
+    handoffs = [t for t in texts if event_id in t and "{" in t]
+    assert handoffs, "no single-message handoff carrying JSON at the end"
+    for t in handoffs:
+        prose, _, tail = t.partition("\n\n")
+        assert "@" in prose and not prose.strip().startswith("{"), \
+            "natural prose must lead the handoff message"
+        payload = json.loads(tail[tail.find("{"):])
+        assert payload.get("event_id") == event_id, "JSON tail must carry event_id"
 
     print("=== CHECKS ===")
     print("✅ Natural messages (not JSON dumps)")
     print("✅ Agent personalities visible (Featherless-generated tone)")
     print("✅ Anomaly discussion triggered (extent 4.2x GDACS)")
     print("✅ Low confidence warning sent (0.65)")
-    print("✅ Structured JSON also sent (separate 'data' event)")
+    print("✅ Handoff = ONE message: natural text + parseable JSON at end")
     print("\n[done] live Band test passed")
 
 

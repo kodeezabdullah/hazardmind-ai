@@ -642,17 +642,15 @@ async def send_handoff(
     mentions: Optional[list[str]] = None,
     title: str = "agent_result",
 ) -> None:
-    """Send a handoff over TWO Band channels: natural text + structured event.
+    """Send a handoff as ONE Band message: natural text + JSON appended at end.
 
-    1. Natural text — visible chat, @mentions the target agent (via `mentions`).
-       This is what the judges read.
-    2. Structured event — posted to the /events channel (not the chat), carrying
-       the same data in metadata for the pipeline to parse. The event is not a
-       visible message and is directed at no one, so it never shows a misdirected
-       @handle: the only mention the room sees is the natural message's target.
+    The natural prose (what judges read) leads the message and @mentions the
+    target agent; the structured JSON is appended at the end so receiving agents
+    can still parse the payload off the tail of the same message. One clean chat
+    line carries both — no separate /events post.
     """
-    await send_text_message(natural_msg, mentions=mentions)
-    await send_event("data", title, data)
+    content = f"{natural_msg}\n\n{json.dumps(data, indent=2)}"
+    await send_text_message(content, mentions=mentions)
 
 
 def handoff_message(handle: str, event_id: str, **fields: Any) -> tuple[str, list[str]]:

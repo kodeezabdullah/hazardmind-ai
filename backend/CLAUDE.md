@@ -83,11 +83,12 @@ TWO DISTINCT BAND CHANNELS (this is the fix from the live test):
 Mention rules (TEXT channel only):
 - Handoffs @mention the TARGET agent when its *_AGENT_ID is set in .env,
   else anchor on satellite and rely on the @handle in the content.
-- send_handoff() = natural TEXT (@mentions the target) + structured EVENT
-  (no mention). The only @handle the room sees is the natural message's
-  correct target — satellite handoff -> @satellite, hazard -> @hazard,
-  impact -> @impact, report -> @report. Events never carry a misdirected
-  @handle anymore (they used to hardcode the satellite anchor).
+- send_handoff() = ONE TEXT message (@mentions the target): natural prose
+  first, then the structured JSON appended at the end (json.dumps, indent=2).
+  Receiving agents parse the JSON off the message tail; no separate /events
+  post. The only @handle the room sees is the natural message's correct
+  target — satellite -> @satellite, hazard -> @hazard, impact -> @impact,
+  report -> @report.
 
 INBOUND path (important):
 - GET .../messages REST history is EMPTY for this agent (total_count 0).
@@ -137,13 +138,11 @@ Featherless:
 - If no key / all models fail -> templated natural-English fallback
   (still no JSON), so the pipeline never blocks on the LLM.
 
-Two-channel handoff (band_client.send_handoff):
-  1. Natural text message  -> POST .../messages, @mentions the TARGET agent
-     (visible in Band chat — what judges read)
-  2. Structured JSON event -> send_event("data","agent_result",data) ->
-     POST .../events (no mention, not a chat line — parsed by the pipeline)
-Both are sent on every handoff; structured data stays separate from prose and
-the event never pollutes the chat with JSON or a wrong @handle.
+Single-message handoff (band_client.send_handoff):
+  ONE text message -> POST .../messages, @mentions the TARGET agent.
+  Format: "{natural_msg}\n\n{json.dumps(data, indent=2)}" — natural prose
+  (what judges read) leads, structured JSON appended at the end so receiving
+  agents parse the payload off the tail. No separate /events post.
 
 ## Agent Personalities (band_client.AGENT_PERSONALITIES)
 - hazardmind-orchestrator: Calm, authoritative coordinator. Clear, decisive.
