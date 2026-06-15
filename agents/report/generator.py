@@ -308,7 +308,9 @@ async def generate_report(event_id: str, context: dict | None = None):
         "limitations": detailed_report["limitations"],
         "pdf_url": "",
         "map_url": "",
+        "recommended_response_level": determine_recommended_response_level(result),
     }
+    result["recommended_response_level"] = result["report"]["recommended_response_level"]
 
     intelligence_with_sources = await generate_intelligence(result)
     intelligence, intelligence_sources = strip_sources(intelligence_with_sources)
@@ -372,6 +374,7 @@ async def generate_report(event_id: str, context: dict | None = None):
             "report",
             "intelligence",
             "model_sources",
+            "recommended_response_level",
             "agent_log",
         )
     }
@@ -495,6 +498,41 @@ def deterministic_summary(data: dict) -> str:
         f"{data['impact']['population_affected']:,} people exposed. Immediate evacuation, hospital support, "
         "road clearance, and shelter activation are recommended."
     )
+
+
+def determine_recommended_response_level(report_context: dict) -> str:
+    impact = report_context.get("impact", {})
+    severity = str(report_context.get("overall_severity") or "").upper()
+    total_affected = _number(
+        impact.get("total_affected"),
+        impact.get("population_affected"),
+        default=0,
+    )
+    high_risk_people = _number(impact.get("high_risk_people"), default=0)
+    hospitals_at_risk = _number(impact.get("hospitals_at_risk"), default=0)
+    vulnerability = str(impact.get("vulnerability_score") or "").upper()
+
+    if (
+        severity == "CRITICAL"
+        or hospitals_at_risk >= 10
+        or total_affected >= 1_000_000
+        or (vulnerability == "HIGH" and high_risk_people >= 100_000)
+    ):
+        return "NDMA Level-3"
+    if severity == "HIGH" or hospitals_at_risk >= 3 or total_affected >= 100_000:
+        return "NDMA Level-2"
+    return "NDMA Level-1"
+
+
+def _number(*values, default: float = 0) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
 
 
 def _report_log(message: str, timestamp: str) -> dict:

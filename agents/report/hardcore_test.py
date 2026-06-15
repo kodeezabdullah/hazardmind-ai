@@ -17,6 +17,7 @@ DEFAULT_OUTPUT_DIR = BASE_DIR / "generated" / "hardcore-test"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from band_contract import build_report_completion_message, extract_trailing_json, parse_report_trigger_message
 from generator import MOCK_EVENT_DATA
 from geometry_utils import (
     calculate_bbox_from_geojson,
@@ -63,6 +64,7 @@ async def main() -> int:
     print()
 
     run_environment_safety_check(harness, include_r2=args.include_r2, include_db=args.include_db)
+    run_band_contract_tests(harness)
     fixtures = run_geometry_fixture_tests(harness)
     run_report_geometry_tests(harness, fixtures)
     run_artifact_tests(harness, fixtures, output_dir)
@@ -108,16 +110,76 @@ def run_environment_safety_check(harness: Harness, *, include_r2: bool, include_
         "CLOUDFLARE_R2_KEY",
         "CLOUDFLARE_R2_SECRET",
         "CLOUDFLARE_R2_BUCKET",
+        "CLOUDFLARE_R2_ENDPOINT",
+        "CLOUDFLARE_R2_PUBLIC",
         "CLOUDFLARE_R2_PUBLIC_URL",
     ]
     print("Environment Safety")
     for name in env_vars:
         print(f"  {name}: {'present' if bool(os.getenv(name)) else 'missing'}")
-    r2_ready = all(os.getenv(name) for name in env_vars if name.startswith("CLOUDFLARE_"))
+    r2_ready = (
+        all(os.getenv(name) for name in ("CLOUDFLARE_R2_KEY", "CLOUDFLARE_R2_SECRET", "CLOUDFLARE_R2_BUCKET"))
+        and bool(os.getenv("CLOUDFLARE_R2_ENDPOINT") or os.getenv("CLOUDFLARE_ACCOUNT_ID"))
+        and bool(os.getenv("CLOUDFLARE_R2_PUBLIC_URL") or os.getenv("CLOUDFLARE_R2_PUBLIC"))
+    )
     db_ready = bool(os.getenv("NEON_DATABASE_URL"))
     harness.check("environment check prints booleans only", True)
     harness.check("R2 env ready when --include-r2 is used", r2_ready or not include_r2)
     harness.check("DB env ready when --include-db is used", db_ready or not include_db)
+    print()
+
+
+def run_band_contract_tests(harness: Harness) -> None:
+    print("Band Contract")
+    fixture_path = FIXTURE_DIR / "report_trigger_message.txt"
+    harness.check("report trigger fixture exists", fixture_path.exists())
+    message = fixture_path.read_text(encoding="utf-8") if fixture_path.exists() else ""
+
+    try:
+        parsed_payload = parse_report_trigger_message(message)
+    except ValueError as exc:
+        harness.check("parse Band trigger message", False, str(exc))
+        parsed_payload = {}
+    else:
+        harness.check("parse Band trigger message", parsed_payload["to"] == "hazardmind-report")
+        harness.check("Band trigger has event_id", bool(parsed_payload.get("event_id")))
+        harness.check("Band trigger impact data parsed", bool(parsed_payload.get("impact_data")))
+
+    fenced = "Report payload follows.\n```json\n{\"ok\": true, \"nested\": {\"value\": 1}}\n```"
+    harness.check("extract trailing JSON from fenced text", extract_trailing_json(fenced).get("ok") is True)
+    try:
+        extract_trailing_json("No JSON object in this Band message.")
+    except ValueError:
+        harness.check("reject message with no JSON safely", True)
+    else:
+        harness.check("reject message with no JSON safely", False)
+
+    event_id = parsed_payload.get("event_id", "8f4f7c66-7d9c-4df8-8a4f-78c9bfaeaf21")
+    report = build_report_context(_load_fixture("valid_zones.geojson"))
+    report["event_id"] = event_id
+    report["report"]["pdf_url"] = f"https://public-r2.example/events/{event_id}/report.pdf"
+    report["report"]["map_url"] = f"https://hazardmind.vercel.app/map/{event_id}"
+    report["report"]["recommended_response_level"] = "NDMA Level-3"
+    result = {
+        "event_id": event_id,
+        "status": "complete",
+        "pdf_url": report["report"]["pdf_url"],
+        "map_url": report["report"]["map_url"],
+        "summary": report["report"]["summary"],
+        "confidence_level": "HIGH",
+        "recommended_response_level": "NDMA Level-3",
+        "report": report,
+    }
+    completion_message = build_report_completion_message(result)
+    completion_json = extract_trailing_json(completion_message)
+    completion_data = completion_json.get("data", {})
+    harness.check("completion message mentions orchestrator", "@hazardmind-orchestrator" in completion_message)
+    harness.check("completion JSON event_id matches", completion_json.get("event_id") == event_id)
+    harness.check("completion JSON agent matches", completion_json.get("agent") == "hazardmind-report")
+    harness.check("completion JSON status complete", completion_json.get("status") == "complete")
+    harness.check("completion JSON step report", completion_json.get("step") == "report")
+    for key in ("pdf_url", "map_url", "executive_summary", "confidence_level", "recommended_response_level"):
+        harness.check(f"completion JSON data.{key}", bool(completion_data.get(key)))
     print()
 
 
@@ -261,6 +323,7 @@ async def run_pipeline_safety_tests(
         result["status"] in {"complete_with_warnings", "complete"} and expected_db_warning,
         f"status={result['status']} warnings={len(result.get('warnings', []))}",
     )
+    harness.check("pipeline map_url uses frontend route", "/map/demo-peshawar-flood" in result.get("map_url", ""))
     if include_r2:
         harness.check("optional R2 upload completed", result.get("r2_uploaded") is True, result.get("status", ""))
     print()
@@ -343,7 +406,9 @@ def build_report_context(
         "limitations": ["No live Band messages are consumed in hardcore tests."],
         "pdf_url": "",
         "map_url": "",
+        "recommended_response_level": "NDMA Level-3",
     }
+    report["recommended_response_level"] = "NDMA Level-3"
     report["intelligence"] = {
         "criticality": {
             "criticality": "critical",

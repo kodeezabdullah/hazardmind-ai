@@ -7,11 +7,9 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 REQUIRED_R2_ENV_VARS = (
-    "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_R2_KEY",
     "CLOUDFLARE_R2_SECRET",
     "CLOUDFLARE_R2_BUCKET",
-    "CLOUDFLARE_R2_PUBLIC_URL",
 )
 
 
@@ -29,7 +27,7 @@ def upload_file_to_r2(local_path: str, object_key: str, content_type: str) -> st
     normalized_key = _normalize_object_key(object_key)
     client = boto3.client(
         "s3",
-        endpoint_url=f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+        endpoint_url=_endpoint_url(),
         aws_access_key_id=os.environ["CLOUDFLARE_R2_KEY"],
         aws_secret_access_key=os.environ["CLOUDFLARE_R2_SECRET"],
         region_name="auto",
@@ -50,6 +48,10 @@ def upload_file_to_r2(local_path: str, object_key: str, content_type: str) -> st
 
 def _validate_r2_environment() -> None:
     missing = [name for name in REQUIRED_R2_ENV_VARS if not os.getenv(name)]
+    if not os.getenv("CLOUDFLARE_R2_ENDPOINT") and not os.getenv("CLOUDFLARE_ACCOUNT_ID"):
+        missing.append("CLOUDFLARE_R2_ENDPOINT or CLOUDFLARE_ACCOUNT_ID")
+    if not os.getenv("CLOUDFLARE_R2_PUBLIC_URL") and not os.getenv("CLOUDFLARE_R2_PUBLIC"):
+        missing.append("CLOUDFLARE_R2_PUBLIC_URL or CLOUDFLARE_R2_PUBLIC")
     if missing:
         raise RuntimeError(f"Missing required R2 environment variables: {', '.join(missing)}")
 
@@ -59,5 +61,12 @@ def _normalize_object_key(object_key: str) -> str:
 
 
 def _public_url_for(object_key: str) -> str:
-    base_url = os.environ["CLOUDFLARE_R2_PUBLIC_URL"].rstrip("/")
+    base_url = (os.getenv("CLOUDFLARE_R2_PUBLIC_URL") or os.getenv("CLOUDFLARE_R2_PUBLIC") or "").rstrip("/")
     return f"{base_url}/{_normalize_object_key(object_key)}"
+
+
+def _endpoint_url() -> str:
+    explicit_endpoint = os.getenv("CLOUDFLARE_R2_ENDPOINT")
+    if explicit_endpoint:
+        return explicit_endpoint.rstrip("/")
+    return f"https://{os.environ['CLOUDFLARE_ACCOUNT_ID']}.r2.cloudflarestorage.com"

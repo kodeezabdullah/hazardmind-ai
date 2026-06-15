@@ -211,9 +211,9 @@
     }
   },
   "report": {
-    "summary": "A CRITICAL flood has inundated 153.4 km2 of Peshawar, impacting 540,000 people and placing 14 hospitals, 67 schools, and 89 km of roads at risk. SAR analysis confirms the event at 91% confidence with deep-water concentrations in zones FZ-01 and FZ-02. The most urgent constraint is that only one evacuation route remains viable, creating a critical logistics bottleneck. Immediate priorities are evacuating high-risk zones, securing hospital access, and clearing blocked corridors. These are decision-support estimates requiring ground-truth validation; optical assessment is limited by 42% cloud cover.",
-    "detailed_body": "Satellite SAR analysis over Peshawar reveals a severe flood event with 153.37 km\u00b2 of inundation affecting 24.3% of the monitored area. Deep water zones span 12.4 km\u00b2 in Zone FZ-01, while Zone FZ-02 has 8.7 km\u00b2 of high water. A population of 540,000 is impacted, with 67 schools affected, 89 km of roads blocked, and 14 hospitals at risk, including Lady Reading Hospital under high risk. Only one evacuation route remains viable, severely constraining response. The combination of extensive flooding, critical infrastructure at risk, and limited safe passage creates a CRITICAL emergency situation demanding immediate, large-scale intervention.",
-    "technical_analysis": "Sentinel-1 SAR was selected because cloud cover is 42%. The analysis uses SAR VV/VH ratio with mean value 0.24 and identifies 22 zones. Damage is estimated at 24.3%, with 89 km of roads blocked and a vulnerability score of 8.2.",
+    "summary": "Peshawar faces a CRITICAL flood emergency with approximately 540,000 people exposed across 153.37 km2 of inundation in 22 zones, confirmed by SAR imagery at high confidence (0.91) despite 42% cloud cover. The crisis threatens 14 hospitals, blocks 89 km of roads, and affects 67 schools, with a vulnerability score of 8.2/10. A severe operational bottleneck exists as only one evacuation route currently serves the entire affected population, while deep-water zones FZ-01 and FZ-02 endanger access to Lady Reading Hospital. Immediate priorities are evacuation of critical zones, medical surge deployment, and clearing road corridors. These figures derive from demonstration data and require field validation before full resource commitment.",
+    "detailed_body": "Peshawar, Pakistan is experiencing a CRITICAL flood scenario with 153.37 km2 affected and 540,000 people exposed. Flood risk is classified as CRITICAL with hospitals, roads, and schools requiring immediate operational attention.",
+    "technical_analysis": "SAR analysis using Sentinel-1 VV/VH ratio (mean 0.24) indicates extensive flooding with 153.37 km2 affected (24.3% of 22 zones). Deep water zone FZ-01 (12.4 km2) and water zone FZ-02 (8.7 km2) dominate critical/high severity areas. Cloud cover (42%) necessitated SAR selection. Impact is severe: 540,000 population affected, 14 hospitals at risk (Lady Reading Hospital high), 89 km roads blocked, 67 schools impacted, and vulnerability score 8.2/10. Only one evacuation route identified. Flood confidence is high (0.91); co-existing earthquake (0.67) and landslide (0.54) risks are moderate to low.",
     "recommendations": [
       "Prioritize evacuation in critical flood zones.",
       "Deploy emergency medical support near hospitals at risk.",
@@ -222,9 +222,9 @@
       "Monitor flood expansion using updated satellite imagery.",
       "Evacuate high-risk flood zones FZ-01 and FZ-02",
       "Secure access to Lady Reading Hospital",
-      "Establish emergency traffic control on the single evacuation route",
-      "Heavy machinery for road clearance",
-      "Water rescue boats and amphibious vehicles"
+      "Deploy search and rescue to inundated areas",
+      "High-clearance vehicles and water rescue boats",
+      "Emergency medical supplies and surge staffing"
     ],
     "response_priorities": [
       "Activate evacuation support for FZ-01 and FZ-02.",
@@ -241,22 +241,24 @@
       "No field validation, hydrologic model, or live basemap tiles are used for artifact generation.",
       "Impact estimates should be treated as decision-support indicators, not official counts."
     ],
-    "pdf_url": "/demo-results/demo-peshawar-flood-report.pdf",
-    "map_url": "/demo-results/demo-peshawar-flood-map.png"
+    "pdf_url": "https://pub-720f47eaad2f4997a76a02f8bf14f58a.r2.dev/events/demo-peshawar-flood/report.pdf",
+    "map_url": "https://hazardmind.vercel.app/map/demo-peshawar-flood",
+    "recommended_response_level": "NDMA Level-3"
   },
   "intelligence": {
     "criticality": {
       "criticality": "critical",
       "overall_confidence": 0.91,
       "escalation_required": true,
-      "rationale": "CRITICAL flood confirmed via SAR (91% confidence). 540,000 people affected, 14 hospitals at risk, 89 km roads blocked, and only 1 evacuation route remains. Mass casualties likely without immediate escalation.",
+      "rationale": "Critical flood emergency in Peshawar with 153 km\u00b2 inundated, ~540,000 people affected, 14 hospitals at risk, and only one evacuation route available.",
       "trigger_factors": [
-        "540,000 affected population",
-        "Only 1 evacuation route available",
-        "14 hospitals at risk including Lady Reading (HIGH)",
-        "89 km roads blocked",
-        "24.3% area inundated (153.4 km\u00b2)",
-        "Confirmed flood at 91% SAR confidence"
+        "Population affected: ~540,000",
+        "Inundated area: 153 km\u00b2 across 22 zones",
+        "Only 1 evacuation route operational",
+        "14 hospitals at risk including Lady Reading Hospital (HIGH)",
+        "89 km of roads blocked",
+        "Vulnerability score: 8.2/10",
+        "SAR flood confidence: 0.91"
       ]
     },
     "anomalies": {
@@ -265,72 +267,73 @@
         {
           "type": "missing_area",
           "severity": "medium",
-          "description": "Report PDF and Map URLs are empty",
-          "recommended_handling": "Verify document generation pipeline and update links"
+          "description": "PDF and map URLs are empty",
+          "recommended_handling": "Verify output generation of visual reports and maps"
         },
         {
           "type": "other",
-          "severity": "low",
-          "description": "Evacuation route count (1) is critically low relative to affected population (540,000)",
-          "recommended_handling": "Flag as operational bottleneck for emergency logistics"
+          "severity": "high",
+          "description": "Critical population exposure (540k) with only one evacuation route",
+          "recommended_handling": "Prioritize immediate identification and clearing of alternative access routes"
         }
       ]
     },
     "map_narrative": {
-      "map_narrative": "The static risk map identifies a critical flood emergency in Peshawar, covering 153.37 km\u00b2 (24.3% of the area). Using SAR imagery to penetrate cloud cover, the map highlights severe inundation across 22 zones, impacting 540,000 people and creating a critical logistics bottleneck with only one remaining evacuation route.",
+      "map_narrative": "This static risk map identifies critical flood inundation across 153.37 km\u00b2 of Peshawar, utilizing SAR imagery to penetrate cloud cover. It highlights 22 high-risk zones where floodwaters intersect with critical infrastructure, indicating a critical vulnerability score of 8.2 and severe threats to healthcare access and transportation corridors.",
       "key_spatial_findings": [
-        "24.3% of the monitored area is inundated",
-        "89 km of road networks are blocked, severely restricting mobility",
-        "High vulnerability score (8.2) driven by concentrations of affected schools and hospitals",
-        "Single viable evacuation route creates a high-risk bottleneck for mass movement"
+        "153.37 km\u00b2 of total inundated area across 22 distinct zones.",
+        "89 km of blocked road networks restricting emergency mobility.",
+        "High-risk overlap between deep-water zones and 14 healthcare facilities.",
+        "Critical bottleneck identified with only one operational evacuation route for 540,000 affected people."
       ],
       "hotspots": [
-        "Flood Zones FZ-01 and FZ-02 (deep-water concentrations)",
-        "Lady Reading Hospital (High risk)",
+        "Flood Zones FZ-01 and FZ-02 (Deep-water critical severity)",
+        "Lady Reading Hospital (High risk/Critical access point)",
         "Khyber Teaching Hospital (Medium risk)"
       ],
       "map_limitations": [
-        "Satellite-derived estimates require ground-truth field validation",
-        "Optical visibility limited by 42% cloud cover, necessitating reliance on SAR data"
+        "SAR-derived data may require ground-truthing for precise water depth.",
+        "Static snapshot does not reflect real-time flood crest or recession rates.",
+        "Analysis based on demonstration data requiring field validation before full resource commitment."
       ]
     },
     "priority_timeline": {
       "next_6_hours": [
         "Evacuate high-risk flood zones FZ-01 and FZ-02",
         "Secure access to Lady Reading Hospital",
-        "Establish emergency traffic control on the single evacuation route"
+        "Deploy search and rescue to inundated areas"
       ],
       "next_24_hours": [
-        "Clear 89km of blocked roads for rescue access",
-        "Deploy medical surge teams to at-risk hospitals",
-        "Open temporary shelters for 540,000 affected residents"
+        "Clear 89km of blocked road corridors",
+        "Establish emergency medical surge centers",
+        "Open temporary shelters for 540,000 affected people"
       ],
       "next_72_hours": [
-        "Conduct field validation of SAR damage estimates",
-        "Restore primary transportation corridors to affected schools",
-        "Initiate long-term displaced population relocation"
+        "Restore critical utility services to schools and clinics",
+        "Conduct structural assessments of damaged infrastructure",
+        "Implement long-term displacement management plans"
       ],
       "resource_priorities": [
-        "Heavy machinery for road clearance",
-        "Water rescue boats and amphibious vehicles",
-        "Emergency medical supplies and personnel"
+        "High-clearance vehicles and water rescue boats",
+        "Emergency medical supplies and surge staffing",
+        "Temporary shelter kits and clean water"
       ],
       "coordination_priorities": [
-        "Manage evacuation bottleneck to prevent traffic gridlock",
-        "Sync satellite data with ground-truth reports",
-        "Coordinate hospital capacity with emergency services"
+        "Multi-agency traffic control for sole evacuation route",
+        "Hospital administration for capacity and risk management",
+        "Satellite imagery updates for real-time flood monitoring"
       ]
     },
     "decision_brief": {
-      "decision_brief": "CRITICAL flood emergency in Peshawar, Pakistan confirmed via Sentinel-1 SAR at 91% confidence. 153.4 km2 (24.3% of monitored area) inundated across 22 zones, affecting 540,000 people, 14 hospitals, 67 schools, and blocking 89 km of roads. Only one viable evacuation route remains, creating a severe mass-movement bottleneck. Escalation is required and immediate action is needed to prevent mass casualties. Estimates are satellite-derived and require field validation.",
-      "official_summary": "A CRITICAL flood has inundated 153.4 km2 of Peshawar, impacting 540,000 people and placing 14 hospitals, 67 schools, and 89 km of roads at risk. SAR analysis confirms the event at 91% confidence with deep-water concentrations in zones FZ-01 and FZ-02. The most urgent constraint is that only one evacuation route remains viable, creating a critical logistics bottleneck. Immediate priorities are evacuating high-risk zones, securing hospital access, and clearing blocked corridors. These are decision-support estimates requiring ground-truth validation; optical assessment is limited by 42% cloud cover.",
+      "decision_brief": "CRITICAL flood emergency in Peshawar, Pakistan. SAR analysis (confidence 0.91) confirms 153.37 km2 inundated across 22 zones, exposing ~540,000 people. Only one evacuation route is operational, 14 hospitals are at risk (Lady Reading Hospital HIGH), 89 km of roads are blocked, and vulnerability is 8.2/10. Escalation required; immediate action and human validation needed before resource commitment.",
+      "official_summary": "Peshawar faces a CRITICAL flood emergency with approximately 540,000 people exposed across 153.37 km2 of inundation in 22 zones, confirmed by SAR imagery at high confidence (0.91) despite 42% cloud cover. The crisis threatens 14 hospitals, blocks 89 km of roads, and affects 67 schools, with a vulnerability score of 8.2/10. A severe operational bottleneck exists as only one evacuation route currently serves the entire affected population, while deep-water zones FZ-01 and FZ-02 endanger access to Lady Reading Hospital. Immediate priorities are evacuation of critical zones, medical surge deployment, and clearing road corridors. These figures derive from demonstration data and require field validation before full resource commitment.",
       "key_decisions_required": [
-        "Authorize immediate evacuation of high-risk flood zones FZ-01 and FZ-02",
-        "Establish emergency traffic control to manage the single evacuation route and prevent gridlock",
-        "Deploy medical surge teams and secure access to Lady Reading and Khyber Teaching Hospitals",
-        "Mobilize heavy machinery and water rescue assets to clear 89 km of blocked roads",
-        "Open temporary shelters for displaced residents and initiate field validation of SAR estimates",
-        "Resolve missing report/map document links and verify generation pipeline"
+        "Authorize immediate evacuation of critical flood zones FZ-01 and FZ-02",
+        "Approve identification and clearing of alternative evacuation routes to relieve single-route bottleneck",
+        "Deploy medical surge teams and secure access to Lady Reading Hospital and other at-risk hospitals",
+        "Commit search and rescue assets, high-clearance vehicles, and water rescue boats to inundated areas",
+        "Open temporary shelters and pre-position water, medical, and shelter supplies for 540,000 people",
+        "Order field validation of demonstration-derived figures before final large-scale resource commitment"
       ],
       "human_review_required": true
     },
@@ -348,18 +351,19 @@
       "warnings": [
         "GeoJSON artifact URL is not available in local demo mode.",
         "Map URL is generated later by the local artifact step.",
-        "Report PDF and Map URLs are empty; verify document generation pipeline.",
-        "Satellite cloud cover at 42% limits optical ground-truth validation."
+        "PDF and map URLs are empty; visual assets missing.",
+        "Single evacuation route creates severe bottleneck for 540,000 exposed residents.",
+        "Impact figures are demonstration-derived and require field validation before deployment."
       ],
       "blocking_issues": [
-        "Critical data mismatch: evacuation_route_count is 0 in event payload but 1 in intelligence summary.",
-        "Missing report assets (PDF/Map URLs) block official dissemination and field reference."
+        "Human validation explicitly required before resource commitment or large-scale response activation.",
+        "Critical access to Lady Reading Hospital and deep-water zones remains unverified due to route dependency and lack of ground truthing."
       ],
-      "review_note": "Reconcile evacuation route discrepancy and populate missing asset URLs before field deployment approval."
+      "review_note": "Data flagged as demonstration-level; requires immediate field validation and route clearance verification before operational deployment."
     },
     "band_ready_message": {
       "target": "@muhammad-abdullah",
-      "message": "HazardMind Report Agent complete for demo-peshawar-flood (Peshawar, Pakistan, Flood). Criticality: critical; confidence: 91%. Summary: A CRITICAL flood has inundated 153.4 km2 of Peshawar, impacting 540,000 people and placing 14 hospitals, 67 schools, and 89 km of roads at risk. SAR analysis confirms the event at 91% confidence with deep-water concentrations in zones FZ-01 and FZ-02. The most urgent constraint is that only one evacuation route remains viable, creating a critical logistics bottleneck. Immediate priorities are evacuating high-risk zones, securing hospital access, and clearing blocked corridors. These are decision-support estimates requiring ground-truth validation; optical assessment is limited by 42% cloud cover.",
+      "message": "HazardMind Report Agent complete for demo-peshawar-flood (Peshawar, Pakistan, Flood). Criticality: critical; confidence: 91%. Summary: Peshawar faces a CRITICAL flood emergency with approximately 540,000 people exposed across 153.37 km2 of inundation in 22 zones, confirmed by SAR imagery at high confidence (0.91) despite 42% cloud cover. The crisis threatens 14 hospitals, blocks 89 km of roads, and affects 67 schools, with a vulnerability score of 8.2/10. A severe operational bottleneck exists as only one evacuation route currently serves the entire affected population, while deep-water zones FZ-01 and FZ-02 endanger access to Lady Reading Hospital. Immediate priorities are evacuation of critical zones, medical surge deployment, and clearing road corridors. These figures derive from demonstration data and require field validation before full resource commitment.",
       "status": "NEEDS_REVIEW",
       "confidence": 0.91
     }
@@ -379,6 +383,7 @@
       "band_ready_message": "template+intelligence"
     }
   },
+  "recommended_response_level": "NDMA Level-3",
   "agent_log": [
     {
       "agent": "hazardmind-report",
@@ -451,6 +456,12 @@
       "status": "complete",
       "message": "PDF generated locally",
       "timestamp": "2026-06-13T18:04:20Z"
+    },
+    {
+      "agent": "hazardmind-report",
+      "status": "complete",
+      "message": "PDF uploaded to Cloudflare R2",
+      "timestamp": "2026-06-13T18:05:00Z"
     },
     {
       "agent": "hazardmind-report",

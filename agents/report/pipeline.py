@@ -2,7 +2,10 @@ import json
 import os
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
@@ -13,13 +16,13 @@ if str(BASE_DIR) not in sys.path:
 
 try:
     from .db_client import fetch_report_context_from_db, is_valid_uuid, write_final_report_metadata
-    from .generator import MOCK_EVENT_DATA, generate_report
+    from .generator import MOCK_EVENT_DATA, determine_recommended_response_level, generate_report
     from .map_generator import generate_static_map
     from .pdf_generator import generate_pdf_report
     from .storage_client import upload_file_to_r2
 except ImportError:
     from db_client import fetch_report_context_from_db, is_valid_uuid, write_final_report_metadata
-    from generator import MOCK_EVENT_DATA, generate_report
+    from generator import MOCK_EVENT_DATA, determine_recommended_response_level, generate_report
     from map_generator import generate_static_map
     from pdf_generator import generate_pdf_report
     from storage_client import upload_file_to_r2
@@ -33,6 +36,7 @@ async def run_report_pipeline(
     write_db: bool = False,
     output_dir: str | None = None,
     frontend_demo_mode: bool = False,
+    incoming_payload: dict | None = None,
     json_output_path: str | None = None,
     pdf_output_path: str | None = None,
     map_output_path: str | None = None,
@@ -58,7 +62,16 @@ async def run_report_pipeline(
             missing_context = _missing_context_warnings(context)
             warnings.extend(missing_context)
 
+        if incoming_payload:
+            if context is None:
+                context = deepcopy(MOCK_EVENT_DATA)
+            _merge_incoming_payload_into_context(context, incoming_payload)
+            warnings.extend(_incoming_payload_warnings(incoming_payload))
+
         report = await generate_report(event_id, context=context)
+        if incoming_payload:
+            _preserve_incoming_payload(report, incoming_payload)
+
         paths = _resolve_output_paths(
             event_id=event_id,
             frontend_demo_mode=frontend_demo_mode,
@@ -68,7 +81,7 @@ async def run_report_pipeline(
             map_output_path=map_output_path,
         )
 
-        report["report"]["map_url"] = _public_url_for(paths["map"])
+        report["report"]["map_url"] = _frontend_map_url(event_id)
         paths["map"].parent.mkdir(parents=True, exist_ok=True)
         generate_static_map(report, paths["map"])
         _append_report_log(report, "Static cartography map generated locally", "2026-06-13T18:04:00Z")
@@ -85,19 +98,12 @@ async def run_report_pipeline(
                     f"events/{event_id}/report.pdf",
                     "application/pdf",
                 )
-                map_url = upload_file_to_r2(
-                    str(paths["map"]),
-                    f"events/{event_id}/risk_map.png",
-                    "image/png",
-                )
             except Exception as exc:
                 warnings.append(f"R2 upload failed: {_safe_error_message(exc)}")
             else:
                 report["report"]["pdf_url"] = pdf_url
-                report["report"]["map_url"] = map_url
                 r2_uploaded = True
                 _append_report_log(report, "PDF uploaded to Cloudflare R2", "2026-06-13T18:05:00Z")
-                _append_report_log(report, "Map uploaded to Cloudflare R2", "2026-06-13T18:05:20Z")
 
         total_time_secs = round(time.perf_counter() - started_at)
         if write_db:
@@ -127,6 +133,7 @@ async def run_report_pipeline(
             warnings=warnings,
             model_sources=report.get("model_sources", {}),
             confidence_level=_confidence_level(report),
+            recommended_response_level=_recommended_response_level(report),
             report=report,
         )
     except Exception as exc:
@@ -177,6 +184,16 @@ def _public_url_for(path: Path) -> str:
     return str(path)
 
 
+def _frontend_map_url(event_id: str) -> str:
+    load_dotenv(BASE_DIR / ".env")
+    base_url = (
+        os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("NEXT_PUBLIC_FRONTEND_URL")
+        or "https://hazardmind.vercel.app"
+    )
+    return f"{base_url.rstrip('/')}/map/{event_id}"
+
+
 def _append_report_log(report: dict, message: str, timestamp: str) -> None:
     report.setdefault("agent_log", []).append(
         {
@@ -199,13 +216,130 @@ def _missing_context_warnings(context: dict) -> list[str]:
     return warnings
 
 
+def _merge_incoming_payload_into_context(context: dict, incoming_payload: dict) -> None:
+    data = _incoming_data(incoming_payload)
+    impact = context.setdefault("impact", {})
+    mappings = {
+        "total_affected": "population_affected",
+        "high_risk_people": "high_risk_people",
+        "medium_risk_people": "medium_risk_people",
+        "hospitals_at_risk": "hospitals_at_risk",
+        "schools_at_risk": "schools_affected",
+        "roads_blocked": "roads_blocked_km",
+        "bridges_at_risk": "bridges_at_risk",
+        "vulnerability_score": "vulnerability_score",
+        "estimated_evacuation_time": "estimated_evacuation_time",
+        "overall_confidence": "overall_confidence",
+    }
+    for source_key, target_key in mappings.items():
+        if source_key in data:
+            impact[target_key] = data[source_key]
+    if "total_affected" in data:
+        impact["total_affected"] = data["total_affected"]
+
+    routes = _routes_from_incoming(data.get("evacuation_routes"))
+    if routes is not None:
+        context.setdefault("routes", {})["evacuation_routes"] = routes
+
+    confidence = data.get("overall_confidence")
+    if confidence is not None:
+        context.setdefault("hazard", {}).setdefault("confidence_scores", {})["overall"] = confidence
+
+
+def _preserve_incoming_payload(report: dict, incoming_payload: dict) -> None:
+    anomalies = incoming_payload.get("anomalies") or []
+    report["incoming_payload"] = {
+        "from": incoming_payload.get("from", ""),
+        "to": incoming_payload.get("to", ""),
+        "anomalies": anomalies,
+    }
+    report["incoming_anomalies"] = anomalies
+    if anomalies:
+        report.setdefault("intelligence", {}).setdefault("anomalies", {})["incoming_anomalies"] = anomalies
+        report.setdefault("report", {})["incoming_anomalies"] = anomalies
+    _append_report_log(
+        report,
+        f"Impact Agent handoff merged with {len(anomalies)} incoming anomalies.",
+        "2026-06-13T18:03:10Z",
+    )
+    response_level = determine_recommended_response_level(report)
+    report["recommended_response_level"] = response_level
+    report.setdefault("report", {})["recommended_response_level"] = response_level
+
+
+def _incoming_payload_warnings(incoming_payload: dict) -> list[str]:
+    warnings = []
+    data = _incoming_data(incoming_payload)
+    if not data:
+        warnings.append("Incoming Impact Agent payload did not include data fields.")
+    if incoming_payload.get("anomalies"):
+        warnings.append(f"Incoming payload contains {len(incoming_payload['anomalies'])} anomalies.")
+    return warnings
+
+
+def _incoming_data(incoming_payload: dict) -> dict:
+    data = incoming_payload.get("impact_data") or incoming_payload.get("data") or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _routes_from_incoming(routes) -> dict | None:
+    if routes is None:
+        return None
+    if isinstance(routes, dict) and routes.get("type") == "FeatureCollection":
+        return routes
+    if isinstance(routes, dict):
+        routes = [routes]
+    if not isinstance(routes, list):
+        return None
+
+    features = []
+    for index, route in enumerate(routes, start=1):
+        if not isinstance(route, dict):
+            continue
+        geojson = route.get("geojson") if isinstance(route.get("geojson"), dict) else {}
+        if geojson.get("type") == "FeatureCollection":
+            features.extend(geojson.get("features", []))
+            continue
+        if geojson.get("type") == "Feature":
+            features.append(geojson)
+            continue
+        geometry = geojson if geojson.get("type") in {"LineString", "MultiLineString"} else {"type": "LineString", "coordinates": []}
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {
+                    "name": route.get("name") or f"Route {index}",
+                    "distance_km": route.get("distance_km"),
+                    "status": route.get("status"),
+                },
+                "geometry": geometry,
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
 def _confidence_level(report: dict) -> str:
     criticality = report.get("intelligence", {}).get("criticality", {})
     confidence = criticality.get("overall_confidence")
-    label = criticality.get("criticality") or report.get("overall_severity")
     if confidence is None:
-        return str(label or "unknown")
-    return f"{label}:{round(float(confidence) * 100)}%"
+        confidence = report.get("impact", {}).get("overall_confidence")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    if confidence_value >= 0.8:
+        return "HIGH"
+    if confidence_value >= 0.6:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _recommended_response_level(report: dict) -> str:
+    return (
+        report.get("recommended_response_level")
+        or report.get("report", {}).get("recommended_response_level")
+        or determine_recommended_response_level(report)
+    )
 
 
 def _safe_path_part(value: str) -> str:
@@ -244,6 +378,7 @@ def _result(
     warnings: list[str] | None = None,
     model_sources: dict | None = None,
     confidence_level: str = "",
+    recommended_response_level: str = "",
     report: dict | None = None,
 ) -> dict:
     result = {
@@ -260,6 +395,7 @@ def _result(
         "warnings": warnings or [],
         "model_sources": model_sources or {},
         "confidence_level": confidence_level,
+        "recommended_response_level": recommended_response_level,
     }
     if report is not None:
         result["report"] = report

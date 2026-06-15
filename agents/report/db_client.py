@@ -50,7 +50,7 @@ async def write_final_report_metadata(report: dict, total_time_secs: int | None 
 
     report_section = report.get("report", {})
     intelligence = report.get("intelligence", {})
-    payload = _compact_agent_log_payload(report)
+    payload = _compact_agent_log_payload(report, total_time_secs=total_time_secs)
     confidence_level = _confidence_level(report)
 
     conn = await _connect()
@@ -73,8 +73,7 @@ async def write_final_report_metadata(report: dict, total_time_secs: int | None 
                     map_url = $3,
                     executive_summary = $4,
                     agent_log = $5::jsonb,
-                    total_time_secs = $6,
-                    confidence_level = $7
+                    confidence_level = $6
                 WHERE id = $1;
                 """,
                 existing_id,
@@ -82,7 +81,6 @@ async def write_final_report_metadata(report: dict, total_time_secs: int | None 
                 report_section.get("map_url"),
                 report_section.get("summary"),
                 json.dumps(payload),
-                total_time_secs,
                 confidence_level,
             )
         else:
@@ -94,18 +92,16 @@ async def write_final_report_metadata(report: dict, total_time_secs: int | None 
                     map_url,
                     executive_summary,
                     agent_log,
-                    total_time_secs,
                     confidence_level,
                     created_at
                 )
-                VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, $7, NOW());
+                VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, NOW());
                 """,
                 event_id,
                 report_section.get("pdf_url"),
                 report_section.get("map_url"),
                 report_section.get("summary"),
                 json.dumps(payload),
-                total_time_secs,
                 confidence_level,
             )
     except Exception as exc:
@@ -303,24 +299,36 @@ def _hazard_feature(zone: dict, index: int) -> dict:
     }
 
 
-def _compact_agent_log_payload(report: dict) -> dict:
+def _compact_agent_log_payload(report: dict, total_time_secs: int | None = None) -> dict:
     intelligence = report.get("intelligence", {})
-    return {
+    payload = {
         "agent_log": report.get("agent_log", []),
         "model_sources": report.get("model_sources", {}),
         "intelligence": intelligence,
         "quality_check": intelligence.get("quality_check", {}),
         "band_ready_message": intelligence.get("band_ready_message", {}),
     }
+    if total_time_secs is not None:
+        payload["total_time_secs"] = total_time_secs
+    if report.get("recommended_response_level"):
+        payload["recommended_response_level"] = report.get("recommended_response_level")
+    return payload
 
 
 def _confidence_level(report: dict) -> str:
     criticality = report.get("intelligence", {}).get("criticality", {})
     confidence = criticality.get("overall_confidence")
-    label = criticality.get("criticality") or report.get("overall_severity")
     if confidence is None:
-        return str(label or "unknown")
-    return f"{label}:{round(float(confidence) * 100)}%"
+        confidence = report.get("impact", {}).get("overall_confidence")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    if confidence_value >= 0.8:
+        return "HIGH"
+    if confidence_value >= 0.6:
+        return "MEDIUM"
+    return "LOW"
 
 
 def _database_url() -> str:
@@ -380,13 +388,44 @@ def _bbox_from_satellite(satellite: dict) -> list[float]:
 
 def _evacuation_routes(value) -> dict:
     if isinstance(value, dict):
+        if value.get("type") == "FeatureCollection":
+            return value
+        if value.get("type") == "Feature":
+            return {"type": "FeatureCollection", "features": [value]}
+        if value.get("type") in {"LineString", "MultiLineString"}:
+            return {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": value}]}
         return value
+    if isinstance(value, list):
+        features = []
+        for index, route in enumerate(value, start=1):
+            if not isinstance(route, dict):
+                continue
+            geojson = route.get("geojson") if isinstance(route.get("geojson"), dict) else {}
+            if geojson.get("type") == "FeatureCollection":
+                features.extend(geojson.get("features", []))
+                continue
+            if geojson.get("type") == "Feature":
+                features.append(geojson)
+                continue
+            geometry = geojson if geojson.get("type") in {"LineString", "MultiLineString"} else {"type": "LineString", "coordinates": []}
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "name": route.get("name") or f"Route {index}",
+                        "distance_km": route.get("distance_km"),
+                        "status": route.get("status"),
+                    },
+                    "geometry": geometry,
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
             return {"type": "FeatureCollection", "features": []}
-        return parsed if isinstance(parsed, dict) else {"type": "FeatureCollection", "features": []}
+        return _evacuation_routes(parsed)
     return {"type": "FeatureCollection", "features": []}
 
 
