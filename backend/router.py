@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, HTTPException
 
 from band_client import notify_satellite
-from db import create_disaster_event
+from db import create_disaster_event, get_event_status
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -43,8 +43,18 @@ async def analyze(request: AnalyzeRequest):
 
 @router.get("/status/{job_id}", response_model=StatusResponse)
 async def get_status(job_id: str):
-    # TODO: read from disaster_events
-    raise HTTPException(status_code=501, detail="status endpoint not implemented yet")
+    event = await get_event_status(job_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    return StatusResponse(
+        job_id=str(event["event_id"]),
+        status=event["status"],
+        step=event["step"],
+        progress=event["progress"],
+        created_at=event["created_at"],
+        updated_at=event["updated_at"],
+    )
 
 
 @router.get("/results/{job_id}", response_model=ResultsResponse)

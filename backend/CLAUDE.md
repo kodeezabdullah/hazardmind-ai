@@ -68,7 +68,7 @@ final_reports     <- Agent 4 writes
 - [x] Step 2: DB connection
 - [x] Step 3: Models
 - [x] Step 4: POST /analyze
-- [ ] Step 5: GET /status
+- [x] Step 5: GET /status
 - [ ] Step 6: GET /results
 - [ ] Step 7: GET /band-log
 - [ ] Step 8: Orchestrator
