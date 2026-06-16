@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import asyncpg
 import httpx
 from band import Agent
-from band.adapters import AnthropicAdapter
+from band.adapters.langgraph import LangGraphAdapter
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 from dotenv import load_dotenv
 
 from analyzer import run_parallel_analysis
@@ -196,11 +198,16 @@ Always include event_id in every response.
 If overall_severity is CRITICAL flag it explicitly.
 Never go silent — if analysis fails send error status to Hanan."""
 
-adapter = AnthropicAdapter(
-    model="claude-opus-4-8",
-    provider_key=os.getenv("AIML_API_KEY"),
-    system_prompt=SYSTEM_PROMPT,
+llm = ChatOpenAI(
+    model="moonshotai/Kimi-K2.6",
+    api_key=os.getenv("FEATHERLESS_API_KEY"),
+    base_url="https://api.featherless.ai/v1",
     max_tokens=4096,
+)
+adapter = LangGraphAdapter(
+    llm=llm,
+    checkpointer=InMemorySaver(),
+    custom_section=SYSTEM_PROMPT,
 )
 
 if __name__ == "__main__":

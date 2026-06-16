@@ -36,7 +36,9 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from band import Agent
-from band.adapters.anthropic import AnthropicAdapter
+from band.adapters.langgraph import LangGraphAdapter
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
 
 from boundary import (
     get_analysis_bbox,
@@ -985,16 +987,21 @@ async def main() -> None:
 
     agent_id = _require("BAND_AGENT_ID")
     api_key = _require("BAND_API_KEY")
-    anthropic_api_key = _require("ANTHROPIC_API_KEY")
+    featherless_api_key = _require("FEATHERLESS_API_KEY")
     rest_url = os.getenv("THENVOI_REST_URL", "https://app.band.ai")
     ws_url = os.getenv(
         "THENVOI_WS_URL", "wss://app.band.ai/api/v1/socket/websocket"
     )
 
-    adapter = AnthropicAdapter(
-        model="claude-sonnet-4-5-20250929",
-        provider_key=anthropic_api_key,
-        system_prompt=SYSTEM_PROMPT,
+    llm = ChatOpenAI(
+        model="moonshotai/Kimi-K2.6",
+        api_key=featherless_api_key,
+        base_url="https://api.featherless.ai/v1",
+    )
+    adapter = LangGraphAdapter(
+        llm=llm,
+        checkpointer=InMemorySaver(),
+        custom_section=SYSTEM_PROMPT,
         additional_tools=[PROCESS_DISASTER_TOOL],
     )
 

@@ -163,17 +163,23 @@ async def run_live_agent() -> None:
 
     try:
         from band import Agent
-        from band.adapters.anthropic import AnthropicAdapter
+        from band.adapters.langgraph import LangGraphAdapter
+        from langchain_openai import ChatOpenAI
+        from langgraph.checkpoint.memory import InMemorySaver
     except ImportError as exc:
         raise SystemExit(f"Band SDK import failed: {_safe_error_message(exc)}") from exc
 
-    adapter = AnthropicAdapter(
-        model=config.model,
-        provider_key=config.anthropic_api_key,
-        system_prompt=SYSTEM_PROMPT,
+    llm = ChatOpenAI(
+        model="moonshotai/Kimi-K2.6",
+        api_key=os.getenv("FEATHERLESS_API_KEY", ""),
+        base_url="https://api.featherless.ai/v1",
+    )
+    adapter = LangGraphAdapter(
+        llm=llm,
+        checkpointer=InMemorySaver(),
+        custom_section=SYSTEM_PROMPT,
         additional_tools=[REPORT_TOOL],
     )
-    _apply_anthropic_base_url(adapter, config)
 
     agent = Agent.create(
         adapter=adapter,
@@ -221,8 +227,7 @@ def print_runtime_status(config: BandRuntimeConfig) -> None:
     statuses = {
         "BAND_AGENT_ID": bool(config.agent_id),
         "BAND_API_KEY": bool(config.api_key),
-        "ANTHROPIC_API_KEY": bool(config.anthropic_api_key),
-        "ANTHROPIC_BASE_URL": bool(config.anthropic_base_url),
+        "FEATHERLESS_API_KEY": bool(os.getenv("FEATHERLESS_API_KEY")),
         "THENVOI_REST_URL": bool(config.rest_url),
         "THENVOI_WS_URL": bool(config.ws_url),
     }
@@ -236,22 +241,9 @@ def required_missing(config: BandRuntimeConfig) -> list[str]:
         missing.append("BAND_AGENT_ID")
     if not config.api_key:
         missing.append("BAND_API_KEY")
-    if not config.anthropic_api_key:
-        missing.append("ANTHROPIC_API_KEY")
+    if not os.getenv("FEATHERLESS_API_KEY"):
+        missing.append("FEATHERLESS_API_KEY")
     return missing
-
-
-def _apply_anthropic_base_url(adapter: Any, config: BandRuntimeConfig) -> None:
-    if not config.anthropic_base_url:
-        return
-    try:
-        from anthropic import AsyncAnthropic
-    except ImportError:
-        return
-    adapter.client = AsyncAnthropic(
-        api_key=config.anthropic_api_key,
-        base_url=config.anthropic_base_url,
-    )
 
 
 def _agent_config_value(config: dict[str, Any], section: str, key: str) -> str:

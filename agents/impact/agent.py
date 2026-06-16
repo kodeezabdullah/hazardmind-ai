@@ -209,23 +209,27 @@ async def main() -> None:
 
     try:
         from band import Agent
-        from band.adapters import AnthropicAdapter
+        from band.adapters.langgraph import LangGraphAdapter
+        from langchain_openai import ChatOpenAI
+        from langgraph.checkpoint.memory import InMemorySaver
     except ImportError:
         logger.error(
-            "band-sdk not installed. Run: pip install band-sdk[anthropic]"
+            "band-sdk not installed. Run: pip install band-sdk[langgraph] langchain-openai"
         )
         raise
 
-    # Band per-turn LLM stays on the Anthropic adapter (Anthropic /v1/messages
-    # protocol). The provider key is the AIML key and the AsyncAnthropic SDK
-    # reads ANTHROPIC_BASE_URL from the env, so this routes through the AIML
-    # Anthropic-compatible proxy. GPT is NOT used here — AIML does not serve GPT
-    # on /v1/messages; GPT is the last-resort fallback inside the intelligence
-    # layer (shared/utils/llm_fallback.py) only.
-    adapter = AnthropicAdapter(
-        provider_key=os.getenv("AIML_API_KEY", ""),
-        model="claude-opus-4-8",
-        system_prompt=SYSTEM_PROMPT,
+    # Band per-turn LLM runs on the LangGraph adapter backed by Featherless
+    # (OpenAI-compatible /v1/chat/completions). The intelligence layer
+    # (shared/utils/llm_fallback.py) keeps its own AIML/GPT last-resort chain.
+    llm = ChatOpenAI(
+        model="moonshotai/Kimi-K2.6",
+        api_key=os.getenv("FEATHERLESS_API_KEY", ""),
+        base_url="https://api.featherless.ai/v1",
+    )
+    adapter = LangGraphAdapter(
+        llm=llm,
+        checkpointer=InMemorySaver(),
+        custom_section=SYSTEM_PROMPT,
         additional_tools=[run_impact_analysis],
     )
 
