@@ -265,6 +265,16 @@ class OrchestratorAgent:
 
     # -- helpers --------------------------------------------------------------
 
+    def _room(self, event_id: str) -> str | None:
+        """Return the dynamic Band room id for this event, if one was set.
+
+        start_pipeline() stores the per-event room on self._context so the
+        deeper helpers (cross-validation _say, broadcasts) post to the same
+        room without threading room_id through every signature. Falls back to
+        None, which band_client resolves to the static BAND_ROOM_ID.
+        """
+        return self._context.get(event_id, {}).get("room_id")
+
     async def _say(
         self,
         receiver_agent: str,
@@ -276,8 +286,16 @@ class OrchestratorAgent:
         anomalies=None,
         questions=None,
         event_id: str | None = None,
+        room_id: str | None = None,
     ) -> str:
-        """Generate + post a natural orchestrator message to one agent."""
+        """Generate + post a natural orchestrator message to one agent.
+
+        When `event_id` is given it is appended to the message body (so the post
+        is scoped to the event) AND used to resolve the event's Band room.
+        `room_id` lets a caller route the post to the event's room WITHOUT
+        appending the event_id line — used by cross-validation discussion
+        messages, whose body is left as-is for the existing tests.
+        """
         msg = await generate_natural_message(
             sender_agent=ORCHESTRATOR_AGENT,
             sender_role=ORCHESTRATOR_ROLE,
@@ -292,7 +310,12 @@ class OrchestratorAgent:
         )
         if event_id:
             msg = f"{msg}\nevent_id: {event_id}"
-        await send_text_message(msg, mentions=mentions_for(receiver_handle))
+        target_room = room_id or (self._room(event_id) if event_id else None)
+        await send_text_message(
+            msg,
+            mentions=mentions_for(receiver_handle),
+            room_id=target_room,
+        )
         return msg
 
     def _agent_data(self, event_id: str, agent: str) -> dict:
@@ -353,24 +376,33 @@ class OrchestratorAgent:
 
     # -- pipeline -------------------------------------------------------------
 
-    async def start_pipeline(self, event_id: str, disaster_data: dict) -> None:
-        """Move the event into satellite processing and hand it to Agent 1."""
+    async def start_pipeline(
+        self, event_id: str, disaster_data: dict, room_id: str | None = None
+    ) -> None:
+        """Move the event into satellite processing and hand it to Agent 1.
+
+        room_id is the dynamic Band room created for this event (router.py).
+        It is stored on self._context and threaded through every post so the
+        whole pipeline conversation stays in that one room; when None, posts
+        fall back to the static BAND_ROOM_ID.
+        """
         disaster_type = disaster_data.get("disaster_type")
         location = disaster_data.get("location")
         magnitude = disaster_data.get("magnitude") or 0
 
-        self._context[event_id] = {"disaster": disaster_data}
+        self._context[event_id] = {"disaster": disaster_data, "room_id": room_id}
 
         # Reasoning thought (kept text-searchable for the existing test).
         await send_thought(
             f"New disaster event received: {disaster_type} in {location}. "
             "Orchestrator analyzing incoming disaster report before dispatching "
-            "the satellite team."
+            "the satellite team.",
+            room_id=room_id,
         )
-        await send_task_update("Pipeline", "started")
+        await send_task_update("Pipeline", "started", room_id=room_id)
 
         await update_event_status(event_id, status="processing", step="satellite")
-        await send_task_update("Satellite", "processing")
+        await send_task_update("Satellite", "processing", room_id=room_id)
 
         # Natural dispatch message to satellite (judges read this).
         urgency = "high" if (magnitude or 0) > 5 else "normal"
@@ -397,11 +429,12 @@ class OrchestratorAgent:
             location=location,
             disaster_type=disaster_type,
             magnitude=magnitude,
+            room_id=room_id,
         )
 
         logger.info("Pipeline started for event_id=%s", event_id)
 
-    async def monitor_progress(self, event_id: str) -> str:
+    async def monitor_progress(self, event_id: str, room_id: str | None = None) -> str:
         """Watch the Band room and advance the DB as each agent completes.
 
         On every poll cycle we first fetch the full room transcript via the
@@ -417,6 +450,12 @@ class OrchestratorAgent:
         nudge or a guess — only a genuine completion signal from the agent moves
         a stage forward.
         """
+        # Keep the per-event room authoritative on context (start_pipeline
+        # normally sets it; honor an explicit room_id here too).
+        if room_id is not None:
+            self._context.setdefault(event_id, {})["room_id"] = room_id
+        room_id = self._room(event_id)
+
         stage = 0
 
         while stage < len(PIPELINE_TRANSITIONS):
@@ -425,7 +464,7 @@ class OrchestratorAgent:
 
             # Pull the full room transcript into inbound_store so we can see
             # completions from agents that didn't @mention the orchestrator.
-            await poll_room_into_store(event_id)
+            await poll_room_into_store(event_id, room_id=room_id)
 
             if await self._agent_completed(event_id, agent):
                 await self._advance(event_id, t)
@@ -496,10 +535,11 @@ class OrchestratorAgent:
         if agent == "satellite":
             await self._persist_satellite(event_id, data)
 
+        room_id = self._room(event_id)
         await update_event_status(
             event_id, status=transition["status"], step=transition["step"]
         )
-        await send_task_update(transition["task_name"], "complete")
+        await send_task_update(transition["task_name"], "complete", room_id=room_id)
         logger.info(
             "event_id=%s: %s complete -> %s/%s",
             event_id,
@@ -517,7 +557,9 @@ class OrchestratorAgent:
         if next_handle is None:
             return
 
-        await send_task_update(transition["step"].capitalize(), "processing")
+        await send_task_update(
+            transition["step"].capitalize(), "processing", room_id=room_id
+        )
         await self._handoff(event_id, transition, data, anomalies, questions, urgency)
 
     async def _handoff(
@@ -561,7 +603,10 @@ class OrchestratorAgent:
             "anomalies": anomalies,
         }
         await send_handoff(
-            natural, structured, mentions=mentions_for(transition["next_handle"])
+            natural,
+            structured,
+            mentions=mentions_for(transition["next_handle"]),
+            room_id=self._room(event_id),
         )
 
     @staticmethod
@@ -651,6 +696,7 @@ class OrchestratorAgent:
                         "Sensor anomaly or genuine secondary flooding? "
                         "Please verify the affected coordinates."
                     ],
+                    room_id=self._room(event_id),
                 )
                 await asyncio.sleep(DISCUSSION_WAIT_SECONDS)
 
@@ -670,6 +716,7 @@ class OrchestratorAgent:
                     ),
                     urgency="high",
                     questions=["Can you re-run classification to tighten confidence?"],
+                    room_id=self._room(event_id),
                 )
 
             # Trigger 4: GDACS shows risk but satellite found no zones.
@@ -683,6 +730,7 @@ class OrchestratorAgent:
                     findings="GDACS shows active risk but your sweep returned zero zones",
                     urgency="high",
                     questions=["Please investigate — possible cloud cover or missed pass?"],
+                    room_id=self._room(event_id),
                 )
 
         if agent == "hazard":
@@ -697,6 +745,7 @@ class OrchestratorAgent:
                     f"{all_handles_text()} CRITICAL event confirmed. "
                     "All agents prioritize speed.",
                     mentions=mentions_for_all(),
+                    room_id=self._room(event_id),
                 )
             # Trigger 4b: HIGH risk but few satellite zones.
             if level == "HIGH" and sat_zones is not None and sat_zones < MIN_SATELLITE_ZONES:
@@ -714,6 +763,7 @@ class OrchestratorAgent:
                     ),
                     urgency="high",
                     questions=["Can you reconcile risk level against the mapped extent?"],
+                    room_id=self._room(event_id),
                 )
 
         # Trigger 5: multiple disasters detected (any agent may report this).
@@ -728,6 +778,7 @@ class OrchestratorAgent:
                 findings=f"{len(disasters)} concurrent disasters detected",
                 urgency="high",
                 questions=["Team, which event should we prioritize first?"],
+                room_id=self._room(event_id),
             )
 
         # Carry CRITICAL urgency from large extent too.
@@ -765,21 +816,24 @@ class OrchestratorAgent:
                 "analysis delivered. Report and map ready for NDMA dispatch. "
                 "All agents performed well."
             )
-        await send_text_message(summary, mentions=mentions_for_all())
-        await send_task_update("Pipeline", "complete")
+        room_id = self._room(event_id)
+        await send_text_message(summary, mentions=mentions_for_all(), room_id=room_id)
+        await send_task_update("Pipeline", "complete", room_id=room_id)
 
     async def handle_failure(self, event_id: str, agent: str, error: str) -> None:
         """Mark the event failed, log it, and alert the Band room."""
         await update_event_status(event_id, status="failed", step="failed")
         logger.error("event_id=%s: %s failed: %s", event_id, agent, error)
 
+        room_id = self._room(event_id)
         try:
             await send_event(
                 "error",
                 "Pipeline Failed",
                 {"agent": agent, "error": error, "event_id": event_id},
+                room_id=room_id,
             )
-            await send_task_update("Pipeline", "failed", result=error)
+            await send_task_update("Pipeline", "failed", result=error, room_id=room_id)
 
             # Natural, urgent alert (still carries agent + event_id for parsing).
             try:
@@ -806,7 +860,9 @@ class OrchestratorAgent:
                 alert = f"{alert} (agent: {agent})"
             if event_id not in alert:
                 alert = f"{alert}\nevent_id: {event_id}"
-            await send_text_message(alert, mentions=mentions_for_all())
+            await send_text_message(
+                alert, mentions=mentions_for_all(), room_id=room_id
+            )
         except Exception:  # noqa: BLE001 - alerting must never mask the failure
             logger.exception(
                 "event_id=%s: failed to post failure alert to Band", event_id

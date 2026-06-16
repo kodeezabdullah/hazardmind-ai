@@ -184,6 +184,60 @@ REPORT_AGENT_ID    = agent 4 (blank -> @handle text fallback)
 - [x] Step 9.6: Fix — events on /events channel (no JSON in chat); handoff
       @mentions match the natural message target (satellite/hazard/impact/report)
 - [x] Step 10: Full end-to-end pipeline test — PASS (see below)
+- [x] Step 11: Dynamic per-event Band rooms — IMPLEMENTED, gated OFF (see below)
+
+## Step 11: Dynamic per-event Band rooms — IMPLEMENTED, gated OFF
+
+Goal: give each /analyze event its own Band room (scoped transcript, no
+cross-event chatter) instead of the one shared `BAND_ROOM_ID`.
+
+**Implemented and live-verified:**
+- `band_client.create_event_room(event_id, location)` — creates a room via the
+  Band SDK REST client (`thenvoi_rest`) and posts an intro message that sets the
+  room title (Band has no create-time name; the title comes from the first
+  message). Room create + post are confirmed working live.
+- `band_room_id TEXT` column on `disaster_events` (added with
+  `ADD COLUMN IF NOT EXISTS` in `create_disaster_event`, also returned by
+  `get_event_status`); the room id is persisted per event.
+- `room_id` is threaded through the whole pipeline: `router._analyze/_monitor`,
+  `orchestrator.start_pipeline/monitor_progress/_advance/_handoff/_say/
+  cross_validate_and_discuss/on_pipeline_complete/handle_failure`, and every
+  `band_client` send (`send_text_message/_event/_thought/_task_update/handoff`,
+  `notify_satellite`, `poll_room_into_store`). The orchestrator stores the room
+  on `self._context[event_id]["room_id"]` and reads it via `self._room()`. A
+  `None` room_id falls back to the static `BAND_ROOM_ID` everywhere.
+- `AnalyzeResponse.band_room_id` returns the room id to the caller.
+
+**Why it is OFF by default (`DYNAMIC_BAND_ROOMS=false`) — the blocker:**
+The orchestrator's Band API key can only populate a room it creates with
+**same-owner** agents. Verified live against app.band.ai:
+- Room create ✅; post message ✅.
+- Satellite (`@abdullah.gis.services/hazardmind-satellite`, SAME owner as the
+  orchestrator) **auto-joins** the new room.
+- Hazard / impact / report belong to **different** Band owner accounts
+  (`@khurramhamza120`, `@geospatial.9660`, `@zohairabidi9585`). The orchestrator
+  key **cannot** add them: explicit `add_participant` → **403 forbidden**, and
+  posting a message that `@mentions` a non-member → **422 unprocessable**.
+  Self-add by the agent's own key is also rejected (Band uses an owner-invite
+  model, not foreign-key self-join).
+
+So a dynamic room would contain only the orchestrator + satellite; handoffs to
+the other three agents could not even be posted (422), and the pipeline would
+hang. The shared `BAND_ROOM_ID` works today only because all five agents were
+**manually invited** into it once by their respective owners via band.ai.
+
+**To enable dynamic rooms later**, one of these must hold, then flip
+`DYNAMIC_BAND_ROOMS=true`:
+1. Re-register all four pipeline agents under ONE Band owner (they would then
+   auto-join like satellite does), or
+2. Band exposes an invite/accept flow the orchestrator API key can drive, or
+3. Each agent owner runs a one-time per-room join (defeats "per event", noted
+   for completeness).
+
+The SDK side needs **no change**: a pipeline agent's `run_forever()` starts a
+`PresenceManager` that auto-subscribes to any room it is added to
+(`RoomAddedEvent` → `link.subscribe_room`). The only gap is membership, above.
+`Agent` has no `join_room`/`switch_room` method — membership is server-driven.
 
 ## Step 10: End-to-end pipeline test — DONE
 

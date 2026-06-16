@@ -712,6 +712,7 @@ async def send_handoff(
     data: dict,
     mentions: Optional[list[str]] = None,
     title: str = "agent_result",
+    room_id: Optional[str] = None,
 ) -> None:
     """Send a handoff as ONE Band message: natural text + JSON appended at end.
 
@@ -721,7 +722,7 @@ async def send_handoff(
     line carries both — no separate /events post.
     """
     content = f"{natural_msg}\n\n{json.dumps(data, indent=2)}"
-    await send_text_message(content, mentions=mentions)
+    await send_text_message(content, mentions=mentions, room_id=room_id)
 
 
 def handoff_message(handle: str, event_id: str, **fields: Any) -> tuple[str, list[str]]:
@@ -744,6 +745,7 @@ async def notify_satellite(
     location: str,
     disaster_type: str,
     magnitude: Optional[float],
+    room_id: Optional[str] = None,
 ) -> dict:
     """Send the initial pipeline message to the satellite agent."""
     content, mentions = handoff_message(
@@ -753,4 +755,107 @@ async def notify_satellite(
         disaster_type=disaster_type,
         magnitude=magnitude,
     )
-    return await send_text_message(content, mentions=mentions)
+    return await send_text_message(content, mentions=mentions, room_id=room_id)
+
+
+# --- Dynamic per-event room creation -----------------------------------------
+
+
+# Map each event's first message into a recognizable room title. Band has no
+# create-time "name" field — the room title is auto-generated from the first
+# message posted — so we lead with this so the room is identifiable in band.ai.
+def event_room_intro(location: str, event_id: str) -> str:
+    return f"HazardMind — {location} disaster response (event {event_id[:8]})"
+
+
+async def create_event_room(event_id: str, location: str) -> str:
+    """Create a fresh Band room for one disaster event and add every agent.
+
+    Each /analyze run gets its own room so the transcript is scoped to a single
+    event (no cross-event chatter, no shared-room race on inbound_store). The
+    orchestrator and all four pipeline agents are added as participants; agents
+    whose *_AGENT_ID is unset in .env are skipped. Returns the new room id, which
+    the caller threads through start_pipeline()/monitor_progress() and persists
+    on the disaster_events row.
+
+    Uses the Band SDK's REST client (thenvoi_rest) so the request envelopes match
+    the API exactly: POST /api/v1/agent/chats takes {"chat": {task_id?}} (there
+    is NO create-time name — the room title is derived from the first message),
+    and POST .../participants takes {"participant": {participant_id, role}}.
+    """
+    if not BAND_API_KEY:
+        raise RuntimeError("BAND_API_KEY is not configured")
+
+    from band.client.rest import (
+        AsyncRestClient,
+        ChatRoomRequest,
+        DEFAULT_REQUEST_OPTIONS,
+        ParticipantRequest,
+    )
+    from thenvoi_rest.core.api_error import ApiError
+
+    client = AsyncRestClient(api_key=BAND_API_KEY, base_url=BAND_REST_URL)
+
+    created = await client.agent_api_chats.create_agent_chat(
+        chat=ChatRoomRequest(),
+        request_options=DEFAULT_REQUEST_OPTIONS,
+    )
+    room_id = str(created.data.id)
+    logger.info("Band room created for event %s: %s", event_id, room_id)
+
+    # Try to add every configured pipeline agent as a participant. This is
+    # best-effort: the orchestrator (room owner) is auto-added on creation, so
+    # re-adding it returns 409 (already present). Band may also reject adding a
+    # *peer* agent with another agent's key (403 forbidden) — that does NOT block
+    # messaging, since posts @mention the target agent regardless of membership.
+    # So neither 409 nor 403 is fatal; the room is usable either way.
+    participant_ids = [
+        BAND_AGENT_ID,
+        SATELLITE_AGENT_ID,
+        HAZARD_AGENT_ID,
+        IMPACT_AGENT_ID,
+        REPORT_AGENT_ID,
+    ]
+    for agent_id in participant_ids:
+        if not agent_id:
+            continue
+        try:
+            await client.agent_api_participants.add_agent_chat_participant(
+                chat_id=room_id,
+                participant=ParticipantRequest(participant_id=agent_id, role="member"),
+                request_options=DEFAULT_REQUEST_OPTIONS,
+            )
+            logger.info("Band room %s: added agent %s", room_id, agent_id)
+        except ApiError as exc:
+            status = getattr(exc, "status_code", None)
+            if status == 409:  # already a participant (owner / re-add)
+                logger.info("Band room %s: agent %s already present", room_id, agent_id)
+            elif status == 403:  # not permitted to add a peer agent — non-fatal
+                logger.warning(
+                    "Band room %s: not permitted to pre-add agent %s "
+                    "(messaging still works via @mention)",
+                    room_id,
+                    agent_id,
+                )
+            else:
+                logger.warning(
+                    "Band room %s: add agent %s failed (status=%s)",
+                    room_id,
+                    agent_id,
+                    status,
+                )
+        except Exception:  # noqa: BLE001 - one agent failing must not abort
+            logger.exception(
+                "Band room %s: failed to add agent %s", room_id, agent_id
+            )
+
+    # Band derives the room title from its first message; post an intro so the
+    # room is recognizable in band.ai. Best-effort — never block room creation.
+    try:
+        await send_text_message(
+            event_room_intro(location, event_id), room_id=room_id
+        )
+    except Exception:  # noqa: BLE001 - title intro is best-effort
+        logger.exception("Band room %s: failed to post intro message", room_id)
+
+    return room_id
