@@ -1558,6 +1558,26 @@ def process_satellite_imagery(
     }
 
 
+async def cleanup_event_temp(event_id: str) -> None:
+    """Remove an event's extracted bands + exported PNGs after R2 upload.
+
+    Deletes only `<temp>/hazardmind-satellite/<event_id>/` — the extracted band
+    rasters and the PNG/GeoJSON outputs (including per-city subdirs). The
+    downloaded `.zip` product archives live directly under TEMP_ROOT (keyed by
+    product Id, not event_id) and are intentionally kept, so a re-process of the
+    same event reuses the cached download instead of re-fetching hundreds of MB.
+    """
+    import shutil
+
+    temp_dir = os.path.join(TEMP_ROOT, str(event_id))
+    if os.path.isdir(temp_dir):
+        try:
+            shutil.rmtree(temp_dir)
+            logger.info("[Cleanup] Removed %s", temp_dir)
+        except OSError as exc:
+            logger.warning("[Cleanup] Could not remove %s: %s", temp_dir, exc)
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,

@@ -49,7 +49,7 @@ from boundary import (
 from confidence_tracker import ConfidenceTracker
 from cross_validator import CrossValidator
 from intelligence import SatelliteIntelligence
-from processor import process_satellite_imagery
+from processor import cleanup_event_temp, process_satellite_imagery
 from r2_upload import check_demo_cache, upload_all_results
 from sentinel import (
     authenticate_copernicus,
@@ -674,6 +674,12 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                 len(cities_payload),
                 event_id,
             )
+
+        # (h.3) R2 upload done — drop this event's extracted bands + PNGs from
+        # the temp dir. The downloaded .zip product archives are kept (see
+        # cleanup_event_temp) so a re-process reuses the cached download. Runs
+        # from this sync pipeline via asyncio.run; failures are non-fatal.
+        asyncio.run(cleanup_event_temp(event_id))
 
         # CROSS-VALIDATION — check the satellite result against every reachable
         # external source (GDACS / USGS / cloud / index physics / coverage /

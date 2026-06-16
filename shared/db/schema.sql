@@ -38,6 +38,8 @@ CREATE INDEX idx_hazard_zones_event
 ON hazard_zones(event_id);
 CREATE INDEX idx_hazard_zones_geometry
 ON hazard_zones USING GIST(geometry);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hazard_zones_event_type
+ON hazard_zones(event_id, hazard_type);
 
 CREATE TABLE IF NOT EXISTS impact_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

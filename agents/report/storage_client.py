@@ -38,7 +38,7 @@ def upload_file_to_r2(local_path: str, object_key: str, content_type: str) -> st
             str(path),
             os.environ["CLOUDFLARE_R2_BUCKET"],
             normalized_key,
-            ExtraArgs={"ContentType": content_type},
+            ExtraArgs={"ContentType": content_type, "ACL": "public-read"},
         )
     except Exception as exc:
         raise RuntimeError(f"R2 upload failed for object '{normalized_key}': {type(exc).__name__}") from None

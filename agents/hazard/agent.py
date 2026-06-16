@@ -80,6 +80,15 @@ async def write_to_db(result: dict) -> None:
                     confirmed_by, flood_depth_estimate, earthquake_mmi,
                     landslide_probability, overall_confidence, created_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (event_id, hazard_type) DO UPDATE SET
+                    risk_level = EXCLUDED.risk_level,
+                    severity = EXCLUDED.severity,
+                    confirmed_by = EXCLUDED.confirmed_by,
+                    flood_depth_estimate = EXCLUDED.flood_depth_estimate,
+                    earthquake_mmi = EXCLUDED.earthquake_mmi,
+                    landslide_probability = EXCLUDED.landslide_probability,
+                    overall_confidence = EXCLUDED.overall_confidence,
+                    created_at = EXCLUDED.created_at
                 """,
                 result["event_id"],
                 row["risk_level"],
