@@ -187,7 +187,7 @@ async def generate_decision_brief(report_context: dict, intelligence: dict) -> d
             max_tokens=1000,
             purpose="decision_brief",
         )
-        source = "aiml:gpt-4.5" if response["ok"] and response["content"] else "deterministic_fallback"
+        source = f"aiml:{AIML_GPT_LAST_RESORT}" if response["ok"] and response["content"] else "deterministic_fallback"
 
     try:
         data = json.loads(_extract_json(response["content"])) if response["ok"] else fallback

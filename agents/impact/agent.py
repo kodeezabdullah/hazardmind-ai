@@ -216,12 +216,17 @@ async def main() -> None:
         )
         raise
 
+    # Band per-turn LLM stays on the Anthropic adapter (Anthropic /v1/messages
+    # protocol). The provider key is the AIML key and the AsyncAnthropic SDK
+    # reads ANTHROPIC_BASE_URL from the env, so this routes through the AIML
+    # Anthropic-compatible proxy. GPT is NOT used here — AIML does not serve GPT
+    # on /v1/messages; GPT is the last-resort fallback inside the intelligence
+    # layer (shared/utils/llm_fallback.py) only.
     adapter = AnthropicAdapter(
-        api_key=os.getenv("AIML_API_KEY", ""),
-        base_url=os.getenv("ANTHROPIC_BASE_URL", "https://api.aimlapi.com/v1"),
+        provider_key=os.getenv("AIML_API_KEY", ""),
         model="claude-opus-4-8",
         system_prompt=SYSTEM_PROMPT,
-        tools=[run_impact_analysis],
+        additional_tools=[run_impact_analysis],
     )
 
     agent = Agent.create(

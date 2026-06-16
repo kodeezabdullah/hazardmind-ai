@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 
 AIML_BASE_URL = "https://api.aimlapi.com/v1"
 AIML_OPUS = "claude-opus-4-8"
-AIML_GPT_LAST_RESORT = "gpt-4.5"
+AIML_GPT_LAST_RESORT = os.getenv("GPT_FALLBACK_MODEL", "gpt-5.5-2026-04-23")
 AIML_MODEL = AIML_OPUS
 FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1"
 FEATHERLESS_KIMI = "moonshotai/Kimi-K2.6"
@@ -507,7 +507,7 @@ async def featherless_json_call(
 
 async def aiml_text_call(prompt: str, system: str, model: str | None = None, max_tokens: int = 1200) -> str:
     """
-    Calls AI/ML API and returns text. Tries GPT-4.5 as a last-resort fallback if Opus fails.
+    Calls AI/ML API and returns text. Tries GPT-5.5 as a last-resort fallback if Opus fails.
     """
     selected_model = model or AIML_OPUS
     response = await call_aiml(prompt, system=system, model=selected_model, max_tokens=max_tokens, purpose="aiml_text")

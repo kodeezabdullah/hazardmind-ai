@@ -3,7 +3,7 @@
 Routing table:
   low      → Featherless only (no Opus fallback)
   normal   → Featherless; if confidence < 0.6 → Opus
-  high     → Opus 4.8 directly; if Opus fails → GPT-4.5
+  high     → Opus 4.8 directly; if Opus fails → GPT-5.5
   critical → Opus 4.8 + Featherless verification; results combined
 
 Featherless chain (in order):
@@ -11,8 +11,8 @@ Featherless chain (in order):
   2. moonshotai/Kimi-K2.6
   3. Qwen/Qwen3.6-35B-A3B
 
-Opus 4.8 and GPT-4.5 both use the AIML API (same base_url, different model names).
-GPT-4.5 is only reached when Opus throws an exception or times out.
+Opus 4.8 and GPT-5.5 both use the AIML API (same base_url, different model names).
+GPT-5.5 is only reached when Opus throws an exception or times out.
 """
 
 import asyncio
@@ -36,7 +36,9 @@ FEATHERLESS_TERTIARY = "Qwen/Qwen3.6-35B-A3B"
 FEATHERLESS_CHAIN = [FEATHERLESS_PRIMARY, FEATHERLESS_SECONDARY, FEATHERLESS_TERTIARY]
 
 OPUS_MODEL = "claude-opus-4-8"
-GPT_MODEL = "gpt-4.5"
+# Last-resort GPT via AIML. GPT-5.5 is served under its dated id
+# `gpt-5.5-2026-04-23` (bare `gpt-5.5` 404s). Override with GPT_FALLBACK_MODEL.
+GPT_MODEL = os.getenv("GPT_FALLBACK_MODEL", "gpt-5.5-2026-04-23")
 
 
 # ── Clients ─────────────────────────────────────────────────────────────────
@@ -150,8 +152,8 @@ async def opus_call(prompt: str) -> dict | None:
 
 
 async def gpt_call(prompt: str) -> dict | None:
-    """Call GPT-4.5 via AIML API. LAST RESORT — only when Opus throws an exception."""
-    logger.warning("[router] GPT-4.5 LAST RESORT call via AIML API")
+    """Call GPT-5.5 via AIML API. LAST RESORT — only when Opus throws an exception."""
+    logger.warning("[router] GPT-5.5 LAST RESORT call via AIML API")
     return await _call_model(_aiml_client(), GPT_MODEL, prompt, "gpt")
 
 
@@ -189,7 +191,7 @@ async def smart_llm_call(
         (result_dict | None, model_used: str, reasoning: str)
 
     Never use Opus for routine (low/normal when Featherless confidence ≥ 0.6).
-    GPT-4.5 only reached when Opus throws an exception.
+    GPT-5.5 only reached when Opus throws an exception.
     """
     logger.info("[router:%s] smart_llm_call criticality=%s", task_name, criticality)
 
@@ -218,18 +220,18 @@ async def smart_llm_call(
         if result is not None:
             return result, OPUS_MODEL, reasoning
 
-        logger.warning("[router:%s] Opus failed in high-criticality path — GPT-4.5 last resort", task_name)
+        logger.warning("[router:%s] Opus failed in high-criticality path — GPT-5.5 last resort", task_name)
         result = await gpt_call(prompt)
-        return result, GPT_MODEL, "high → Opus failed → GPT-4.5 last resort"
+        return result, GPT_MODEL, "high → Opus failed → GPT-5.5 last resort"
 
     elif criticality == "critical":
         reasoning = "critical → Opus 4.8 primary + Featherless verification"
         opus_result = await opus_call(prompt)
         if opus_result is None:
-            logger.error("[router:%s] Opus failed in critical path — GPT-4.5 last resort", task_name)
+            logger.error("[router:%s] Opus failed in critical path — GPT-5.5 last resort", task_name)
             opus_result = await gpt_call(prompt)
             if opus_result is None:
-                logger.error("[router:%s] GPT-4.5 also failed — returning None", task_name)
+                logger.error("[router:%s] GPT-5.5 also failed — returning None", task_name)
                 return None, "none", "critical → all models failed"
 
         verify_prompt = (
