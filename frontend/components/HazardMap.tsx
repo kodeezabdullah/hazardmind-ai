@@ -7,7 +7,10 @@ import type { HazardMindResult, LayerState } from "../lib/types";
 type HazardMapProps = {
   result: HazardMindResult;
   layers: LayerState;
+  showHud?: boolean;
 };
+
+type LngLatPair = [number, number];
 
 const mapStyle: maplibregl.StyleSpecification = {
   version: 8,
@@ -32,7 +35,7 @@ const mapStyle: maplibregl.StyleSpecification = {
   ],
 };
 
-export function HazardMap({ result, layers }: HazardMapProps) {
+export function HazardMap({ result, layers, showHud = true }: HazardMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const loadedRef = useRef(false);
@@ -44,6 +47,7 @@ export function HazardMap({ result, layers }: HazardMapProps) {
     }
 
     const [west, south, east, north] = result.boundaries.bbox;
+    const initialBounds = getInitialBounds(result);
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: mapStyle,
@@ -173,13 +177,22 @@ export function HazardMap({ result, layers }: HazardMapProps) {
           .addTo(map);
       });
 
-      map.fitBounds(
-        [
-          [west, south],
-          [east, north],
-        ],
-        { padding: 54, duration: 0 },
-      );
+      map.resize();
+      map.fitBounds(initialBounds, {
+        padding: {
+          top: 90,
+          bottom: 90,
+          left: 90,
+          right: 90,
+        },
+        duration: 0,
+        maxZoom: 11,
+      });
+
+      const fittedZoom = map.getZoom();
+      if (Number.isFinite(fittedZoom)) {
+        map.setZoom(Math.max(map.getMinZoom(), fittedZoom - 0.4));
+      }
 
       applyVisibility(map, markersRef.current, layers);
     });
@@ -205,25 +218,29 @@ export function HazardMap({ result, layers }: HazardMapProps) {
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
-      <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-cyan-300/20 bg-slate-950/70 px-3 py-2 backdrop-blur">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-200">
-          Live Risk Surface
-        </p>
-        <p className="mt-1 text-xs text-slate-300">
-          {result.analysis.total_zones} zones / {result.analysis.affected_area_km2} km2 affected
-        </p>
-      </div>
-      <div className="pointer-events-none absolute bottom-4 left-4 rounded-md border border-violet-300/20 bg-slate-950/70 px-3 py-2 text-xs backdrop-blur">
-        <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-violet-200">
-          Layer Status
-        </p>
-        <div className="mt-1 flex flex-wrap gap-1.5">
-          <MapChip active={layers.hazardZones} label="zones" />
-          <MapChip active={layers.boundary} label="boundary" />
-          <MapChip active={layers.evacuationRoutes} label="routes" />
-          <MapChip active={layers.facilities} label="facilities" />
-        </div>
-      </div>
+      {showHud ? (
+        <>
+          <div className="pointer-events-none absolute left-4 top-4 rounded-md border border-cyan-300/20 bg-slate-950/70 px-3 py-2 backdrop-blur">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-cyan-200">
+              Live Risk Surface
+            </p>
+            <p className="mt-1 text-xs text-slate-300">
+              {result.analysis.total_zones} zones / {result.analysis.affected_area_km2} km2 affected
+            </p>
+          </div>
+          <div className="pointer-events-none absolute bottom-4 left-4 rounded-md border border-violet-300/20 bg-slate-950/70 px-3 py-2 text-xs backdrop-blur">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-violet-200">
+              Layer Status
+            </p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              <MapChip active={layers.hazardZones} label="zones" />
+              <MapChip active={layers.boundary} label="boundary" />
+              <MapChip active={layers.evacuationRoutes} label="routes" />
+              <MapChip active={layers.facilities} label="facilities" />
+            </div>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -234,6 +251,76 @@ function MapChip({ active, label }: { active: boolean; label: string }) {
       {label}
     </span>
   );
+}
+
+function getInitialBounds(result: HazardMindResult): maplibregl.LngLatBoundsLike {
+  const bboxBounds = boundsFromBbox(result.boundaries.bbox);
+  if (bboxBounds) {
+    return bboxBounds;
+  }
+
+  return (
+    boundsFromGeoJson(result.boundaries.merged_polygon) ??
+    boundsFromGeoJson(result.boundaries.region_boundary) ??
+    boundsFromGeoJson(result.analysis.zones) ??
+    boundsFromGeoJson(result.routes.evacuation_routes) ??
+    [
+      [result.boundaries.bbox[0], result.boundaries.bbox[1]],
+      [result.boundaries.bbox[2], result.boundaries.bbox[3]],
+    ]
+  );
+}
+
+function boundsFromBbox(bbox: [number, number, number, number]): [LngLatPair, LngLatPair] | null {
+  const [west, south, east, north] = bbox;
+  if (![west, south, east, north].every(Number.isFinite) || west === east || south === north) {
+    return null;
+  }
+  return [
+    [west, south],
+    [east, north],
+  ];
+}
+
+function boundsFromGeoJson(geojson: GeoJSON.GeoJsonObject | null | undefined): [LngLatPair, LngLatPair] | null {
+  if (!geojson) {
+    return null;
+  }
+
+  const points: LngLatPair[] = [];
+  collectCoordinates(geojson, points);
+  if (!points.length) {
+    return null;
+  }
+
+  const lngs = points.map(([lng]) => lng);
+  const lats = points.map(([, lat]) => lat);
+  return [
+    [Math.min(...lngs), Math.min(...lats)],
+    [Math.max(...lngs), Math.max(...lats)],
+  ];
+}
+
+function collectCoordinates(value: unknown, points: LngLatPair[]) {
+  if (!Array.isArray(value)) {
+    if (value && typeof value === "object") {
+      Object.values(value).forEach((entry) => collectCoordinates(entry, points));
+    }
+    return;
+  }
+
+  if (
+    value.length >= 2 &&
+    typeof value[0] === "number" &&
+    typeof value[1] === "number" &&
+    Number.isFinite(value[0]) &&
+    Number.isFinite(value[1])
+  ) {
+    points.push([value[0], value[1]]);
+    return;
+  }
+
+  value.forEach((entry) => collectCoordinates(entry, points));
 }
 
 function applyVisibility(
