@@ -852,9 +852,27 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         return _error(event_id, f"Unexpected error: {exc}")
 
 
-# Custom tool definition: (Pydantic input model, callable). The tool name is
-# derived from the model class name -> "processdisaster".
-PROCESS_DISASTER_TOOL = (ProcessDisasterInput, run_pipeline)
+# Custom tool definition. The LangGraph adapter feeds `additional_tools`
+# straight into LangChain's `create_agent`/`create_tool`, which requires a real
+# LangChain tool (a callable with a `__name__`), not the `(PydanticModel,
+# callable)` tuple the old Anthropic adapter accepted. Wrap `run_pipeline` as a
+# StructuredTool whose args schema is ProcessDisasterInput; keep the tool name
+# `processdisaster` (referenced by SYSTEM_PROMPT).
+def _build_process_disaster_tool():
+    from langchain_core.tools import StructuredTool
+
+    async def _coroutine(**kwargs) -> str:
+        return await run_pipeline(ProcessDisasterInput(**kwargs))
+
+    return StructuredTool.from_function(
+        coroutine=_coroutine,
+        name="processdisaster",
+        description=run_pipeline.__doc__ or "Run the full satellite disaster pipeline.",
+        args_schema=ProcessDisasterInput,
+    )
+
+
+PROCESS_DISASTER_TOOL = _build_process_disaster_tool()
 
 
 # --------------------------------------------------------------------------- #
@@ -994,7 +1012,7 @@ async def main() -> None:
     )
 
     llm = ChatOpenAI(
-        model="moonshotai/Kimi-K2.6",
+        model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
         api_key=featherless_api_key,
         base_url="https://api.featherless.ai/v1",
     )

@@ -199,7 +199,7 @@ If overall_severity is CRITICAL flag it explicitly.
 Never go silent — if analysis fails send error status to Hanan."""
 
 llm = ChatOpenAI(
-    model="moonshotai/Kimi-K2.6",
+    model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
     api_key=os.getenv("FEATHERLESS_API_KEY"),
     base_url="https://api.featherless.ai/v1",
     max_tokens=4096,

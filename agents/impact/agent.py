@@ -222,7 +222,7 @@ async def main() -> None:
     # (OpenAI-compatible /v1/chat/completions). The intelligence layer
     # (shared/utils/llm_fallback.py) keeps its own AIML/GPT last-resort chain.
     llm = ChatOpenAI(
-        model="moonshotai/Kimi-K2.6",
+        model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
         api_key=os.getenv("FEATHERLESS_API_KEY", ""),
         base_url="https://api.featherless.ai/v1",
     )

@@ -111,7 +111,29 @@ async def _run_report_tool(params: RunReportFromBandMessage) -> str:
     return await run_report_from_band_message(params.band_message)
 
 
-REPORT_TOOL = (RunReportFromBandMessage, _run_report_tool)
+def _build_report_tool() -> Any:
+    """Build the report pipeline tool for the LangGraph adapter.
+
+    The Anthropic adapter accepts a ``(PydanticModel, callable)`` tuple, but the
+    LangGraph adapter feeds ``additional_tools`` straight into LangChain's
+    ``create_agent``/``create_tool``, which requires a real LangChain tool (a
+    callable with a ``__name__``), not a tuple. Wrap the callable as a
+    ``StructuredTool`` whose args schema is the existing Pydantic model.
+    """
+    from langchain_core.tools import StructuredTool
+
+    async def _coroutine(band_message: str) -> str:
+        return await run_report_from_band_message(band_message)
+
+    return StructuredTool.from_function(
+        coroutine=_coroutine,
+        name="run_report_pipeline",
+        description=RunReportFromBandMessage.__doc__ or "Run the HazardMind Report Agent pipeline.",
+        args_schema=RunReportFromBandMessage,
+    )
+
+
+REPORT_TOOL = _build_report_tool()
 
 
 def parse_args() -> argparse.Namespace:
@@ -170,7 +192,7 @@ async def run_live_agent() -> None:
         raise SystemExit(f"Band SDK import failed: {_safe_error_message(exc)}") from exc
 
     llm = ChatOpenAI(
-        model="moonshotai/Kimi-K2.6",
+        model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
         api_key=os.getenv("FEATHERLESS_API_KEY", ""),
         base_url="https://api.featherless.ai/v1",
     )
