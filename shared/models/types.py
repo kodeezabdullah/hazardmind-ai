@@ -4,7 +4,7 @@ from datetime import datetime
 
 @dataclass
 class DisasterEvent:
-    id: str
+    event_id: str
     disaster_type: str
     location: str
     bbox: List[float]

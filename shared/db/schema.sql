@@ -1,18 +1,11 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
--- Backend writes. event_id is generated ONCE by the orchestrator (UUID4)
--- and is the key every agent references via Band messages.
 CREATE TABLE IF NOT EXISTS disaster_events (
-    event_id UUID PRIMARY KEY,
+    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     disaster_type VARCHAR(50),
     location VARCHAR(200),
-    magnitude FLOAT,
     bbox FLOAT[],
-    status VARCHAR(20) NOT NULL DEFAULT 'received',
-    step VARCHAR(20) NOT NULL DEFAULT 'received',
-    progress INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS satellite_results (
@@ -24,19 +17,27 @@ CREATE TABLE IF NOT EXISTS satellite_results (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS hazard_zones (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+DROP TABLE IF EXISTS hazard_zones CASCADE;
+CREATE TABLE hazard_zones (
+    id SERIAL PRIMARY KEY,
     event_id UUID REFERENCES disaster_events(event_id),
-    flood_risk VARCHAR(20),
-    earthquake_risk VARCHAR(20),
-    landslide_risk VARCHAR(20),
-    overall_severity VARCHAR(20),
-    risk_geom GEOMETRY(MULTIPOLYGON, 4326),
-    created_at TIMESTAMP DEFAULT NOW()
+    geometry GEOMETRY(POLYGON, 4326),
+    risk_level TEXT,
+    hazard_type TEXT,
+    area_km2 FLOAT,
+    severity TEXT,
+    confirmed_by JSONB,
+    flood_depth_estimate TEXT,
+    earthquake_mmi FLOAT,
+    landslide_probability TEXT,
+    overall_confidence FLOAT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS
-    hazard_zones_geom_idx
-    ON hazard_zones USING GIST(risk_geom);
+
+CREATE INDEX idx_hazard_zones_event
+ON hazard_zones(event_id);
+CREATE INDEX idx_hazard_zones_geometry
+ON hazard_zones USING GIST(geometry);
 
 CREATE TABLE IF NOT EXISTS impact_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

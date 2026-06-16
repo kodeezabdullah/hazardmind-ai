@@ -7,17 +7,17 @@ Two modes of operation:
 | Mode | Entry point | Purpose |
 |------|-------------|---------|
 | **Production** | `python agent.py` | Band SDK agent — listens for @mentions via WebSocket |
-| **Local test UI** | `uvicorn main:app --reload --port 8001` | FastAPI + browser UI for manual testing |
+| **Local API** | `uvicorn main:app --reload --port 8001` | FastAPI service — `POST /assess-impact`, `GET /health` |
 
 ## Quick Start
 ```bash
-cd agent_impact
+cd agents/impact
 pip install -r requirements.txt
 cp .env.example .env   # fill in API keys
 
-# Local test (no Band connection needed):
+# Local API (no Band connection needed):
 USE_MOCK_BAND=true uvicorn main:app --reload --port 8001
-# open http://localhost:8001 — paste hazard JSON or Band message
+# POST hazard JSON or Band message to /assess-impact (see /docs)
 
 # Production (connects to Band WebSocket):
 python agent.py
@@ -25,9 +25,9 @@ python agent.py
 
 ## Project Structure
 ```
-agent_impact/
+agents/impact/
   agent.py              # Band SDK entry point — production
-  main.py               # FastAPI local test UI — port 8001
+  main.py               # FastAPI service — port 8001 (/assess-impact, /health)
   agent_config.yaml     # Band agent_id, api_key, handle
   tasks/
     population.py       # Task 1 — GeoNames real population + LLM reasoning
@@ -40,14 +40,12 @@ agent_impact/
     featherless.py      # call_with_fallback() — model orchestration
     cost_tracker.py     # per-session token cost tracking
     r2_reader.py        # Cloudflare R2 satellite URL lookup
-  static/
-    index.html          # Local test UI — accepts raw JSON + Band message format
   .env.example
   requirements.txt
 ```
 
 ## Input Formats Accepted
-The local UI and the `/assess-impact` endpoint both accept two formats:
+The `/assess-impact` endpoint accepts two formats:
 
 **Raw hazard JSON** (flat):
 ```json
@@ -59,7 +57,7 @@ The local UI and the `/assess-impact` endpoint both accept two formats:
 {"event_id": "flood-001", "step": "hazard", "data": {"risk_level": "HIGH", "bounds": {"west": 67.0, "south": 24.8, "east": 67.5, "north": 25.2}, "risk_cities": ["Karachi"]}}
 ```
 
-`_normalise_hazard()` in `main.py` and `normaliseParsed()` in `index.html` bridge both formats.
+`_normalise_hazard()` in `main.py` bridges both formats.
 
 ## Execution Flow
 1. Agent receives hazard data (@mention via Band WebSocket, or POST /assess-impact)
