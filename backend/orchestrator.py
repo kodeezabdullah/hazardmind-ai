@@ -131,18 +131,17 @@ PIPELINE_TRANSITIONS = [
 ]
 
 
-def _make_recording_adapter():
-    """Build an AnthropicAdapter that records every inbound message but does NOT
-    auto-reply to it.
+def _record_only(base_cls):
+    """Wrap any Band ``SimpleAdapter`` subclass into a RECORD-ONLY adapter.
 
     Band delivers room messages to the connected SDK agent over its WebSocket
     execution loop (the REST GET /messages history is empty for this agent), so
     we capture each inbound message into the shared inbound_store. That store is
     what monitor_progress() and GET /band-log read from.
 
-    Crucially, this adapter is RECORD-ONLY: it deliberately skips
-    ``super().on_event()`` (the call that runs the Anthropic tool loop and posts
-    a reply). The orchestrator's real messages — dispatch, cross-validation
+    Crucially, the returned adapter is RECORD-ONLY: it deliberately skips
+    ``super().on_event()`` (the call that runs the underlying LLM tool loop and
+    posts a reply). The orchestrator's real messages — dispatch, cross-validation
     discussions, nudges, handoffs, the closing summary — are all sent explicitly
     via band_client REST posts from start_pipeline()/monitor_progress(). Letting
     the LLM also auto-reply to every @mention created an endless chatter loop
@@ -150,10 +149,13 @@ def _make_recording_adapter():
     another reply) and spawned phantom event_ids. The orchestrator only speaks
     when the pipeline logic decides to — i.e. while a stage is incomplete, or on
     an anomaly/discrepancy — never idle chatter once an agent is done.
-    """
-    from band.adapters import AnthropicAdapter
 
-    class RecordingAnthropicAdapter(AnthropicAdapter):
+    ``on_event`` is the SimpleAdapter entry point that fans out to ``on_message``
+    (the LLM call), so overriding it record-only suppresses auto-reply for ANY
+    base adapter — Gemini, Anthropic, or LangGraph alike.
+    """
+
+    class RecordingAdapter(base_cls):  # type: ignore[valid-type, misc]
         async def on_event(self, inp) -> None:  # type: ignore[override]
             try:
                 msg = inp.msg
@@ -174,7 +176,63 @@ def _make_recording_adapter():
             # Intentionally do NOT call super().on_event(inp): the orchestrator
             # does not converse via the LLM, it drives the pipeline explicitly.
 
-    return RecordingAnthropicAdapter(model=ANTHROPIC_MODEL)
+    return RecordingAdapter
+
+
+def get_best_adapter():
+    """Pick the best available Band adapter, record-only, by priority.
+
+    All three options are wrapped record-only (see ``_record_only``) so the
+    orchestrator never auto-replies via the LLM regardless of which backend
+    serves the per-turn model. Priority:
+
+      1. Gemini 3.5 Flash      — if GEMINI_API_KEY is set.
+      2. Claude Sonnet 4.6     — via AIML's Anthropic endpoint (ANTHROPIC_*).
+      3. Featherless Kimi K2.6 — LangGraph adapter over the OpenAI protocol.
+
+    Returns the constructed adapter. Featherless is the always-available tail
+    (it matches what every pipeline agent already runs), so this never returns
+    None as long as FEATHERLESS_API_KEY is configured.
+    """
+    # Priority 1: Gemini.
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            from band.adapters.gemini import GeminiAdapter
+
+            adapter = _record_only(GeminiAdapter)(
+                model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+                api_key=gemini_key,
+            )
+            logger.info("Orchestrator adapter: Gemini 3.5 Flash")
+            return adapter
+        except Exception:  # noqa: BLE001 - fall through to the next provider
+            logger.exception("Gemini adapter unavailable, falling back")
+
+    # Priority 2: Claude (Anthropic protocol via AIML).
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        try:
+            from band.adapters import AnthropicAdapter
+
+            adapter = _record_only(AnthropicAdapter)(model=ANTHROPIC_MODEL)
+            logger.info("Orchestrator adapter: %s", ANTHROPIC_MODEL)
+            return adapter
+        except Exception:  # noqa: BLE001 - fall through to Featherless
+            logger.exception("Claude adapter unavailable, falling back")
+
+    # Priority 3: Featherless via LangGraph (always-available tail).
+    from band.adapters.langgraph import LangGraphAdapter
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(
+        model=os.getenv("FEATHERLESS_MODEL", "moonshotai/Kimi-K2.6"),
+        api_key=os.getenv("FEATHERLESS_API_KEY"),
+        base_url=os.getenv("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"),
+    )
+    adapter = _record_only(LangGraphAdapter)(llm=llm)
+    logger.info("Orchestrator adapter: Featherless Kimi K2.6")
+    return adapter
 
 
 class OrchestratorAgent:
@@ -194,7 +252,7 @@ class OrchestratorAgent:
         """
         from band import Agent
 
-        adapter = _make_recording_adapter()
+        adapter = get_best_adapter()
         self.agent = Agent.from_config(
             ORCHESTRATOR_AGENT_KEY,
             adapter=adapter,

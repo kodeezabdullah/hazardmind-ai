@@ -265,7 +265,11 @@ def test_recording_adapter_records_inbound() -> None:
     import band_client as bc
 
     bc.inbound_store._messages.clear()
-    adapter = orch_module._make_recording_adapter()
+    from band.adapters import AnthropicAdapter
+
+    adapter = orch_module._record_only(AnthropicAdapter)(
+        model=orch_module.ANTHROPIC_MODEL
+    )
 
     class FakeMsg:
         id = "m1"
