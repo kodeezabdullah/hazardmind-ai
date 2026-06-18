@@ -154,3 +154,4 @@ clear_backlog.py
 _live_logs/
 _test_*.json
 _test_*.txt
+!frontend/lib/
