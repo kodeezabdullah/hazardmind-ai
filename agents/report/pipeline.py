@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +12,13 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 FRONTEND_DEMO_DIR = REPO_ROOT / "frontend" / "public" / "demo-results"
+
+# Report artifacts (PDF / map / JSON) are written here before being uploaded to
+# R2, then cleaned up. Using the system temp dir (not the repo) keeps the
+# container filesystem clean and works on read-only/ephemeral production disks.
+GENERATED_ROOT = Path(
+    os.getenv("REPORT_OUTPUT_DIR", os.path.join(tempfile.gettempdir(), "hazardmind-report"))
+)
 
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -150,6 +159,18 @@ async def run_report_pipeline(
         paths["json"].parent.mkdir(parents=True, exist_ok=True)
         paths["json"].write_text(f"{json.dumps(report, indent=2, default=_json_default)}\n", encoding="utf-8")
 
+        # Clean up the local artifacts once they are on R2 — the container's
+        # disk should not accumulate per-event report files. Only remove when the
+        # upload succeeded and we are using the default temp location (a caller
+        # who passed an explicit output_dir keeps their files).
+        if r2_uploaded and not output_dir:
+            try:
+                event_dir = paths["pdf"].parent
+                if str(event_dir).startswith(str(GENERATED_ROOT)):
+                    shutil.rmtree(event_dir, ignore_errors=True)
+            except Exception:  # noqa: BLE001 - cleanup is best-effort
+                pass
+
         status = "complete_with_warnings" if warnings else "complete"
         return _result(
             event_id=event_id,
@@ -190,7 +211,7 @@ def _resolve_output_paths(
     map_output_path: str | None,
 ) -> dict[str, Path]:
     if json_output_path or pdf_output_path or map_output_path:
-        base = Path(output_dir) if output_dir else BASE_DIR / "generated" / _safe_path_part(event_id)
+        base = Path(output_dir) if output_dir else GENERATED_ROOT / _safe_path_part(event_id)
         return {
             "json": Path(json_output_path) if json_output_path else base / "report.json",
             "pdf": Path(pdf_output_path) if pdf_output_path else base / "report.pdf",
@@ -204,7 +225,7 @@ def _resolve_output_paths(
             "map": FRONTEND_DEMO_DIR / "demo-peshawar-flood-map.png",
         }
 
-    base = Path(output_dir) if output_dir else BASE_DIR / "generated" / _safe_path_part(event_id)
+    base = Path(output_dir) if output_dir else GENERATED_ROOT / _safe_path_part(event_id)
     return {
         "json": base / "report.json",
         "pdf": base / "report.pdf",

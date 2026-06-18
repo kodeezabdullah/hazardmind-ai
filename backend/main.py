@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -29,11 +30,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS origins are env-driven for production. Set ALLOWED_ORIGINS to a
+# comma-separated list of front-end URLs (e.g. "https://hazardmind.vercel.app").
+# Defaults to "*" only when unset, which is convenient for local development but
+# should always be locked down in production.
+_origins_env = os.getenv("ALLOWED_ORIGINS", "*").strip()
+_allowed_origins = (
+    ["*"] if _origins_env in ("", "*")
+    else [o.strip() for o in _origins_env.split(",") if o.strip()]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 app.include_router(router)
