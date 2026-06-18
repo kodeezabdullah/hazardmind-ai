@@ -112,7 +112,7 @@ def build_report_completion_message(result: dict) -> str:
             "recommended_response_level": response_level,
         },
     }
-    return f"{natural_text}\n\n{json.dumps(completion, indent=2)}"
+    return f"{natural_text}\n\n---\n{json.dumps(completion, indent=2)}"
 
 
 def build_report_failure_message(result: dict) -> str:
@@ -132,7 +132,7 @@ def build_report_failure_message(result: dict) -> str:
             "confidence_level": "LOW",
         },
     }
-    return f"{natural_text}\n\n{json.dumps(failure, indent=2)}"
+    return f"{natural_text}\n\n---\n{json.dumps(failure, indent=2)}"
 
 
 def _json_object_candidates(text: str) -> list[str]:

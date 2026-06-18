@@ -125,9 +125,18 @@ def make_circular_buffer_geojson(
     latitude: 1 degree ~= 111 km
     longitude: 1 degree ~= 111 km x cos(latitude)
     """
-    center_lng = float(center_lng)
-    center_lat = float(center_lat)
-    radius_km = float(radius_km)
+    # Null-safe: impact/hazard numbers can arrive as None when an upstream LLM
+    # call degraded. Coerce to safe numeric defaults so report generation never
+    # crashes with "float() argument must be ... not 'NoneType'".
+    def _f(v, default):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+
+    center_lng = _f(center_lng, 0.0)
+    center_lat = _f(center_lat, 0.0)
+    radius_km = _f(radius_km, 1.0)
     points = max(8, int(points))
     latitude_degrees = radius_km / 111.0
     cos_lat = max(abs(math.cos(math.radians(center_lat))), 0.01)

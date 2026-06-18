@@ -264,7 +264,7 @@ def _intelligence_summary_table(report: dict) -> Table:
     return _section_table(
         [
             ("Criticality", criticality.get("criticality", "unknown")),
-            ("Overall Confidence", f"{round(float(criticality.get('overall_confidence', 0)) * 100)}%"),
+            ("Overall Confidence", f"{round((criticality.get('overall_confidence') or 0) * 100) if isinstance(criticality.get('overall_confidence'), (int, float)) else 0}%"),
             ("Escalation Required", criticality.get("escalation_required", "unknown")),
             ("Rationale", criticality.get("rationale", "")),
             ("Key Decisions", "; ".join(decision.get("key_decisions_required", []))),

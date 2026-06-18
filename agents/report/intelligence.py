@@ -245,7 +245,14 @@ async def generate_band_ready_message(report_context: dict, intelligence: dict) 
     """
     criticality = intelligence.get("criticality", {})
     quality = intelligence.get("quality_check", {})
-    confidence = float(criticality.get("overall_confidence", 0.75))
+    # Null-safe: dict.get returns the stored None when the key is present with a
+    # None value (the default only applies to a MISSING key), so a literal
+    # "overall_confidence": null in the impact payload would crash float(None).
+    _conf_raw = criticality.get("overall_confidence")
+    try:
+        confidence = float(_conf_raw) if _conf_raw is not None else 0.75
+    except (TypeError, ValueError):
+        confidence = 0.75
     status = "COMPLETE"
     if quality.get("status") == "not_ready":
         status = "NEEDS_REVIEW"
@@ -793,7 +800,11 @@ def _coerce_quality_check(data: dict, fallback: dict) -> dict:
 
 
 def _fallback_criticality(context: dict) -> dict:
-    flood_confidence = float(context.get("hazard", {}).get("confidence_scores", {}).get("flood", 0.75))
+    _fc_raw = (context.get("hazard", {}) or {}).get("confidence_scores", {}).get("flood")
+    try:
+        flood_confidence = float(_fc_raw) if _fc_raw is not None else 0.75
+    except (TypeError, ValueError):
+        flood_confidence = 0.75
     population = int(context.get("impact", {}).get("population_affected", 0))
     hospitals = int(context.get("impact", {}).get("hospitals_at_risk", 0))
     severity = str(context.get("overall_severity", "")).upper()

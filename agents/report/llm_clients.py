@@ -330,7 +330,46 @@ async def generate_executive_summary_with_aiml(context: dict, detailed_report: d
     }
 
 
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+GEMINI_MODEL = os.getenv("REPORT_GEMINI_MODEL", "gemini-3.1-flash-lite")
+_GEMINI_KEY_VARS = (
+    "GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3",
+    "GEMINI_API_KEY_4", "GEMINI_API_KEY_5",
+)
+
+
+async def call_gemini(prompt: str, system: str = "", max_tokens: int = FEATHERLESS_JSON_TOKENS) -> dict:
+    """Call Gemini (OpenAI-compatible), trying each configured key in turn.
+
+    Report makes many narrative LLM calls; Featherless is congested + 32k-capped,
+    so Gemini 3.1 is the PRIMARY model for the report intelligence layer (5 keys
+    chained so per-key free quota stops blocking). Featherless stays as fallback.
+    """
+    for key_var in _GEMINI_KEY_VARS:
+        api_key = os.getenv(key_var)
+        if not api_key:
+            continue
+        res = await _call_openai_compatible(
+            provider="gemini",
+            api_key=api_key,
+            base_url=GEMINI_BASE_URL,
+            model=GEMINI_MODEL,
+            system=system,
+            prompt=prompt,
+            max_tokens=max_tokens,
+        )
+        if res.get("ok"):
+            return res
+    return {"ok": False, "provider": "gemini", "model": GEMINI_MODEL, "content": "", "error": "all gemini keys failed"}
+
+
 async def call_featherless(prompt: str, system: str = "", max_tokens: int = FEATHERLESS_JSON_TOKENS) -> dict:
+    # Gemini PRIMARY (Featherless is congested + 32k-capped for the report's many
+    # narrative calls); fall back to Featherless only if every Gemini key fails.
+    if any(os.getenv(v) for v in _GEMINI_KEY_VARS):
+        g = await call_gemini(prompt, system=system, max_tokens=max_tokens)
+        if g.get("ok"):
+            return g
     return await call_featherless_model(
         prompt,
         system=system,
@@ -422,19 +461,34 @@ async def featherless_json_cascade(
     """
     Try primary and fallback Featherless models until strict-enough JSON is produced.
     """
-    models = [primary_model, *fallback_models] if _MODEL_CASCADE_ENABLED else [primary_model]
     effective_timeout = report_llm_timeout_seconds(timeout_seconds)
-    for selected_model in models:
+
+    # Gemini PRIMARY: try each Gemini key first (Featherless is congested +
+    # 32k-capped, and these narrative calls timed out / 429'd on it). Each
+    # attempt is a (label, model) where the model is the Gemini model id.
+    gemini_attempts = [(f"gemini:{i}", GEMINI_MODEL) for i in range(len(_GEMINI_KEY_VARS)) if os.getenv(_GEMINI_KEY_VARS[i])]
+    featherless_models = [primary_model, *fallback_models] if _MODEL_CASCADE_ENABLED else [primary_model]
+    attempts = gemini_attempts + [("featherless", m) for m in featherless_models]
+
+    for label, selected_model in attempts:
         started_at = time.perf_counter()
         try:
-            async with _FEATHERLESS_SEMAPHORE:
-                response = await call_featherless_model(
-                    prompt,
-                    system=system,
-                    model=selected_model,
-                    max_tokens=max_tokens,
-                    timeout_seconds=effective_timeout,
+            if label.startswith("gemini:"):
+                key = os.getenv(_GEMINI_KEY_VARS[int(label.split(":", 1)[1])])
+                response = await _call_openai_compatible(
+                    provider="gemini", api_key=key, base_url=GEMINI_BASE_URL,
+                    model=selected_model, system=system, prompt=prompt,
+                    max_tokens=max_tokens, timeout_seconds=effective_timeout,
                 )
+            else:
+                async with _FEATHERLESS_SEMAPHORE:
+                    response = await call_featherless_model(
+                        prompt,
+                        system=system,
+                        model=selected_model,
+                        max_tokens=max_tokens,
+                        timeout_seconds=effective_timeout,
+                    )
         except KeyboardInterrupt:
             raise
         except (asyncio.CancelledError, asyncio.TimeoutError):
