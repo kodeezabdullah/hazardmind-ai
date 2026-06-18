@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CircularMapDial } from "./CircularMapDial";
+import { AgentNetwork, agentModules, type AgentModuleId } from "./AgentNetwork";
 import { CommandHeader } from "./CommandHeader";
+import { MapLegendRail } from "./MapLegendRail";
+import { MapLibre3DStage } from "./MapLibre3DStage";
+import { SelectedModulePanel } from "./SelectedModulePanel";
 import { loadHazardResult, type HazardResultSource } from "../lib/loadHazardResult";
 import { sampleResult } from "../lib/sampleResult";
 import type { HazardMindResult, LayerKey, LayerState } from "../lib/types";
@@ -26,6 +29,9 @@ export function DashboardShell({ eventId = "demo-peshawar-flood", routeMode = "h
   const [layers, setLayers] = useState<LayerState>(initialLayers);
   const [result, setResult] = useState<HazardMindResult>(sampleResult);
   const [dataSource, setDataSource] = useState<HazardResultSource>("demo-fallback");
+  const [activeAgentId, setActiveAgentId] = useState<AgentModuleId>("satellite");
+  const [isFocused, setIsFocused] = useState(false);
+  const activeAgent = agentModules.find((agent) => agent.id === activeAgentId) ?? agentModules[0];
 
   useEffect(() => {
     let ignore = false;
@@ -68,11 +74,24 @@ export function DashboardShell({ eventId = "demo-peshawar-flood", routeMode = "h
       <div className="command-center-shell">
         <CommandHeader result={result} dataSource={formatDataSource(dataSource)} />
 
-        <section className="rotary-command-layout">
-          <CircularMapDial
+        <section className="command-map-layout">
+          <MapLegendRail layers={layers} onToggleLayer={toggleLayer} result={result} />
+          <div className="command-map-center">
+            <MapLibre3DStage layers={layers} result={result} />
+            <AgentNetwork
+              activeAgentId={activeAgentId}
+              onSelectAgent={(agentId) => {
+                setActiveAgentId(agentId);
+                setIsFocused(false);
+              }}
+            />
+          </div>
+          <SelectedModulePanel
             currentEventId={routeMode === "map" ? eventId : undefined}
-            layers={layers}
-            onToggleLayer={toggleLayer}
+            isFocused={isFocused}
+            module={activeAgent}
+            onCloseFocus={() => setIsFocused(false)}
+            onOpenFocus={() => setIsFocused(true)}
             result={result}
           />
         </section>

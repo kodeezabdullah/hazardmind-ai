@@ -1,45 +1,36 @@
 "use client";
 
-import { Activity, CheckCircle2, FileText, Layers3, Radio, RadioTower, Satellite, ShieldAlert, Sparkles } from "lucide-react";
+import { Activity, CheckCircle2, FileText, RadioTower, Satellite } from "lucide-react";
 import type { ReactNode } from "react";
 import { DialFocusedPanel } from "./DialFocusedPanel";
-import { LayerControls } from "./LayerControls";
 import { ReportActions } from "./ReportActions";
 import { StatsGrid } from "./StatsGrid";
-import type { HazardMindResult, LayerKey, LayerState } from "../lib/types";
-import type { CircularModule } from "./CircularMapDial";
+import type { HazardMindResult } from "../lib/types";
+import type { AgentModule } from "./AgentNetwork";
 
 type SelectedModulePanelProps = {
   currentEventId?: string;
   isFocused: boolean;
-  layers: LayerState;
-  module: CircularModule;
+  module: AgentModule;
   result: HazardMindResult;
   onCloseFocus: () => void;
   onOpenFocus: () => void;
-  onToggleLayer: (layer: LayerKey) => void;
 };
 
 const moduleIcons = {
-  layers: Layers3,
   satellite: Satellite,
   hazard: RadioTower,
-  risk: ShieldAlert,
   impact: Activity,
-  summary: Sparkles,
   report: FileText,
-  timeline: Radio,
 };
 
 export function SelectedModulePanel({
   currentEventId,
   isFocused,
-  layers,
   module,
   result,
   onCloseFocus,
   onOpenFocus,
-  onToggleLayer,
 }: SelectedModulePanelProps) {
   const Icon = moduleIcons[module.id];
 
@@ -61,13 +52,13 @@ export function SelectedModulePanel({
         </header>
 
         <div className="thin-scrollbar selected-module-body">
-          {renderModuleContent(module.id, result, layers, onToggleLayer, currentEventId)}
+          {renderModuleContent(module.id, result, currentEventId)}
         </div>
       </section>
 
       {isFocused ? (
-        <DialFocusedPanel moduleLabel={module.label} onClose={onCloseFocus} origin={`${module.angle}deg`}>
-          {renderFocusedContent(module.id, result, layers, onToggleLayer, currentEventId)}
+        <DialFocusedPanel moduleLabel={module.label} onClose={onCloseFocus}>
+          {renderFocusedContent(module.id, result, currentEventId)}
         </DialFocusedPanel>
       ) : null}
     </>
@@ -75,20 +66,10 @@ export function SelectedModulePanel({
 }
 
 function renderModuleContent(
-  id: CircularModule["id"],
+  id: AgentModule["id"],
   result: HazardMindResult,
-  layers: LayerState,
-  onToggleLayer: (layer: LayerKey) => void,
   currentEventId?: string,
 ) {
-  if (id === "layers") {
-    return (
-      <ModuleBlock title="GIS Layer Stack">
-        <LayerControls artifacts={result.artifacts} layers={layers} onToggleLayer={onToggleLayer} />
-      </ModuleBlock>
-    );
-  }
-
   if (id === "satellite") {
     return (
       <ModuleBlock title="Satellite Intake">
@@ -121,14 +102,6 @@ function renderModuleContent(
     );
   }
 
-  if (id === "risk") {
-    return (
-      <ModuleBlock title="Risk Confidence">
-        <RiskBars result={result} expanded />
-      </ModuleBlock>
-    );
-  }
-
   if (id === "impact") {
     return (
       <ModuleBlock title="Impact Assessment">
@@ -146,63 +119,35 @@ function renderModuleContent(
     );
   }
 
-  if (id === "summary") {
-    return (
-      <ModuleBlock title="Executive Summary">
-        <p className="text-sm leading-6 text-slate-300">{result.report.summary}</p>
-        <h3 className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100">Immediate priorities</h3>
-        <BulletList items={result.report.recommendations.slice(0, 3)} />
-      </ModuleBlock>
-    );
-  }
-
-  if (id === "report") {
-    return (
-      <ModuleBlock title="Report Output">
-        <ReportActions result={result} currentEventId={currentEventId} />
-        <InfoGrid
-          className="mt-3"
-          items={[
-            ["PDF", result.report.pdf_url ? "ready" : "pending"],
-            ["Map", result.report.map_url ? "ready" : "pending"],
-            ["Recommendations", String(result.report.recommendations.length)],
-            ["Package", "local demo"],
-          ]}
-        />
-      </ModuleBlock>
-    );
-  }
-
   return (
-    <ModuleBlock title="Agent Timeline / System Trace">
-      <div className="space-y-2">
-        {result.agent_log.map((entry) => (
-          <article className="trace-card" key={`${entry.agent}-${entry.timestamp}`}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate font-mono text-xs text-cyan-100">{entry.agent}</span>
-              <span className="rounded border border-emerald-300/25 bg-emerald-300/10 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.14em] text-emerald-100">
-                {entry.status}
-              </span>
-            </div>
-            <p className="mt-1.5 text-xs leading-5 text-slate-300">{entry.message}</p>
-          </article>
-        ))}
-      </div>
+    <ModuleBlock title="Report Output">
+      <ReportActions result={result} currentEventId={currentEventId} />
+      <InfoGrid
+        className="mt-3"
+        items={[
+          ["PDF", result.report.pdf_url ? "ready" : "pending"],
+          ["Map", result.report.map_url ? "ready" : "pending"],
+          ["Recommendations", String(result.report.recommendations.length)],
+          ["Package", "local demo"],
+        ]}
+      />
+      <h3 className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100">Executive summary</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-300">{result.report.summary}</p>
+      <h3 className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100">Immediate priorities</h3>
+      <BulletList items={result.report.recommendations.slice(0, 3)} />
     </ModuleBlock>
   );
 }
 
 function renderFocusedContent(
-  id: CircularModule["id"],
+  id: AgentModule["id"],
   result: HazardMindResult,
-  layers: LayerState,
-  onToggleLayer: (layer: LayerKey) => void,
   currentEventId?: string,
 ) {
   return (
     <div className="grid gap-4">
-      {renderModuleContent(id, result, layers, onToggleLayer, currentEventId)}
-      {id !== "summary" && id !== "report" ? (
+      {renderModuleContent(id, result, currentEventId)}
+      {id !== "report" ? (
         <ModuleBlock title="Executive Context">
           <p className="text-sm leading-6 text-slate-300">{result.report.summary}</p>
         </ModuleBlock>

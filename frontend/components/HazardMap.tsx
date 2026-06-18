@@ -7,6 +7,7 @@ import type { HazardMindResult, LayerState } from "../lib/types";
 type HazardMapProps = {
   result: HazardMindResult;
   layers: LayerState;
+  perspective?: boolean;
   showHud?: boolean;
 };
 
@@ -35,7 +36,7 @@ const mapStyle: maplibregl.StyleSpecification = {
   ],
 };
 
-export function HazardMap({ result, layers, showHud = true }: HazardMapProps) {
+export function HazardMap({ result, layers, perspective = false, showHud = true }: HazardMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const loadedRef = useRef(false);
@@ -54,10 +55,26 @@ export function HazardMap({ result, layers, showHud = true }: HazardMapProps) {
       center: [(west + east) / 2, (south + north) / 2],
       zoom: 10,
       attributionControl: false,
+      dragRotate: true,
+      pitchWithRotate: true,
+      touchPitch: true,
+      touchZoomRotate: true,
+      maxPitch: 85,
     });
 
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.addControl(
+      new maplibregl.NavigationControl({
+        showCompass: true,
+        showZoom: true,
+        visualizePitch: true,
+      }),
+      "top-right",
+    );
     map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+
+    map.dragRotate.enable();
+    map.touchPitch.enable();
+    map.touchZoomRotate.enableRotation();
 
     map.once("load", () => {
       loadedRef.current = true;
@@ -194,6 +211,16 @@ export function HazardMap({ result, layers, showHud = true }: HazardMapProps) {
         map.setZoom(Math.max(map.getMinZoom(), fittedZoom - 0.4));
       }
 
+      if (perspective) {
+        map.easeTo({
+          bearing: -28,
+          duration: 1400,
+          easing: (t) => t,
+          essential: true,
+          pitch: 55,
+        });
+      }
+
       applyVisibility(map, markersRef.current, layers);
     });
 
@@ -238,6 +265,17 @@ export function HazardMap({ result, layers, showHud = true }: HazardMapProps) {
               <MapChip active={layers.evacuationRoutes} label="routes" />
               <MapChip active={layers.facilities} label="facilities" />
             </div>
+          </div>
+          <div className="map-orbit-guide pointer-events-none absolute right-4 top-24 rounded-md border border-cyan-300/20 bg-slate-950/75 px-3 py-2 backdrop-blur">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-200">
+              Orbit View
+            </p>
+            <p className="mt-1 text-[10px] leading-4 text-slate-300">
+              Right-drag or Ctrl-drag to rotate and tilt
+            </p>
+            <p className="text-[10px] leading-4 text-slate-500">
+              Drag the compass for direct camera control
+            </p>
           </div>
         </>
       ) : null}
