@@ -9,6 +9,8 @@ agent network. Point it at any city in any country and it returns a grounded,
 honest risk assessment, an executive PDF report, and an interactive map — or, just
 as importantly, a confident **all-clear** when there is no disaster to report.
 
+**Live app: https://hazardmindai.online**
+
 ---
 
 ## Table of Contents
@@ -28,6 +30,7 @@ as importantly, a confident **all-clear** when there is no disaster to report.
 - [Database Schema](#database-schema)
 - [Resilience & Reliability Engineering](#resilience--reliability-engineering)
 - [Honesty by Design](#honesty-by-design)
+- [Live Deployment](#live-deployment)
 - [Deployment Notes](#deployment-notes)
 - [Team](#team)
 - [License](#license)
@@ -447,6 +450,24 @@ engineered to report it honestly:
 A run over a calm city returns flood / earthquake / landslide all **LOW**,
 **0 people affected**, and an all-clear executive report — grounded in the
 latest real imagery.
+
+---
+
+## Live Deployment
+
+**Live app:** https://hazardmindai.online
+
+The full system runs in the cloud. The five services are deployed as independent
+Docker Spaces on Hugging Face and collaborate through the Band network; the
+frontend is served from Vercel.
+
+| Service | Hugging Face Space |
+|---|---|
+| Orchestrator (backend) | https://huggingface.co/spaces/kodeezabdullah/hazardmind-backend |
+| Satellite agent | https://huggingface.co/spaces/gridforce/satellite |
+| Hazard agent | https://huggingface.co/spaces/kodeezabdullah/hazard |
+| Impact agent | https://huggingface.co/spaces/kodeezabdullah/impact |
+| Report agent | https://huggingface.co/spaces/gridforce/report |
 
 ---
 
