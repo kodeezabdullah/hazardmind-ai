@@ -29,6 +29,7 @@ as importantly, a confident **all-clear** when there is no disaster to report.
 - [Resilience & Reliability Engineering](#resilience--reliability-engineering)
 - [Honesty by Design](#honesty-by-design)
 - [Deployment Notes](#deployment-notes)
+- [Team](#team)
 - [License](#license)
 
 ---
@@ -62,38 +63,70 @@ real data. HazardMind closes that gap with an autonomous pipeline that:
 
 ## System Architecture
 
-```
-                         ┌─────────────────────────┐
-                         │   Next.js + MapLibre UI  │
-                         │   (interactive map view) │
-                         └────────────┬────────────┘
-                                      │ REST
-                         ┌────────────▼────────────┐
-                         │   FastAPI Orchestrator   │
-                         │   Backend  (router/API)  │
-                         └────────────┬────────────┘
-                                      │ creates per-event Band room,
-                                      │ dispatches + monitors the pipeline
-        ┌─────────────────────────────┼─────────────────────────────┐
-        │                Band agent collaboration network            │
-        │                                                            │
-        │  ┌──────────┐   ┌────────┐   ┌────────┐   ┌────────┐       │
-        │  │Satellite │──▶│ Hazard │──▶│ Impact │──▶│ Report │       │
-        │  │  Agent   │   │ Agent  │   │ Agent  │   │ Agent  │       │
-        │  └────┬─────┘   └───┬────┘   └───┬────┘   └───┬────┘       │
-        └───────┼─────────────┼────────────┼────────────┼───────────┘
-                │             │            │            │
-                ▼             ▼            ▼            ▼
-        ┌──────────────────────────────────────────────────────┐
-        │     Neon PostGIS  (5 tables, one row set per event)   │
-        │  disaster_events · satellite_results · hazard_zones   │
-        │           impact_data · final_reports                 │
-        └──────────────────────────────────────────────────────┘
-                │
-                ▼
-        ┌──────────────────────────────────────────────────────┐
-        │  Cloudflare R2  (public artifacts: PNGs, GeoJSON, PDF)│
-        └──────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph CLIENT["FRONTEND - Next.js 14 + React"]
+        direction LR
+        Globe["Mapbox 3D Globe<br/>Heatmap + Zone Overlays"]
+        Panel["Multi-Agent<br/>Analysis Panel"]
+        Logs["Live Logs<br/>+ Agent Chat"]
+        DL["Download Center<br/>PDF + Risk Maps"]
+    end
+
+    subgraph API["FASTAPI BACKEND - Orchestrator Service"]
+        direction LR
+        E1["POST /analyze"]
+        E2["GET /status"]
+        E3["GET /results"]
+        E4["GET /band-log"]
+        E5["GET /health"]
+    end
+
+    subgraph AGENTS["MULTI-AGENT PIPELINE - Band Network"]
+        ORCH["Orchestrator Agent"]
+        SAT["Satellite Agent<br/>Sentinel-1/2, NDWI/SAR<br/>Zone Vectorization"]
+        HAZ["Hazard Agent<br/>Flood, Quake, Landslide<br/>Severity Scoring"]
+        IMP["Impact Agent<br/>Population Exposure<br/>Evacuation Routing"]
+        REP["Report Agent<br/>PDF + Map Rendering"]
+        ORCH -.-> SAT
+        ORCH -.-> HAZ
+        ORCH -.-> IMP
+        ORCH -.-> REP
+        SAT --> HAZ
+        HAZ --> IMP
+        IMP --> REP
+    end
+
+    subgraph LLM["SMART LLM ADAPTER"]
+        FALL["Gemini to Claude to Featherless<br/>Auto-Degrade on Quota"]
+    end
+
+    subgraph DATA["DATA AND STORAGE"]
+        DB["Neon PostgreSQL + PostGIS<br/>events, satellite, hazard, impact, reports"]
+        R2["Cloudflare R2<br/>PNGs, GeoJSON, PDF"]
+    end
+
+    subgraph EXT["EXTERNAL DATA SOURCES"]
+        SRC["Sentinel Hub, USGS, geoBoundaries<br/>GeoNames, SRTM DEM"]
+    end
+
+    CLIENT -->|user query| API
+    API --> ORCH
+    AGENTS --> LLM
+    AGENTS --> DATA
+    SRC --> AGENTS
+    DATA -->|results| CLIENT
+
+    classDef client fill:#1e3a8a,stroke:#3b82f6,color:#fff
+    classDef api fill:#5b21b6,stroke:#8b5cf6,color:#fff
+    classDef agent fill:#065f46,stroke:#10b981,color:#fff
+    classDef llm fill:#92400e,stroke:#f59e0b,color:#fff
+    classDef data fill:#334155,stroke:#64748b,color:#fff
+    class Globe,Panel,Logs,DL client
+    class E1,E2,E3,E4,E5 api
+    class ORCH,SAT,HAZ,IMP,REP agent
+    class FALL llm
+    class DB,R2,SRC data
 ```
 
 Agents communicate primarily through the **database**: each stage persists its
@@ -157,8 +190,13 @@ public PDF, map, and GeoJSON on object storage.
 
 **Frontend**
 - Next.js 14, React 18, TypeScript
-- MapLibre GL JS for interactive mapping
-- Tailwind CSS
+- Mapbox GL JS — full-screen interactive 3D globe (satellite imagery, atmosphere,
+  idle rotation, cinematic fly-to on query), severity-weighted risk heatmap, and
+  georeferenced PNG/zone overlays
+- Tailwind CSS with a custom command-center design system
+- Server-side `/api/r2` proxy that serves the public Cloudflare R2 artifacts with
+  CORS headers, and a backend adapter that maps the pipeline's per-agent DB rows
+  onto the frontend result model
 
 **Infrastructure**
 - Neon (serverless PostgreSQL + PostGIS) for the event datastore
@@ -426,6 +464,16 @@ latest real imagery.
 
 ---
 
+## Team
+
+Built by **Team GridForce**.
+
+HazardMind AI is the work of Team GridForce — engineering an autonomous,
+planet-scale disaster-intelligence platform that turns live satellite imagery and
+real geospatial data into grounded, honest risk assessments.
+
+---
+
 ## License
 
 Released under the [MIT License](LICENSE).
@@ -433,3 +481,4 @@ Released under the [MIT License](LICENSE).
 ---
 
 **HazardMind AI** — grounded, autonomous, planet-scale disaster intelligence.
+Built by **Team GridForce**.
