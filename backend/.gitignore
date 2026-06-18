@@ -1,0 +1,19 @@
+# Secrets — NEVER push to Hugging Face / GitHub
+.env
+.env.*
+*.key
+agent_config.yaml
+last_job_id.txt
+
+# Python virtual environment + caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local logs / temp
+*.log
+_live_logs/
+*.tmp

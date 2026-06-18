@@ -2,10 +2,11 @@
 title: HazardMind Hazard Agent
 emoji: 📡
 colorFrom: red
-colorTo: orange
+colorTo: yellow
 sdk: docker
 app_port: 7860
 pinned: false
+license: mit
 ---
 
 # HazardMind AI — Hazard Agent
@@ -19,5 +20,5 @@ room; hands off to the impact agent.
 
 ## Space secrets
 
-`NEON_DATABASE_URL`, `BAND_API_KEY`, agent IDs, `THENVOI_REST_URL`,
+`NEON_DATABASE_URL`, `BAND_API_KEY`, `BAND_AGENT_ID`, `THENVOI_REST_URL`,
 `THENVOI_WS_URL`, USGS + LLM provider keys.

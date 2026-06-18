@@ -22,10 +22,12 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
+RUN chmod +x entrypoint.sh
 
-# Cloud Run / most PaaS inject $PORT; default to 8000 for local/VM use.
-ENV PORT=8000
-EXPOSE 8000
+# Hugging Face Spaces inject $PORT (7860); default 8000 for local/VM use.
+ENV PORT=7860
+EXPOSE 7860
 
-# Shell form so $PORT expands at runtime.
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT}
+# entrypoint.sh writes agent_config.yaml from the Space secrets (keeping the
+# Band api_key out of the repo) and then launches uvicorn on $PORT.
+CMD ["bash", "entrypoint.sh"]

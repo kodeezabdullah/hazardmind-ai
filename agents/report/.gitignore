@@ -1,0 +1,22 @@
+# Secrets — NEVER push
+.env
+.env.*
+*.key
+agent_config.yaml
+last_job_id.txt
+
+# Python venv + caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs / temp / scene cache
+*.log
+_live_logs/
+*.tmp
+*.zip
+_test_*
+generated/

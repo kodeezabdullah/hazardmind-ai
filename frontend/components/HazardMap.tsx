@@ -149,15 +149,59 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
 
   // When the result changes, refresh the data sources in place (no map rebuild,
   // no camera move).
+  // The map is built ONCE (on mount, when the result is still blank). When the
+  // real result arrives we refresh every data layer IN PLACE: zones + heatmap,
+  // the PNG raster overlays (new URLs + correct footprint corners), and the real
+  // zones GeoJSON from R2 — so overlays/heatmap actually appear for the event.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
+
+    // zones + heatmap from the result's inline zones (immediate)
     (map.getSource("hazard-zones") as mapboxgl.GeoJSONSource | undefined)?.setData(
       result.analysis.zones as GeoJSON.FeatureCollection,
     );
     (map.getSource("hazard-heat") as mapboxgl.GeoJSONSource | undefined)?.setData(
       zonesToWeightedPoints(result.analysis.zones as GeoJSON.FeatureCollection),
     );
+
+    // PNG raster overlays — update each image source's url + footprint corners.
+    const bbox = result.boundaries.scene_bbox ?? result.boundaries.bbox;
+    if (bbox && bbox.length === 4 && (bbox[0] !== 0 || bbox[2] !== 0)) {
+      const [w, s, e, n] = bbox;
+      const corners: [LngLatPair, LngLatPair, LngLatPair, LngLatPair] = [
+        [w, n],
+        [e, n],
+        [e, s],
+        [w, s],
+      ];
+      const rasters: Array<{ id: string; url?: string }> = [
+        { id: "img-true-color", url: proxied(result.artifacts?.true_color_url) },
+        { id: "img-index", url: proxied(result.artifacts?.index_url) },
+        { id: "img-classification", url: proxied(result.artifacts?.classification_url) },
+      ];
+      rasters.forEach(({ id, url }) => {
+        if (!url) return;
+        const src = map.getSource(id) as mapboxgl.ImageSource | undefined;
+        if (src) {
+          src.updateImage({ url, coordinates: corners });
+        }
+      });
+    }
+
+    // Swap in the REAL zone polygons from the pipeline's zones.geojson (R2).
+    if (result.artifacts?.geojson_url) {
+      fetch(proxied(result.artifacts.geojson_url) as string)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((fc: GeoJSON.FeatureCollection | null) => {
+          if (!fc) return;
+          (map.getSource("hazard-zones") as mapboxgl.GeoJSONSource | undefined)?.setData(fc);
+          (map.getSource("hazard-heat") as mapboxgl.GeoJSONSource | undefined)?.setData(
+            zonesToWeightedPoints(fc),
+          );
+        })
+        .catch(() => {});
+    }
   }, [result]);
 
   useEffect(() => {

@@ -6,6 +6,8 @@ colorTo: indigo
 sdk: docker
 app_port: 7860
 pinned: false
+license: mit
+short_description: HazardMind AI — autonomous multi-agent disaster intelligence
 ---
 
 # HazardMind AI — Backend (Orchestrator API)
