@@ -10,7 +10,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = BASE_DIR.parents[1]
+# In the monorepo this is the repo root; in a flat deploy (e.g. HF /app) there
+# may be fewer parents, so fall back to BASE_DIR instead of crashing.
+REPO_ROOT = BASE_DIR.parents[1] if len(BASE_DIR.parents) >= 2 else BASE_DIR
 FRONTEND_DEMO_DIR = REPO_ROOT / "frontend" / "public" / "demo-results"
 
 # Report artifacts (PDF / map / JSON) are written here before being uploaded to
