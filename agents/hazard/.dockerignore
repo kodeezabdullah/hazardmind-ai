@@ -1,0 +1,16 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.local
+*.log
+*.log.err
+generated/
+tests/
+test_*.py
+*_test.py
+.git/
+.gitignore
+README.md
