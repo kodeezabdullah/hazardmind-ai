@@ -17,28 +17,58 @@ logger = logging.getLogger(__name__)
 
 MOCK_FILE = Path(__file__).parent.parent / "mock_hazard_output.json"
 
+# The Band room the current event was dispatched in. The orchestrator creates a
+# fresh per-event room and adds us to it; we post our completion/anomaly back
+# into THAT room (captured as the LangGraph thread_id by agent.py), not a
+# hardcoded room. Falls back to BAND_ROOM_ID if nothing was captured.
+_active_room = None
+
+
+def set_active_room(room_id) -> None:
+    """Record the dispatch room (the post target) for this event."""
+    global _active_room
+    if room_id:
+        _active_room = str(room_id)
+
+
+def _current_room():
+    return _active_room or os.environ.get("BAND_ROOM_ID")
+
 
 def _use_mock() -> bool:
     return os.environ.get("USE_MOCK_BAND", "true").lower() == "true"
 
 
 async def send_to_band_room(message: str) -> None:
-    """Send a text message to the Band room."""
+    """Send a text message into the dispatch Band room, @mentioning the orchestrator.
+
+    Uses the same room-message API the other agents use:
+    POST /api/v1/agent/chats/{room}/messages with X-API-Key and a mention list
+    (Band requires at least one mention and an agent cannot mention itself, so we
+    mention the orchestrator).
+    """
     if _use_mock():
         logger.info("[band] MOCK send_to_band_room:\n%s", message[:400])
+        return
+
+    room_id = _current_room()
+    orchestrator_id = os.environ.get("ORCHESTRATOR_AGENT_ID", "")
+    api_key = os.environ.get("BAND_API_KEY", "")
+    if not room_id or not orchestrator_id or not api_key:
+        logger.warning(
+            "[band] cannot post: room_id/orchestrator_id/api_key missing "
+            "(room=%s orch=%s)", bool(room_id), bool(orchestrator_id),
+        )
         return
 
     try:
         import httpx
         rest_url = os.environ.get("THENVOI_REST_URL", "https://app.band.ai/").rstrip("/")
-        api_key  = os.environ.get("BAND_API_KEY", "")
-        agent_id = os.environ.get("BAND_AGENT_ID", "")
-
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{rest_url}/api/v1/messages",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"agent_id": agent_id, "content": message},
+                f"{rest_url}/api/v1/agent/chats/{room_id}/messages",
+                headers={"X-API-Key": api_key},
+                json={"message": {"content": message, "mentions": [{"id": orchestrator_id}]}},
             )
             if resp.status_code not in (200, 201):
                 logger.warning(
