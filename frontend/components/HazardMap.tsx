@@ -184,7 +184,23 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
         if (!url) return;
         const src = map.getSource(id) as mapboxgl.ImageSource | undefined;
         if (src) {
+          // Source already exists (created on mount) — just point it at the new
+          // image + footprint.
           src.updateImage({ url, coordinates: corners });
+        } else {
+          // Source was NOT created on mount (the result was still blank then, so
+          // the url was empty). Create it now with the real url/corners, hidden
+          // until toggled from the layer panel.
+          map.addSource(id, { type: "image", url, coordinates: corners });
+          if (!map.getLayer(id)) {
+            map.addLayer({
+              id,
+              type: "raster",
+              source: id,
+              paint: { "raster-opacity": 0.85, "raster-fade-duration": 300 },
+              layout: { visibility: "none" },
+            });
+          }
         }
       });
     }
@@ -199,9 +215,16 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
           (map.getSource("hazard-heat") as mapboxgl.GeoJSONSource | undefined)?.setData(
             zonesToWeightedPoints(fc),
           );
+          // Re-apply visibility so the heatmap/zones actually show once the real
+          // data has landed (they were hidden/empty before the result arrived).
+          if (focus) applyVisibility(map, markersRef.current, layers);
         })
         .catch(() => {});
     }
+
+    // Heatmap/zones from inline data may already be present — reveal them too.
+    if (focus) applyVisibility(map, markersRef.current, layers);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
   useEffect(() => {
