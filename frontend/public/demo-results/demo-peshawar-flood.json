@@ -242,7 +242,7 @@
       "Impact estimates should be treated as decision-support indicators, not official counts."
     ],
     "pdf_url": "/demo-results/demo-peshawar-flood-report.pdf",
-    "map_url": "https://hazardmind.vercel.app/map/demo-peshawar-flood",
+    "map_url": "/map/demo-peshawar-flood",
     "recommended_response_level": "NDMA Level-3"
   },
   "intelligence": {
