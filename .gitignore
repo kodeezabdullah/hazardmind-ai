@@ -149,3 +149,8 @@ dist/
 # Local scratch / debug artifacts
 backend/last_job_id.txt
 clear_backlog.py
+
+# Local test/run artifacts (not for repo)
+_live_logs/
+_test_*.json
+_test_*.txt

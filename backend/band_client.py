@@ -167,6 +167,37 @@ def _resolve_mentions(mentions: Optional[list[str]]) -> list[str]:
     )
 
 
+def _dedupe_leading_mentions(content: str) -> str:
+    """Collapse repeated/adjacent @handle tokens at the start of a message.
+
+    The LLM is told to lead with the receiver's @handle, and Band ALSO renders
+    the attached mention id as a chip — so a message that literally repeats the
+    handle (e.g. "@hazardmind-satellite @hazardmind-satellite …", or the display
+    "@HazardMind Satellite @HazardMind Satellite") shows the name twice in the
+    transcript. Keep the first @handle token and drop any immediately-following
+    duplicates of it so each agent is named once.
+    """
+    import re
+
+    stripped = content.lstrip()
+    # Match a leading run of @mention tokens. A handle token is "@" followed by
+    # non-space chars, optionally with a single trailing display word (e.g.
+    # "@HazardMind Satellite"). We compare them case-insensitively.
+    m = re.match(r"^((?:@[^\s@]+(?:\s+[A-Z][^\s@]*)?\s*)+)", stripped)
+    if not m:
+        return content
+    run = m.group(1)
+    tokens = re.findall(r"@[^\s@]+(?:\s+[A-Z][^\s@]*)?", run)
+    if len(tokens) <= 1:
+        return content
+    seen: list[str] = []
+    for tok in tokens:
+        if not seen or seen[-1].lower() != tok.lower():
+            seen.append(tok)
+    rebuilt = " ".join(seen)
+    return rebuilt + " " + stripped[len(run):].lstrip()
+
+
 async def _post_message(content: str, mention_ids: list[str], room_id: Optional[str]) -> dict:
     """POST a message to a Band room.
 
@@ -175,6 +206,7 @@ async def _post_message(content: str, mention_ids: list[str], room_id: Optional[
     """
     default_room, api_key = _require_config()
     room = room_id or default_room
+    content = _dedupe_leading_mentions(content)
     url = f"{BAND_REST_URL}/api/v1/agent/chats/{room}/messages"
     payload = {
         "message": {
@@ -720,9 +752,54 @@ async def send_handoff(
     target agent; the structured JSON is appended at the end so receiving agents
     can still parse the payload off the tail of the same message. One clean chat
     line carries both — no separate /events post.
+
+    The JSON is **compact** (no `indent=2`) and verbose geometry/validation fields
+    are stripped from the chat tail: the downstream agent's Band-adapter LLM
+    replays the whole room transcript into a single turn, and a pretty-printed
+    full payload (bounds_corners/bounds_leaflet/validations/class_counts) blew the
+    Featherless 32k-token context cap, permanently failing the hazard turn. The
+    receiving agents only read the headline numbers + URLs; the full payload is
+    still persisted via the DB path.
     """
-    content = f"{natural_msg}\n\n{json.dumps(data, indent=2)}"
+    content = f"{natural_msg}\n\n{json.dumps(_slim_handoff_payload(data))}"
     await send_text_message(content, mentions=mentions, room_id=room_id)
+
+
+# Verbose nested keys that bloat the chat handoff with no downstream value — the
+# next agent reads only headline scalars + artifact URLs. Stripped from the chat
+# tail (kept in the DB payload). Applied recursively to nested `data` blocks.
+_HANDOFF_DROP_KEYS = frozenset(
+    {
+        "bounds_corners",
+        "bounds_leaflet",
+        "validations",
+        "class_counts",
+        "concerns",
+        "interpretation",
+        "raw_message",
+        # Full MultiPolygon geometry (~20k chars) — the single biggest field. The
+        # next agent reads bbox/bounds scalars + artifact URLs, not raw coords
+        # (those live on R2 as zones.geojson). Dropping keeps the chat handoff
+        # small so the receiving agent's 32k-context Band adapter never overflows.
+        "region_boundary",
+        "geojson",
+        "coordinates",
+        "risk_polygons",
+    }
+)
+
+
+def _slim_handoff_payload(data: Any) -> Any:
+    """Recursively drop verbose keys so the chat-tail JSON stays small."""
+    if isinstance(data, dict):
+        return {
+            k: _slim_handoff_payload(v)
+            for k, v in data.items()
+            if k not in _HANDOFF_DROP_KEYS
+        }
+    if isinstance(data, list):
+        return [_slim_handoff_payload(v) for v in data]
+    return data
 
 
 def handoff_message(handle: str, event_id: str, **fields: Any) -> tuple[str, list[str]]:
@@ -764,8 +841,18 @@ async def notify_satellite(
 # Map each event's first message into a recognizable room title. Band has no
 # create-time "name" field — the room title is auto-generated from the first
 # message posted — so we lead with this so the room is identifiable in band.ai.
+#
+# The intro is the FIRST message every pipeline agent sees when it auto-joins the
+# fresh room, and the Band runtime may deliver it as the processing trigger
+# BEFORE the satellite dispatch body. So it must carry the FULL `event_id:` line
+# (not just the 8-char prefix): each agent's `_BoundEventIdAdapter.on_message`
+# binds the authoritative full UUID from this line, immune to the @mention
+# rendering (`@[[<agent-uuid>]]`) that would otherwise poison a bare-UUID scan.
 def event_room_intro(location: str, event_id: str) -> str:
-    return f"HazardMind — {location} disaster response (event {event_id[:8]})"
+    return (
+        f"HazardMind — {location} disaster response (event {event_id[:8]})\n"
+        f"event_id: {event_id}"
+    )
 
 
 async def create_event_room(event_id: str, location: str) -> str:

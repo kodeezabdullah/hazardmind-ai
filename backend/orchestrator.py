@@ -319,45 +319,73 @@ class OrchestratorAgent:
         return msg
 
     def _agent_data(self, event_id: str, agent: str) -> dict:
-        """Return the structured `data` payload an agent reported, if any."""
+        """Return the structured result payload an agent reported, if any.
+
+        Solution 3: this must work for EVERY agent (hazard/impact/report), not
+        just satellite — otherwise the orchestrator forwards an empty ``{}`` to
+        the next stage and the receiving LLM hallucinates from nothing. We look,
+        in order, for:
+          1. a nested ``data.data`` block tagged for this agent,
+          2. a flat ``data`` block tagged for this agent,
+          3. the agent's own result JSON appended to its room message tail
+             (the standard "<prose> --- <json>" handoff format).
+        Only messages FROM the agent are considered (orchestrator echoes skipped).
+        """
         for parsed in inbound_store.for_event(event_id):
+            if self._is_own_message(parsed):
+                continue
             data = parsed.get("data") or {}
             if str(data.get("step", "")).lower() == agent and data.get("data"):
                 inner = data.get("data")
                 if isinstance(inner, dict):
                     return inner
-            # Some agents nest results directly under data.
             if str(data.get("step", "")).lower() == agent and isinstance(data, dict):
                 return data
-        # Fall back to the flat completion payload the agent appends to the tail
-        # of its room message (natural prose + JSON), which parse_incoming_message
-        # does not surface under `data` when it is not nested.
-        flat = self._satellite_payload(event_id) if agent == "satellite" else {}
-        return flat
+        # Fall back to the flat completion JSON the agent appends to its message
+        # tail — generalised to all agents (was satellite-only).
+        return self._agent_payload(event_id, agent)
+
+    @staticmethod
+    def _agent_payload(event_id: str, agent: str) -> dict:
+        """Pull an agent's result JSON off its room message tail.
+
+        Each agent relays a natural message and appends its full result object
+        (with event_id + status=complete). We scan the recorded inbound messages
+        — ignoring the orchestrator's own — for that JSON. Handles the wrapper
+        shapes agents use: a flat object, a ``{"hazard": {...}}`` / ``{"data":
+        {...}}`` nested block, etc., returning the most useful inner dict.
+        """
+        for parsed in inbound_store.for_event(event_id):
+            if OrchestratorAgent._is_own_message(parsed):
+                continue
+            obj = _json_object_from_text(str(parsed.get("content", "")))
+            if not isinstance(obj, dict):
+                continue
+            if str(obj.get("event_id", "")) != event_id:
+                continue
+            if str(obj.get("status", "")).lower() not in ("complete", ""):
+                continue
+            # The payload must come FROM this agent. Without this check the
+            # satellite's completion JSON (which carries a generic `data` block)
+            # was returned as hazard/impact/report output — so the orchestrator
+            # forwarded the satellite payload down the chain and downstream agents
+            # "analysed" satellite data as if it were the prior stage's result.
+            tag = str(obj.get("from") or obj.get("agent") or obj.get("step") or "").lower()
+            if tag not in (agent, f"hazardmind-{agent}"):
+                continue
+            # Unwrap a per-agent result block when present (hazard nests under
+            # "hazard", others under "data"); else use the flat object.
+            for key in (agent, "data", "result"):
+                inner = obj.get(key)
+                if isinstance(inner, dict) and inner:
+                    return inner
+            return obj
+        return {}
 
     @staticmethod
     def _satellite_payload(event_id: str) -> dict:
-        """Pull the satellite agent's flat result JSON off its room message tail.
-
-        The satellite agent relays a natural message and appends its full result
-        object (status=complete, event_id, urls, affected_area_km2, …). We scan
-        the recorded inbound messages for that JSON object so the orchestrator
-        can persist it and summarize the findings.
-        """
-        for parsed in inbound_store.for_event(event_id):
-            obj = _json_object_from_text(str(parsed.get("content", "")))
-            if (
-                isinstance(obj, dict)
-                and str(obj.get("event_id", "")) == event_id
-                and str(obj.get("status", "")).lower() == "complete"
-                and (
-                    "affected_area_km2" in obj
-                    or "true_color_url" in obj
-                    or "classification_url" in obj
-                )
-            ):
-                return obj
-        return {}
+        """Back-compat alias — satellite result JSON off its message tail."""
+        return OrchestratorAgent._agent_payload(event_id, "satellite")
 
     async def _persist_satellite(self, event_id: str, data: dict) -> None:
         """Write the satellite result row from its completion payload."""
@@ -404,32 +432,42 @@ class OrchestratorAgent:
         await update_event_status(event_id, status="processing", step="satellite")
         await send_task_update("Satellite", "processing", room_id=room_id)
 
-        # Natural dispatch message to satellite (judges read this).
+        # ONE dispatch message to the satellite: natural prose (judges read this)
+        # then a `---` line and the structured fields the agent parses. A single
+        # clean chat line — not two near-identical messages — so the satellite's
+        # work queue and the transcript stay uncluttered.
         urgency = "high" if (magnitude or 0) > 5 else "normal"
         try:
-            await self._say(
+            natural = await generate_natural_message(
+                sender_agent=ORCHESTRATOR_AGENT,
+                sender_role=ORCHESTRATOR_ROLE,
                 receiver_agent="hazardmind-satellite",
                 receiver_handle=SATELLITE_HANDLE,
-                receiver_role="Satellite Imagery Lead",
                 context=disaster_data,
                 findings=(
                     f"New {disaster_type} emergency dispatched for {location}"
                     + (f", magnitude {magnitude}" if magnitude else "")
                 ),
                 urgency=urgency,
-                questions=["Please prioritize SAR coverage of the urban core."],
-                event_id=event_id,
+                questions=["Please prioritize satellite coverage of the urban core."],
+                personality=AGENT_PERSONALITIES[ORCHESTRATOR_AGENT],
             )
         except Exception:  # noqa: BLE001 - natural msg is best-effort
             logger.exception("event_id=%s: natural dispatch failed", event_id)
-
-        # Structured handoff signal (parsed by the satellite agent).
-        await notify_satellite(
-            event_id=event_id,
-            location=location,
-            disaster_type=disaster_type,
-            magnitude=magnitude,
-            room_id=room_id,
+            natural = (
+                f"{SATELLITE_HANDLE} New {disaster_type} emergency in {location}. "
+                "Please begin satellite analysis."
+            )
+        fields = [
+            f"event_id: {event_id}",
+            f"location: {location}",
+            f"disaster_type: {disaster_type}",
+        ]
+        if magnitude:
+            fields.append(f"magnitude: {magnitude}")
+        dispatch = f"{natural}\n\n---\n" + "\n".join(fields)
+        await send_text_message(
+            dispatch, mentions=mentions_for(SATELLITE_HANDLE), room_id=room_id
         )
 
         logger.info("Pipeline started for event_id=%s", event_id)
@@ -466,10 +504,27 @@ class OrchestratorAgent:
             # completions from agents that didn't @mention the orchestrator.
             await poll_room_into_store(event_id, room_id=room_id)
 
-            if await self._agent_completed(event_id, agent):
+            # Advance on a room completion signal OR on the agent's DB row. Band's
+            # REST history is empty for per-event rooms, so hazard/impact/report
+            # often can't post a detectable room signal — but they DO write their
+            # DB rows via the deterministic autodispatch. Treating the DB row as a
+            # completion lets the orchestrator advance (and @mention the next
+            # agent in chat) instead of stalling at "satellite -> hazard".
+            if await self._agent_completed(event_id, agent) or await self._agent_completed_in_db(event_id, agent):
                 await self._advance(event_id, t)
                 stage += 1
                 continue
+
+            # An agent that gives up (e.g. a sustained internet outage exceeded
+            # the download grace budget) posts an error/failed signal instead of
+            # a completion. Detect it and abort the pipeline cleanly — mark the
+            # event failed rather than waiting forever for a completion that will
+            # never come.
+            err = await self._agent_failed(event_id, agent)
+            if err:
+                await self.handle_failure(event_id, agent, err)
+                logger.error("event_id=%s: pipeline failed at %s: %s", event_id, agent, err)
+                return "failed"
 
             await self._wait_with_nudge(event_id, agent)
 
@@ -791,31 +846,66 @@ class OrchestratorAgent:
     # -- terminal states ------------------------------------------------------
 
     async def on_pipeline_complete(self, event_id: str) -> None:
-        """Post a natural closing summary to the room."""
+        """Post a natural closing summary to the room.
+
+        Solution 5: the closing message must reflect the ACTUAL verdict. For a
+        neutral verification that found nothing, announcing "Report ready for
+        NDMA dispatch" is misleading — we post an honest all-clear instead. The
+        verdict is read from the real impact + hazard results (now threaded
+        through correctly by Solution 3).
+        """
         disaster = self._context.get(event_id, {}).get("disaster", {})
         impact = self._agent_data(event_id, "impact")
+        hazard = self._agent_data(event_id, "hazard")
         affected = impact.get("total_affected")
         location = disaster.get("location", "the affected area")
+
+        # Determine the verdict from real downstream data.
+        no_impact = bool(impact.get("no_significant_impact")) or (
+            affected == 0
+        )
+        hazard_risk = str(
+            hazard.get("flood_risk") or hazard.get("overall_severity") or ""
+        ).upper()
+        all_clear = no_impact or hazard_risk in ("LOW", "NONE", "UNKNOWN", "MINIMAL")
+
+        if all_clear:
+            findings = (
+                f"Verification complete for {location}. No significant disaster "
+                f"detected — hazard risk {hazard_risk or 'LOW'}, "
+                f"{affected if affected is not None else 0} people at risk. "
+                "An all-clear situation report has been generated. "
+                "No NDMA emergency dispatch required."
+            )
+            fallback = (
+                f"{all_handles_text()} Verification complete for {location}. "
+                f"No significant flooding/disaster detected (risk "
+                f"{hazard_risk or 'LOW'}). All-clear report generated; no "
+                "emergency dispatch required."
+            )
+        else:
+            findings = (
+                f"Pipeline complete. {location} response analysis delivered"
+                + (f" — {affected} affected" if affected is not None else "")
+                + ". Report and map ready for NDMA dispatch."
+            )
+            fallback = (
+                f"{all_handles_text()} Pipeline complete. {location} response "
+                "analysis delivered. Report and map ready for NDMA dispatch."
+            )
+
         try:
             summary = await generate_natural_message(
                 sender_agent=ORCHESTRATOR_AGENT,
                 sender_role=ORCHESTRATOR_ROLE,
                 receiver_agent="the response team",
                 receiver_handle=all_handles_text(),
-                context={"disaster": disaster, "impact": impact},
-                findings=(
-                    f"Pipeline complete. {location} response analysis delivered"
-                    + (f" — {affected} affected" if affected is not None else "")
-                    + ". Report and map ready for NDMA dispatch."
-                ),
+                context={"disaster": disaster, "impact": impact, "hazard": hazard},
+                findings=findings,
                 urgency="normal",
             )
         except Exception:  # noqa: BLE001
-            summary = (
-                f"{all_handles_text()} Pipeline complete. {location} response "
-                "analysis delivered. Report and map ready for NDMA dispatch. "
-                "All agents performed well."
-            )
+            summary = fallback
         room_id = self._room(event_id)
         await send_text_message(summary, mentions=mentions_for_all(), room_id=room_id)
         await send_task_update("Pipeline", "complete", room_id=room_id)
@@ -868,19 +958,62 @@ class OrchestratorAgent:
                 "event_id=%s: failed to post failure alert to Band", event_id
             )
 
-    async def _agent_completed(self, event_id: str, agent: str) -> bool:
-        """True if a recorded inbound message reports ``<agent>`` complete.
+    @staticmethod
+    def _is_own_message(parsed: dict) -> bool:
+        """True if a stored message was sent by the orchestrator itself.
 
-        Reads the inbound_store (populated by the recording adapter), since
-        Band's REST history is empty for this agent. Detects both the
-        structured completion signal ({"step": "<agent>", "status": "complete"})
-        and the plain-text "<agent> complete" marker.
+        CRITICAL (Solution 2): the orchestrator's OWN handoff text says e.g.
+        "@hazardmind-impact hazard stage complete". If we counted that as the
+        hazard agent's completion, the orchestrator would advance off its own
+        echo — firing every downstream handoff within seconds, before any agent
+        actually finished, and forwarding empty data. So completion detection
+        must consider ONLY messages whose sender is a real pipeline agent.
+        """
+        sender = str(parsed.get("agent") or "").lower()
+        return "orchestrator" in sender
+
+    async def _agent_completed_in_db(self, event_id: str, agent: str) -> bool:
+        """True if ``<agent>`` has written its result row to the DB.
+
+        The deterministic autodispatch in each agent writes its DB row even when
+        Band's room transcript can't carry a completion signal (REST history is
+        empty for per-event rooms). The orchestrator uses this as the reliable
+        completion check so it advances and hands off to the next agent. Maps each
+        pipeline agent to the table it owns.
+        """
+        table = {
+            "satellite": "satellite_results",
+            "hazard": "hazard_zones",
+            "impact": "impact_data",
+            "report": "final_reports",
+        }.get(agent)
+        if not table:
+            return False
+        try:
+            from db import get_pool
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                n = await conn.fetchval(
+                    f"SELECT count(*) FROM {table} WHERE event_id = $1", event_id
+                )
+            return bool(n)
+        except Exception:  # noqa: BLE001 - DB check is best-effort
+            return False
+
+    async def _agent_completed(self, event_id: str, agent: str) -> bool:
+        """True if a message FROM ``<agent>`` reports it complete.
+
+        Reads the inbound_store (populated by the recording adapter). Detects the
+        structured completion signal ({"step": "<agent>", "status": "complete"}
+        or a flat tail JSON with status=complete) and, as a fallback, the
+        plain-text "<agent> complete" marker — but ALWAYS ignores the
+        orchestrator's own messages (see _is_own_message) so it never advances
+        off its own handoff echo.
         """
         marker = f"{agent} complete".lower()
         # Natural phrasings the LLM-driven agents tend to use instead of the
-        # literal "<agent> complete" marker (e.g. "satellite analysis complete",
-        # "satellite phase ... complete"). Only counted when the message also
-        # references this event_id (inbound_store.for_event already scopes that).
+        # literal "<agent> complete" marker (e.g. "satellite analysis complete").
         natural_markers = (
             f"{agent} analysis complete",
             f"{agent} phase complete",
@@ -889,28 +1022,70 @@ class OrchestratorAgent:
             f"{agent} is complete",
         )
         for parsed in inbound_store.for_event(event_id):
+            # Never let the orchestrator's own handoff/echo count as a completion.
+            if self._is_own_message(parsed):
+                continue
+
             raw_content = str(parsed.get("content", ""))
             content = raw_content.lower()
             data = parsed.get("data") or {}
+
+            # (1) Authoritative structured signal from the agent.
             if (
                 str(data.get("step", "")).lower() == agent
                 and str(data.get("status", "")).lower() == "complete"
             ):
                 return True
+            # (2) Flat tail JSON the agent appends to its room message.
+            #
+            # CRITICAL: the completion must be ATTRIBUTABLE to THIS agent. We
+            # match on an explicit `from`/`agent`/`step` field naming the agent.
+            # We must NOT treat an absent/empty tag as a match — otherwise the
+            # satellite's completion JSON (which has no `step`/`from`) is counted
+            # as hazard's, impact's AND report's completion, so the orchestrator
+            # "advances" all three stages in seconds without any agent doing work
+            # (the bug seen live: hazard/impact/report never ran, yet the pipeline
+            # finished and forwarded the satellite payload as if it were theirs).
+            obj = _json_object_from_text(raw_content)
+            if isinstance(obj, dict) and str(obj.get("event_id", "")) == event_id:
+                tag = str(
+                    obj.get("from")
+                    or obj.get("agent")
+                    or obj.get("step")
+                    or ""
+                ).lower()
+                status_ok = str(obj.get("status", "")).lower() == "complete"
+                tag_ok = tag in (agent, f"hazardmind-{agent}")
+                if status_ok and tag_ok:
+                    return True
+            # (3) Plain-text marker fallback (only on a non-orchestrator message).
             if marker in content or any(nm in content for nm in natural_markers):
                 return True
-            # An agent may relay an LLM-written natural message (which may not
-            # contain a literal completion marker) with its flat result JSON
-            # appended. Recognize that tail payload as completion.
+        return False
+
+    async def _agent_failed(self, event_id: str, agent: str) -> str | None:
+        """Return the error string if ``<agent>`` reported error/failed for this event.
+
+        The pipeline agents post a structured ``{"status": "error"|"failed", ...}``
+        payload (and/or a "<agent> ... failed" / "ERROR" line) when they give up —
+        e.g. when a sustained internet outage exceeds the download grace budget.
+        Detecting it lets monitor_progress abort cleanly instead of waiting forever
+        for a completion that will never arrive. Returns the error message, or None.
+        """
+        for parsed in inbound_store.for_event(event_id):
+            raw_content = str(parsed.get("content", ""))
+            data = parsed.get("data") or {}
+            status = str(data.get("status", "")).lower()
+            if status in ("error", "failed"):
+                return str(data.get("error") or data.get("message") or "agent reported failure")
             obj = _json_object_from_text(raw_content)
             if (
                 isinstance(obj, dict)
                 and str(obj.get("event_id", "")) == event_id
-                and str(obj.get("status", "")).lower() == "complete"
-                and str(obj.get("step", agent)).lower() in (agent, "")
+                and str(obj.get("status", "")).lower() in ("error", "failed")
             ):
-                return True
-        return False
+                return str(obj.get("error") or obj.get("message") or "agent reported failure")
+        return None
 
 
 def _num(value):
