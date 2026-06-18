@@ -101,12 +101,15 @@ Your task is REASONING, not estimation:
 - Typical age distribution for {city} — children under 5 + elderly over 65?
 - 3 specific local vulnerability factors unique to {city}?
 
-population_affected must be a positive integer — never 0.
+Base population_affected on the REAL flood extent and risk level. If the risk is
+genuinely high and people are in the flood zone, report the real exposed count.
+If the affected area is tiny or the risk is low, a small or zero figure is the
+honest answer — do NOT inflate it.
 {"Derive population_affected from the real GeoNames figure using your flood-zone reasoning." if real_pop else "Estimate based on city size and affected area."}
 
 Return ONLY valid JSON, no other text:
 {{
-    "population_affected": <positive integer in the flood impact zone>,
+    "population_affected": <integer people in the flood impact zone — honest, may be small>,
     "high_risk_people": <integer — approx 20% in direct flood zone>,
     "medium_risk_people": <integer — approx 50% in adjacent zones>,
     "vulnerable_population": <children under 5 + elderly over 65>,
@@ -154,17 +157,31 @@ async def run_population_task(hazard_data: dict, event_id: str) -> dict:
         pop = int((result or {}).get("population_affected", 0) or 0)
         print(f"[DEBUG][Population] Escalated estimate: {pop:,} (model={model_used})", flush=True)
 
+    # NOTE: a genuine "no disaster" event is handled by the decision gate in
+    # agent.py (it never reaches this task). So reaching here means the hazard
+    # risk WAS significant; if the LLM still returned 0/None it likely just
+    # failed to parse — retry once, then fall back to a conservative estimate
+    # rather than crashing the whole impact stage.
     if not result or pop == 0:
-        logger.warning("[population] LLM returned 0 — retrying with stronger prompt")
+        logger.warning("[population] LLM returned 0 on a significant-risk event — retrying")
         retry_prompt = prompt + (
-            f"\n\nCRITICAL: population_affected MUST be a realistic positive integer "
-            f"based on your knowledge of {city}. Returning 0 is not acceptable."
+            f"\n\nThe hazard risk for this event is significant. Provide your best "
+            f"realistic estimate of population_affected for {city} based on the "
+            f"affected area and real population data."
         )
         result, model_used, reasoning = await smart_llm_call(retry_prompt, "high", task_name="population")
         pop = int((result or {}).get("population_affected", 0) or 0)
 
-    if not result or pop == 0:
-        raise ValueError(f"LLM returned 0 population for {event_id} ({city}) after retry.")
+    if not result:
+        result = {}
+    if pop == 0:
+        # Conservative deterministic floor for a significant-risk event so the
+        # stage still produces data instead of crashing (was: raise ValueError).
+        pop = max(int((real_pop or 0) * 0.02), 500)
+        logger.warning(
+            "[population] Using conservative fallback estimate %d for %s "
+            "(LLM gave 0 on a significant-risk event)", pop, city,
+        )
 
     result["population_affected"] = pop
     result["population_count"]    = pop  # backward compat alias

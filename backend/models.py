@@ -14,6 +14,7 @@ class AnalyzeResponse(BaseModel):
     job_id: str
     status: str
     message: str
+    band_room_id: Optional[str] = None
 
 
 class StatusResponse(BaseModel):

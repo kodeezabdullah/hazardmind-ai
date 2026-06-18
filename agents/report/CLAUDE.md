@@ -8,6 +8,20 @@ Generates final executive output: map snapshot, PDF report, summary.
 - Upload artifacts to Cloudflare R2
 - Publish final report via Band SDK
 
+## event_id truncation hardening (`band_agent.py`)
+
+The Band LangGraph adapter's LLM sometimes truncates the UUID `event_id` to its
+leading 8-char segment. `final_reports.event_id` is **UUID-typed**, so a short id
+would break the write and the join back to the other tables. Fix (mirrors
+satellite/hazard/impact):
+- `_BoundEventIdAdapter.on_message` snapshots the full `event_id: <uuid>` from the
+  inbound dispatch **before the LLM runs** and binds it to the room
+  (`_bind_room_event_id`, keyed by the LangGraph `thread_id`).
+- `_resolve_event_id(event_id, room_id)` (called in
+  `run_report_from_band_message`) prefers that room-bound full UUID over the
+  LLM-parsed value. The pre-existing `_best_effort_event_id` text-extraction
+  fallback is retained for the failure path.
+
 ## Band Integration
 
 Connects to the Band platform using the Anthropic adapter.

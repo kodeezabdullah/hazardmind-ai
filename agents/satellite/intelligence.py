@@ -207,6 +207,27 @@ class SatelliteIntelligence:
         else:
             logger.warning("AIML_API_KEY not set — Opus last resort disabled.")
 
+        # Gemini clients (one per key) — PRIMARY for the satellite intelligence
+        # layer. Featherless is congested + 32k-capped, so Gemini 3.1 runs first;
+        # the 5 keys are tried in order so per-key free quota stops blocking. The
+        # raw OpenAI client targets Gemini's OpenAI-compatible endpoint.
+        self._gemini_model = os.getenv("SATELLITE_GEMINI_MODEL", "gemini-3.1-flash-lite")
+        self._gemini_clients: list[OpenAI] = []
+        for _kv in (
+            "GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3",
+            "GEMINI_API_KEY_4", "GEMINI_API_KEY_5",
+        ):
+            _k = os.getenv(_kv)
+            if _k:
+                self._gemini_clients.append(
+                    OpenAI(
+                        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                        api_key=_k,
+                        timeout=MODEL_TIMEOUT_SECONDS,
+                        max_retries=0,
+                    )
+                )
+
     # ------------------------------------------------------------------ #
     # Low-level: run a prompt through the fallback chain
     # ------------------------------------------------------------------ #
@@ -225,7 +246,11 @@ class SatelliteIntelligence:
             # try it first anyway (still via Featherless).
             chain.insert(0, primary_model)
 
-        attempts: list[tuple[str, str]] = [("featherless", m) for m in chain]
+        # Gemini PRIMARY (one attempt per key), then Featherless, then AIML Opus.
+        attempts: list[tuple[str, str]] = [
+            (f"gemini:{i}", self._gemini_model) for i in range(len(self._gemini_clients))
+        ]
+        attempts += [("featherless", m) for m in chain]
         attempts.append(("aiml", AIML_OPUS_MODEL))  # last resort
         return attempts
 
@@ -258,7 +283,13 @@ class SatelliteIntelligence:
         messages.append({"role": "user", "content": prompt})
 
         for provider, model in self._build_chain(primary_model):
-            client = self._featherless if provider == "featherless" else self._aiml
+            if provider.startswith("gemini:"):
+                idx = int(provider.split(":", 1)[1])
+                client = self._gemini_clients[idx] if idx < len(self._gemini_clients) else None
+            elif provider == "featherless":
+                client = self._featherless
+            else:
+                client = self._aiml
             if client is None:
                 continue
             try:
@@ -269,9 +300,8 @@ class SatelliteIntelligence:
                     "timeout": MODEL_TIMEOUT_SECONDS,
                 }
                 # The AIML-hosted Opus model rejects `temperature` ("deprecated
-                # for this model" -> HTTP 400). Only the Featherless models take
-                # it; omit it for the Opus last resort so the fallback actually
-                # works when the whole Featherless chain is down.
+                # for this model" -> HTTP 400). Featherless + Gemini take it; omit
+                # only for the Opus last resort so the fallback works.
                 if provider != "aiml":
                     kwargs["temperature"] = temperature
                 resp = client.chat.completions.create(**kwargs)

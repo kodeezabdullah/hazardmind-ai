@@ -3,7 +3,9 @@ anthropic==0.109.1
 anyio==4.13.0
 aiohttp==3.11.11
 asyncpg==0.30.0
-band-sdk[anthropic]==1.0.0
+band-sdk[langgraph]==1.0.0
+langchain-openai==1.3.2
+langgraph==1.2.5
 certifi==2026.5.20
 charset-normalizer==3.4.7
 colorama==0.4.6

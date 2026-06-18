@@ -127,6 +127,19 @@ CREATE TABLE IF NOT EXISTS impact_data (
 );
 ```
 
+## event_id truncation hardening (`agent.py`)
+
+The Band LangGraph adapter's LLM sometimes truncates the UUID `event_id` to its
+leading 8-char segment. `impact_data.event_id` is **UUID-typed** (per
+`shared/db/schema.sql` — note the schema block below is stale and shows TEXT), so
+a short id would break the INSERT. Fix (mirrors satellite/hazard):
+- `_BoundEventIdAdapter.on_message` snapshots the full `event_id: <uuid>` from the
+  inbound dispatch **before the LLM runs** and binds it to the room
+  (`_bind_room_event_id`, keyed by the LangGraph `thread_id`).
+- `_resolve_event_id(event_id, room_id)` (called at the top of
+  `run_impact_analysis`) prefers that room-bound full UUID over the LLM-supplied
+  tool argument.
+
 ## Key Rules
 - Never hardcode API keys — all from environment
 - DB writes are non-fatal — log error, continue

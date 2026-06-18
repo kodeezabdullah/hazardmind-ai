@@ -1,0 +1,35 @@
+@hazardmind-report Impact Agent has completed exposure analysis for the current disaster event. Please generate the executive report, PDF, map route, and final completion signal.
+
+{
+  "event_id": "8f4f7c66-7d9c-4df8-8a4f-78c9bfaeaf21",
+  "from": "hazardmind-impact",
+  "to": "hazardmind-report",
+  "data": {
+    "total_affected": 2300000,
+    "high_risk_people": 450000,
+    "medium_risk_people": 1200000,
+    "hospitals_at_risk": 14,
+    "schools_at_risk": 67,
+    "roads_blocked": 89,
+    "bridges_at_risk": 3,
+    "vulnerability_score": "HIGH",
+    "evacuation_routes": [
+      {
+        "name": "Route 1 - Northern Corridor",
+        "distance_km": 45,
+        "status": "open",
+        "geojson": {
+          "type": "LineString",
+          "coordinates": [
+            [71.49, 33.97],
+            [71.53, 34.0],
+            [71.59, 34.06]
+          ]
+        }
+      }
+    ],
+    "estimated_evacuation_time": "4-6 hours",
+    "overall_confidence": 0.85
+  },
+  "anomalies": []
+}

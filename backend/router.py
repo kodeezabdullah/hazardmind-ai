@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import os
 import uuid
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from band_client import inbound_store
+from band_client import create_event_room, inbound_store
 from db import (
     create_disaster_event,
     get_event_results,
@@ -39,30 +40,54 @@ async def analyze(request: AnalyzeRequest):
         "magnitude": request.magnitude,
     }
 
+    # Per-event Band room.
+    #
+    # DYNAMIC_BAND_ROOMS (default OFF) gates a per-event room. It is OFF because
+    # the orchestrator's Band API key can only populate a room it creates with
+    # *same-owner* agents (the satellite agent auto-joins; it shares the
+    # orchestrator's owner). The hazard/impact/report agents belong to different
+    # Band owner accounts and CANNOT be added by this key — an explicit add is
+    # 403 and @mentioning a non-member is 422 (verified live). So a dynamic room
+    # would never receive those agents and the pipeline would hang. Until all
+    # pipeline agents share one Band owner (or Band exposes an invite flow this
+    # key can drive), /analyze uses the shared static BAND_ROOM_ID that all five
+    # agents were manually invited into. See backend/CLAUDE.md "Dynamic rooms".
+    room_id = os.getenv("BAND_ROOM_ID")
+    if os.getenv("DYNAMIC_BAND_ROOMS", "false").strip().lower() in ("1", "true", "yes"):
+        try:
+            room_id = await create_event_room(event_id, request.location)
+        except Exception:  # noqa: BLE001 - dynamic room is best-effort
+            logger.exception(
+                "event_id=%s: room creation failed; using static room", event_id
+            )
+            room_id = os.getenv("BAND_ROOM_ID")
+
     await create_disaster_event(
         event_id=event_id,
         location=request.location,
         disaster_type=request.disaster_type,
         magnitude=request.magnitude,
+        band_room_id=room_id,
     )
 
     # Hand off to the orchestrator: sets status -> processing/satellite and
-    # mentions the satellite agent on Band.
-    await orchestrator.start_pipeline(event_id, disaster_data)
+    # mentions the satellite agent in the event's Band room.
+    await orchestrator.start_pipeline(event_id, disaster_data, room_id=room_id)
 
     # Watch the pipeline in the background so the request returns immediately.
-    asyncio.create_task(_monitor(event_id))
+    asyncio.create_task(_monitor(event_id, room_id))
 
     return AnalyzeResponse(
         job_id=event_id,
         status="processing",
+        band_room_id=room_id,
         message="Pipeline started",
     )
 
 
-async def _monitor(event_id: str) -> None:
+async def _monitor(event_id: str, room_id: str | None = None) -> None:
     try:
-        await orchestrator.monitor_progress(event_id)
+        await orchestrator.monitor_progress(event_id, room_id=room_id)
     except Exception:  # noqa: BLE001 - background task must not crash silently
         logger.exception("monitor_progress failed for event_id=%s", event_id)
 

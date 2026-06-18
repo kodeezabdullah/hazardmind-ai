@@ -1,16 +1,20 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import math
 import os
 
 import aiohttp
+import numpy as np
 from dotenv import load_dotenv
 
 from intelligence import smart_llm_call
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 GDACS_API = os.getenv("GDACS_API", "https://www.gdacs.org/gdacsapi/api")
 USGS_API = os.getenv("USGS_API", "https://earthquake.usgs.gov/fdsnws/event/1")
@@ -65,23 +69,104 @@ async def fetch_usgs(bbox: list, days: int = 7) -> dict:
         return {"earthquakes": [], "count": 0, "source": "usgs", "error": str(e)}
 
 
-async def fetch_slope(bbox: list) -> dict:
-    """Estimate slope from bbox geometry instead of fetching unparsed GTiff data."""
+# OpenTopoData public API — free, no-auth, global. SRTM 30m is the best global
+# coverage dataset it serves. Queries return elevation (m) for a list of points.
+_OPENTOPODATA_API = "https://api.opentopodata.org/v1/srtm30m"
+# Grid resolution per axis for the elevation sample (NxN points over the bbox).
+# 5x5 = 25 points keeps us within OpenTopoData's 100-locations/request limit and
+# its ~1 req/s public rate, while giving enough samples to estimate real slope.
+_DEM_GRID = 5
+
+
+def _slope_from_grid(elevations: list, lats: list, lngs: list) -> float | None:
+    """Compute mean terrain slope (degrees) from a grid of elevation samples.
+
+    Uses numpy's gradient over the elevation grid, converting degree spacing to
+    metres (≈111,320 m/deg lat; lng scaled by cos(lat)). Returns the mean slope
+    in degrees, or None if the grid is unusable.
+    """
     try:
-        min_lng, min_lat, max_lng, max_lat = [float(value) for value in bbox]
+        n = _DEM_GRID
+        if len(elevations) < n * n:
+            return None
+        grid = np.array(elevations[: n * n], dtype=float).reshape(n, n)
+        if not np.isfinite(grid).all():
+            return None
+        lat_span = abs(max(lats) - min(lats)) or 1e-6
+        lng_span = abs(max(lngs) - min(lngs)) or 1e-6
+        mean_lat = (max(lats) + min(lats)) / 2.0
+        # Metres per grid step along each axis.
+        dy = (lat_span / (n - 1)) * 111_320.0
+        dx = (lng_span / (n - 1)) * 111_320.0 * max(0.05, math.cos(math.radians(mean_lat)))
+        gy, gx = np.gradient(grid, dy, dx)
+        slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
+        return float(np.degrees(slope_rad).mean())
+    except Exception:  # noqa: BLE001 - any math failure -> caller falls back
+        return None
+
+
+async def fetch_slope(bbox: list) -> dict:
+    """Fetch a REAL DEM over the bbox and compute actual terrain slope.
+
+    Samples a 5x5 grid of SRTM 30m elevations from OpenTopoData (free, no-auth,
+    global) and computes the mean slope in degrees from the elevation gradient.
+    This replaces the old physically-meaningless heuristic (slope from
+    latitude-distance-from-25° + bbox size) that falsely flagged flat cities like
+    Rawalpindi as HIGH landslide risk. Works worldwide. On any failure it returns
+    `available: False` with a low conservative default rather than fabricating
+    steepness — so a missing DEM never invents a landslide.
+    """
+    try:
+        min_lng, min_lat, max_lng, max_lat = [float(v) for v in bbox]
     except (TypeError, ValueError):
-        min_lng, min_lat, max_lng, max_lat = 0.0, 0.0, 0.0, 0.0
+        return {"available": False, "slope_estimate": 10.0, "source": "bad_bbox_default"}
 
-    lat_center = (min_lat + max_lat) / 2
-    bbox_area = abs((max_lng - min_lng) * (max_lat - min_lat))
-    slope_estimate = 15.0 + (abs(lat_center - 25) * 0.5)
-    if bbox_area < 0.5:
-        slope_estimate += 10
+    n = _DEM_GRID
+    lats, lngs, locations = [], [], []
+    for i in range(n):
+        lat = min_lat + (max_lat - min_lat) * (i / (n - 1))
+        lats.append(lat)
+    for j in range(n):
+        lng = min_lng + (max_lng - min_lng) * (j / (n - 1))
+        lngs.append(lng)
+    # Row-major grid of "lat,lng" points.
+    for lat in lats:
+        for lng in lngs:
+            locations.append(f"{lat:.5f},{lng:.5f}")
 
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        params = {"locations": "|".join(locations)}
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(_OPENTOPODATA_API, params=params) as response:
+                response.raise_for_status()
+                data = await _read_json(response)
+
+        results = data.get("results", []) if isinstance(data, dict) else []
+        elevations = [
+            r.get("elevation") for r in results if r.get("elevation") is not None
+        ]
+        grid_lats = [r["location"]["lat"] for r in results if r.get("location")]
+        grid_lngs = [r["location"]["lng"] for r in results if r.get("location")]
+
+        slope = _slope_from_grid(elevations, grid_lats or lats, grid_lngs or lngs)
+        if slope is not None:
+            return {
+                "available": True,
+                "slope_estimate": round(slope, 2),
+                "elevation_min_m": round(min(elevations), 1) if elevations else None,
+                "elevation_max_m": round(max(elevations), 1) if elevations else None,
+                "samples": len(elevations),
+                "source": "opentopodata_srtm30m",
+            }
+    except Exception as e:  # noqa: BLE001 - DEM is best-effort; never crash analysis
+        logger.warning("fetch_slope DEM lookup failed: %s", e)
+
+    # No real DEM -> conservative low default (do NOT fabricate steepness).
     return {
-        "available": True,
-        "slope_estimate": slope_estimate,
-        "source": "opentopography_estimated",
+        "available": False,
+        "slope_estimate": 10.0,
+        "source": "no_dem_conservative_default",
     }
 
 
@@ -151,41 +236,47 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     max_mag = max((_to_float(mag) for mag in magnitudes), default=0.0)
     eq_count = usgs_data.get("count", 0)
     prompt = (
-        f"Earthquake risk. Count: {eq_count}. Max magnitude: {max_mag}. "
-        f"BBox: {bbox}. Return JSON only."
+        f"Earthquake risk assessment from OBSERVED data only.\n"
+        f"Recent earthquakes in area (USGS, last 7 days): count={eq_count}, "
+        f"max magnitude={max_mag}.\n"
+        f"BBox: {bbox}.\n"
+        f"Rules: base risk ONLY on the observed count/magnitude above. "
+        f"If count is 0 and max magnitude is 0, there is NO recent seismic "
+        f"activity, so risk is LOW. Do NOT raise the risk from general regional "
+        f"seismicity or geographic assumptions — only real recent events count.\n"
+        f"Return JSON only."
     )
     system = (
-        "You are a seismic risk analyst. Return only JSON with keys: risk "
-        "(CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning (string), "
-        "liquefaction_probability (0.0-1.0)."
+        "You are a seismic risk analyst who reports ONLY what the observed data "
+        "supports. Absence of recent earthquakes means LOW risk — never invent "
+        "elevated risk from a region's general reputation. Return only JSON with "
+        "keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning "
+        "(string), liquefaction_probability (0.0-1.0)."
     )
 
-    response = await smart_llm_call(prompt, system, criticality="normal")
-    parsed = _parse_model_json(response)
-    if parsed:
-        return {
-            "risk": _normalize_risk(parsed.get("risk"), "LOW"),
-            "confidence": _clamp_confidence(parsed.get("confidence"), 0.6),
-            "reasoning": str(parsed.get("reasoning") or "LLM seismic risk assessment."),
-            "liquefaction_probability": _clamp_confidence(
-                parsed.get("liquefaction_probability"),
-                0.1,
-            ),
-        }
-
+    # DETERMINISTIC risk from observed seismicity. We intentionally do NOT ask an
+    # LLM here: earthquake risk is a direct function of recent magnitude/count,
+    # and LLMs repeatedly inflated it from a region's general reputation (e.g.
+    # "Pakistan is seismically active" -> HIGH) even when USGS shows zero recent
+    # events — fabricating a disaster on a no-event feed. The data decides.
     if max_mag >= 7.0:
-        risk, confidence, liq = "CRITICAL", 0.8, 0.8
+        risk, confidence, liq = "CRITICAL", 0.85, 0.8
     elif max_mag >= 5.5:
-        risk, confidence, liq = "HIGH", 0.75, 0.5
+        risk, confidence, liq = "HIGH", 0.8, 0.5
     elif max_mag >= 4.0:
-        risk, confidence, liq = "MEDIUM", 0.65, 0.3
+        risk, confidence, liq = "MEDIUM", 0.7, 0.3
     else:
-        risk, confidence, liq = "LOW", 0.6, 0.1
+        risk, confidence, liq = "LOW", 0.85, 0.1
 
     return {
         "risk": risk,
         "confidence": confidence,
-        "reasoning": "Fallback earthquake risk based on recent maximum magnitude.",
+        "reasoning": (
+            f"Seismic risk from observed USGS data: {eq_count} recent event(s), "
+            f"max magnitude {max_mag}. No recent significant seismicity -> LOW."
+            if risk == "LOW"
+            else f"Seismic risk from observed USGS data: max magnitude {max_mag}."
+        ),
         "liquefaction_probability": liq,
     }
 
@@ -193,41 +284,48 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
 async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     slope_estimate = slope_data.get("slope_estimate", 15.0)
     prompt = (
-        f"Landslide risk. Slope estimate: {slope_estimate} degrees. "
-        f"GDACS events: {gdacs_data.get('count', 0)}. BBox: {bbox}. Return JSON only."
+        f"Landslide risk assessment from OBSERVED data only.\n"
+        f"Mean terrain slope (real DEM): {slope_estimate} degrees.\n"
+        f"GDACS landslide events in area: {gdacs_data.get('count', 0)}.\n"
+        f"BBox: {bbox}.\n"
+        f"Rules: base risk ONLY on the slope and events above. Flat terrain "
+        f"(slope < 10 degrees) with no events is LOW risk. Do NOT raise risk "
+        f"from general regional assumptions — only the measured slope/events "
+        f"count.\nReturn JSON only."
     )
     system = (
-        "You are a landslide risk analyst. Return only JSON with keys: risk "
-        "(CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning (string), "
-        "high_risk_zones (list)."
+        "You are a landslide risk analyst who reports ONLY what the observed "
+        "slope/events support. Flat terrain with no events means LOW risk — "
+        "never invent elevated risk from a region's reputation. Return only JSON "
+        "with keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), "
+        "reasoning (string), high_risk_zones (list)."
     )
 
-    response = await smart_llm_call(prompt, system, criticality="normal")
-    parsed = _parse_model_json(response)
-    if parsed:
-        return {
-            "risk": _normalize_risk(parsed.get("risk"), "LOW"),
-            "confidence": _clamp_confidence(parsed.get("confidence"), 0.55),
-            "reasoning": str(parsed.get("reasoning") or "LLM landslide risk assessment."),
-            "high_risk_zones": parsed.get("high_risk_zones")
-            if isinstance(parsed.get("high_risk_zones"), list)
-            else [],
-        }
-
+    # DETERMINISTIC risk from the real DEM slope. No LLM: LLMs inflated landslide
+    # risk from a region's reputation even on flat terrain. We also do NOT use the
+    # GDACS `count` here — the GDACS feed returns GLOBAL events (its bbox filter
+    # is unreliable; e.g. it returned 93 events for Rawalpindi, all at coordinates
+    # in China/Mongolia), so a raw count would falsely raise the risk. The real
+    # measured slope is the trustworthy signal.
     slope = _to_float(slope_estimate)
     if slope > 45:
-        risk, confidence = "CRITICAL", 0.75
+        risk, confidence = "CRITICAL", 0.8
     elif slope > 30:
-        risk, confidence = "HIGH", 0.7
+        risk, confidence = "HIGH", 0.75
     elif slope > 15:
-        risk, confidence = "MEDIUM", 0.6
+        risk, confidence = "MEDIUM", 0.65
     else:
-        risk, confidence = "LOW", 0.55
+        risk, confidence = "LOW", 0.8
 
     return {
         "risk": risk,
         "confidence": confidence,
-        "reasoning": "Fallback landslide risk based on estimated slope.",
+        "reasoning": (
+            f"Landslide risk from real DEM mean slope {slope:.1f}°. "
+            f"Flat terrain -> LOW."
+            if risk == "LOW"
+            else f"Landslide risk from real DEM mean slope {slope:.1f}°."
+        ),
         "high_risk_zones": [],
     }
 
@@ -304,6 +402,12 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
 
     severity_map = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 1}
     reverse_map = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}
+    # Overall severity follows the highest KNOWN risk. UNKNOWN maps to 1 (it does
+    # not raise severity) — for a flood event, the earthquake/landslide checks
+    # legitimately return UNKNOWN (no quake/landslide data), and that absence must
+    # NOT be treated as a hazard. (Previously `unknown_count >= 2` force-set HIGH,
+    # which stamped every flood-only event — even a no-flood one — as HIGH
+    # severity: a systematic false alarm. Removed.)
     max_score = max(
         severity_map.get(flood["risk"], 1),
         severity_map.get(quake["risk"], 1),
@@ -313,8 +417,10 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     unknown_count = sum(
         1 for r in [flood, quake, landslide] if r.get("risk") == "UNKNOWN"
     )
-    if unknown_count >= 2:
-        overall_severity = "HIGH"
+    # Only flag genuine uncertainty when the PRIMARY hazard itself is unknown
+    # (i.e. we could not assess the disaster we were dispatched for) — surface it
+    # as a concern, never as an automatic severity escalation.
+    primary_unknown = flood.get("risk") == "UNKNOWN"
 
     return {
         "event_id": event_id,
@@ -323,6 +429,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         "landslide_risk": landslide["risk"],
         "overall_severity": overall_severity,
         "unknown_count": unknown_count,
+        "primary_unknown": primary_unknown,
         "confidence_scores": {
             "flood": flood.get("confidence", 0.0),
             "earthquake": quake.get("confidence", 0.0),

@@ -1,0 +1,153 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-critical-001",
+        "severity": "critical",
+        "risk_level": "CRITICAL",
+        "hazard_type": "flood",
+        "area_km2": 12.4
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.465,
+              33.965
+            ],
+            [
+              71.5,
+              33.965
+            ],
+            [
+              71.5,
+              34.0
+            ],
+            [
+              71.465,
+              34.0
+            ],
+            [
+              71.465,
+              33.965
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-high-001",
+        "severity": "high",
+        "risk_level": "HIGH",
+        "hazard_type": "flood",
+        "area_km2": 8.2
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.515,
+              33.995
+            ],
+            [
+              71.543,
+              33.995
+            ],
+            [
+              71.543,
+              34.023
+            ],
+            [
+              71.515,
+              34.023
+            ],
+            [
+              71.515,
+              33.995
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-medium-001",
+        "severity": "medium",
+        "risk_level": "MEDIUM",
+        "hazard_type": "flood",
+        "area_km2": 5.1
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.42,
+              33.935
+            ],
+            [
+              71.444,
+              33.935
+            ],
+            [
+              71.444,
+              33.959
+            ],
+            [
+              71.42,
+              33.959
+            ],
+            [
+              71.42,
+              33.935
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "zone_id": "fixture-low-001",
+        "severity": "low",
+        "risk_level": "LOW",
+        "hazard_type": "flood",
+        "area_km2": 2.4
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              71.59,
+              34.045
+            ],
+            [
+              71.608,
+              34.045
+            ],
+            [
+              71.608,
+              34.063
+            ],
+            [
+              71.59,
+              34.063
+            ],
+            [
+              71.59,
+              34.045
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

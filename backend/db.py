@@ -63,21 +63,33 @@ async def create_disaster_event(
     location: str,
     disaster_type: str,
     magnitude: Optional[float],
+    band_room_id: Optional[str] = None,
 ) -> None:
-    """Insert a new event. Status starts as 'received'."""
+    """Insert a new event. Status starts as 'received'.
+
+    band_room_id is the dynamic Band room created for this event (see
+    band_client.create_event_room). It is stored so the transcript can be
+    re-fetched later and so each event maps to its own room. The column is
+    ensured at insert time with ADD COLUMN IF NOT EXISTS, so no separate
+    migration step is required for an existing disaster_events table.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE disaster_events ADD COLUMN IF NOT EXISTS band_room_id TEXT"
+        )
         await conn.execute(
             """
             INSERT INTO disaster_events
                 (event_id, location, disaster_type, magnitude,
-                 status, step, progress)
-            VALUES ($1, $2, $3, $4, 'received', 'received', 0)
+                 status, step, progress, band_room_id)
+            VALUES ($1, $2, $3, $4, 'received', 'received', 0, $5)
             """,
             event_id,
             location,
             disaster_type,
             magnitude,
+            band_room_id,
         )
 
 
@@ -171,7 +183,7 @@ async def get_event_status(event_id: str) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT event_id, status, step, progress,
-                   created_at, updated_at
+                   band_room_id, created_at, updated_at
             FROM disaster_events
             WHERE event_id = $1
             """,
