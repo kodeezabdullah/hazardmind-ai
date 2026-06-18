@@ -28,6 +28,51 @@ opus_client = openai.AsyncOpenAI(
     base_url="https://api.aimlapi.com/v1",
 )
 
+# Gemini PRIMARY for the hazard analyzer. The analyzer's prompts (with GDACS/USGS
+# context) can blow past Featherless's 32k cap (observed 57k tokens ->
+# context_length_exceeded), which corrupted the earthquake/landslide risk to a
+# fabricated MEDIUM. Gemini 3.1 has a 1M context (no overflow) and isn't subject
+# to the Featherless concurrency 429, so it runs first; Featherless stays as
+# fallback. 5 keys chained so per-key free quota stops blocking.
+GEMINI_MODEL = os.getenv("HAZARD_GEMINI_MODEL", "gemini-3.1-flash-lite")
+_GEMINI_CLIENTS = []
+for _kv in (
+    "GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3",
+    "GEMINI_API_KEY_4", "GEMINI_API_KEY_5",
+):
+    _k = os.getenv(_kv)
+    if _k:
+        _GEMINI_CLIENTS.append(
+            openai.OpenAI(
+                api_key=_k,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
+        )
+
+
+async def gemini_call(prompt: str, system: str = "", timeout: int = 30) -> str | None:
+    """Call Gemini (each key in turn); first success wins. None if all fail."""
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    for i, client in enumerate(_GEMINI_CLIENTS):
+        try:
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=GEMINI_MODEL,
+                messages=messages,
+                temperature=0.1,
+                timeout=timeout,
+            )
+            text = strip_markdown(_message_content(response))
+            if text:
+                print(f"Gemini key {i} worked: {GEMINI_MODEL}")
+                return text
+        except Exception as exc:
+            print(f"Gemini key {i} failed: {exc}")
+    return None
+
 
 def strip_markdown(text: str | None) -> str:
     """Remove common markdown wrappers from model output."""
@@ -81,7 +126,17 @@ def _message_content(response: Any) -> str:
 
 
 async def featherless_call(prompt: str, system: str = "", timeout: int = 30) -> str | None:
-    """Call Featherless models in order and return the first successful response."""
+    """Gemini PRIMARY, Featherless fallback.
+
+    Named `featherless_call` for back-compat (every analyzer task calls it via
+    smart_llm_call). Gemini runs first to avoid Featherless's 32k overflow +
+    concurrency 429 that corrupted the risk levels; Featherless is the fallback.
+    """
+    if _GEMINI_CLIENTS:
+        g = await gemini_call(prompt, system=system, timeout=timeout)
+        if g:
+            return g
+
     messages = []
     if system:
         messages.append({"role": "system", "content": system})

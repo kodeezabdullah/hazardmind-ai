@@ -8,6 +8,23 @@ Analyzes hazard risks (flood, earthquake, landslide) for a disaster zone.
 - Generate risk polygons in PostGIS
 - Publish results via Band SDK
 
+## event_id truncation hardening (`agent.py`)
+
+The Band LangGraph adapter's LLM sometimes truncates the UUID `event_id` to its
+leading 8-char segment when parsing the inbound payload (e.g. `e9e83455` instead
+of `e9e83455-8ea6-44b7-...`). `hazard_zones.event_id` is **UUID-typed**, so a
+short id makes the INSERT fail with `invalid UUID ... length must be 32..36` and
+crashes the analysis. Fix (defense-in-depth, mirrors the satellite agent):
+- `_BoundEventIdAdapter` overrides `on_message` to extract the full
+  `event_id: <uuid>` from the inbound dispatch text **before the LLM runs** and
+  bind it to the room (`_bind_room_event_id`, keyed by the LangGraph
+  `thread_id`). The LLM cannot corrupt this snapshot.
+- `_resolve_event_id(event_id, room_id)` (called at the top of `analyze_hazard`)
+  prefers the room-bound full UUID over the LLM-parsed value; falls back to the
+  passed id if already a full UUID, else logs and returns it unchanged.
+The real root-cause fix is upstream (satellite now sends the full UUID in its
+handoff JSON); this is the local safety net so hazard never crashes on a bad id.
+
 ## Band Integration
 
 Connects to the Band platform using the Anthropic adapter.
