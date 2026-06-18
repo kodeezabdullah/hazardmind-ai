@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { HazardMap } from "./HazardMap";
 import { loadHazardResult, type HazardResultSource } from "../lib/loadHazardResult";
-import { sampleResult } from "../lib/sampleResult";
+import { emptyResult as sampleResult } from "../lib/sampleResult";
 import type { HazardMindResult, LayerState } from "../lib/types";
 
 type MapSnapshotViewProps = {

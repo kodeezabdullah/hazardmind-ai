@@ -27,5 +27,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-# Band listener — the report agent's entry point is band_agent.py.
-CMD ["python", "-u", "band_agent.py"]
+# Band listener; hf_app.py adds a health server on $PORT for Hugging Face and
+# runs band_agent.py (the report entry point) unchanged in the background.
+EXPOSE 7860
+CMD ["python", "-u", "hf_app.py"]

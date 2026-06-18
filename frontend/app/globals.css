@@ -795,6 +795,20 @@ input {
 .chat-name { font-size: 10px; font-weight: 600; text-transform: capitalize; }
 .chat-time { margin-left: auto; color: #5b7186; font-family: ui-monospace, monospace; font-size: 8.5px; }
 .chat-text { font-size: 11.5px; line-height: 1.5; color: #c8dae9; word-break: break-word; }
+.chat-payload {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(103, 232, 249, 0.3);
+  background: rgba(34, 211, 238, 0.1);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
 
 /* ---- Agent tones (colour per agent) ---- */
 .tone-orchestrator { color: #f0abfc; }

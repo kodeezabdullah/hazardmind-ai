@@ -1,4 +1,4 @@
-import { sampleResult } from "./sampleResult";
+import { emptyResult } from "./sampleResult";
 import type { Facility, HazardMindResult, Severity } from "./types";
 
 export type HazardResultSource = "backend" | "demo-fallback";
@@ -15,29 +15,44 @@ export async function loadHazardResult(eventId: string): Promise<HazardResultLoa
 
   if (apiUrl) {
     try {
-      const response = await fetch(`${apiUrl.replace(/\/$/, "")}/results/${encodeURIComponent(eventId)}`, {
-        cache: "no-store",
-      });
-      if (!response.ok) {
-        throw new Error(`Backend returned ${response.status}`);
+      const base = apiUrl.replace(/\/$/, "");
+      // The pipeline returns 202 ("still running") until every agent has written
+      // its row. The real pipeline can take many minutes (satellite imagery
+      // download + LLM report), so we keep polling for a long window — we never
+      // bail out to demo data while the backend is genuinely still working.
+      const deadline = Date.now() + 40 * 60_000; // 40 min safety cap
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const response = await fetch(`${base}/results/${encodeURIComponent(eventId)}`, {
+          cache: "no-store",
+        });
+        if (response.status === 202) {
+          if (Date.now() > deadline) {
+            throw new Error("Backend still processing after 40 min");
+          }
+          await new Promise((r) => setTimeout(r, 4000));
+          continue;
+        }
+        if (!response.ok) {
+          throw new Error(`Backend returned ${response.status}`);
+        }
+        const payload = await response.json();
+        return {
+          result: normalizeHazardResult(unwrapHazardResult(payload), eventId),
+          source: "backend",
+          warnings,
+        };
       }
-
-      const payload = await response.json();
-      return {
-        result: normalizeHazardResult(unwrapHazardResult(payload), eventId),
-        source: "backend",
-        warnings,
-      };
     } catch (error) {
       warnings.push(`Backend result unavailable; using demo fallback. ${safeError(error)}`);
     }
   } else {
-    warnings.push("NEXT_PUBLIC_API_URL is not set; using bundled Rawalpindi demo data.");
+    warnings.push("NEXT_PUBLIC_API_URL is not set.");
   }
 
-  // No backend configured: use the bundled Rawalpindi sample (real R2 artifacts).
+  // Backend unavailable/unset: return a BLANK result (never demo Rawalpindi).
   return {
-    result: normalizeHazardResult(sampleResult, eventId),
+    result: normalizeHazardResult(emptyResult, eventId),
     source: "demo-fallback",
     warnings,
   };
@@ -274,7 +289,9 @@ function normalizeModelSources(value: unknown): HazardMindResult["model_sources"
 }
 
 function cloneSampleResult(): HazardMindResult {
-  return JSON.parse(JSON.stringify(sampleResult)) as HazardMindResult;
+  // Fallback is BLANK, never the demo (Rawalpindi) data — so a missing field on a
+  // real backend result is filled with empties, not stale Rawalpindi values.
+  return JSON.parse(JSON.stringify(emptyResult)) as HazardMindResult;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

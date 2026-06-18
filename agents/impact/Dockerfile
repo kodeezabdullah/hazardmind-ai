@@ -27,5 +27,6 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-# Band listener (no HTTP server of its own).
-CMD ["python", "-u", "agent.py"]
+# Band listener; hf_app.py adds a health server on $PORT for Hugging Face.
+EXPOSE 7860
+CMD ["python", "-u", "hf_app.py"]

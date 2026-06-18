@@ -33,7 +33,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Application code.
 COPY . .
 
-# The satellite agent is a Band listener (no HTTP server of its own). On Cloud
-# Run, a tiny health endpoint keeps the container reported healthy; on a VM /
-# Compute Engine the listener simply runs. `agent.py` starts the listener.
-CMD ["python", "-u", "agent.py"]
+# The satellite agent is a Band listener (no HTTP server of its own). hf_app.py
+# adds a tiny health server on $PORT (Hugging Face requires it) and runs agent.py
+# unchanged in the background. On a plain VM you can still run `python agent.py`.
+EXPOSE 7860
+CMD ["python", "-u", "hf_app.py"]

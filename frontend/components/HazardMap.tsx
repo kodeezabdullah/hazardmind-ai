@@ -120,9 +120,10 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
       markersRef.current = addFacilityMarkers(map, result);
       applyVisibility(map, markersRef.current, layers);
 
-      // Overlays start hidden so the idle globe stays clean; they are revealed
-      // (and the camera flies in) when `focus` becomes true.
+      // Overlays + facility markers start hidden so the idle globe stays clean
+      // (no pins, no zones); they are revealed when `focus` becomes true.
       setOverlayVisible(map, focus);
+      setMarkersVisible(markersRef.current, focus);
       if (focus) {
         spinningRef.current = false;
         focusOnEvent(map, result, perspective, () => {});
@@ -141,17 +142,39 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
       map.remove();
       mapRef.current = null;
     };
+    // Build the map ONCE on mount. Data changes are applied via the effect below
+    // (sources updated in place) so the camera never resets mid-run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // When the result changes, refresh the data sources in place (no map rebuild,
+  // no camera move).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    (map.getSource("hazard-zones") as mapboxgl.GeoJSONSource | undefined)?.setData(
+      result.analysis.zones as GeoJSON.FeatureCollection,
+    );
+    (map.getSource("hazard-heat") as mapboxgl.GeoJSONSource | undefined)?.setData(
+      zonesToWeightedPoints(result.analysis.zones as GeoJSON.FeatureCollection),
+    );
   }, [result]);
 
   useEffect(() => {
     if (!mapRef.current || !loadedRef.current) {
       return;
     }
+    // Layer toggles only apply once the globe is focused on an event; on the idle
+    // globe everything stays hidden regardless of the (default-on) layer state.
+    if (!focus) return;
     applyVisibility(mapRef.current, markersRef.current, layers);
-  }, [layers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers, focus]);
 
-  // Focus: when analysis overlays appear, stop the spin and fly straight to the
-  // event area, then reveal the heatmap + zones over it.
+  // Focus: ONLY when `focus` flips to true (pipeline done) do we stop the spin
+  // and fly to the event. We intentionally do NOT depend on `result` here, so a
+  // mid-run result update never triggers an early/wrong zoom — the globe just
+  // keeps spinning until `focus` is set.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) {
@@ -161,10 +184,15 @@ export function HazardMap({ result, layers, perspective = false, showHud = true,
       spinningRef.current = false;
       focusOnEvent(map, result, perspective, () => {});
       setOverlayVisible(map, true);
+      setMarkersVisible(markersRef.current, true);
     } else {
+      // Not focused: keep spinning, overlays + markers hidden.
+      spinningRef.current = true;
       setOverlayVisible(map, false);
+      setMarkersVisible(markersRef.current, false);
     }
-  }, [focus, result, perspective]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
 
   return (
     <div className="relative h-full w-full">
@@ -359,6 +387,13 @@ function zonesToWeightedPoints(zones: GeoJSON.FeatureCollection): GeoJSON.Featur
   });
 
   return { type: "FeatureCollection", features };
+}
+
+// Show/hide the facility pins. Hidden on the idle globe; shown only on focus.
+function setMarkersVisible(markers: mapboxgl.Marker[], visible: boolean) {
+  markers.forEach((m) => {
+    m.getElement().style.display = visible ? "grid" : "none";
+  });
 }
 
 // Show/hide the analysis overlays (heatmap + zones + boundary + routes).

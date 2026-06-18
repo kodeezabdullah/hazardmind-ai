@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -58,45 +58,50 @@ const STEPS = [
 type AgentPanelProps = {
   query: string | null;
   result: HazardMindResult;
+  // Agents that have actually reported in the Band room (normalized short names).
+  // The step status is derived from this real signal, not a timer.
+  activeAgents?: string[];
+  // True once the backend pipeline for this event is complete.
+  complete?: boolean;
   collapsed?: boolean;
   onToggle?: () => void;
 };
 
-export function AgentPanel({ query, result, collapsed = false, onToggle }: AgentPanelProps) {
-  // activeStep: -1 idle, 0..STEPS.length-1 running that step, >=length all done.
-  const [activeStep, setActiveStep] = useState(-1);
-  const timersRef = useRef<number[]>([]);
+export function AgentPanel({
+  query,
+  result,
+  activeAgents = [],
+  complete = false,
+  collapsed = false,
+  onToggle,
+}: AgentPanelProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    timersRef.current.forEach((t) => window.clearTimeout(t));
-    timersRef.current = [];
-    if (!query) {
-      setActiveStep(-1);
-      return;
-    }
-    setActiveStep(0);
-    for (let i = 0; i < STEPS.length; i += 1) {
-      const t = window.setTimeout(() => setActiveStep(i + 1), (i + 1) * 2400);
-      timersRef.current.push(t);
-    }
-    return () => timersRef.current.forEach((t) => window.clearTimeout(t));
-  }, [query]);
+  // Drive the timeline from the REAL Band activity: an agent is "complete" once
+  // it has spoken in the room; the furthest agent to report is "running" until
+  // the pipeline reports complete.
+  const reported = new Set(activeAgents);
+  const lastReportedIndex = STEPS.reduce(
+    (acc, step, i) => (reported.has(step.id) ? i : acc),
+    -1,
+  );
 
   // Auto-scroll to the latest step / result.
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: "smooth" });
-  }, [activeStep]);
+  }, [lastReportedIndex, complete]);
 
   const statusFor = (index: number): StageStatus => {
-    if (!query || activeStep < 0) return "idle";
-    if (index < activeStep) return "complete";
-    if (index === activeStep) return "running";
+    if (!query) return "idle";
+    if (complete) return "complete";
+    if (reported.has(STEPS[index].id)) {
+      return index < lastReportedIndex ? "complete" : "running";
+    }
     return "idle";
   };
 
-  const allDone = query !== null && activeStep >= STEPS.length;
-  const running = query !== null && activeStep >= 0 && activeStep < STEPS.length;
+  const allDone = query !== null && complete;
+  const running = query !== null && !complete && lastReportedIndex >= 0;
 
   if (collapsed) {
     return (

@@ -180,3 +180,51 @@ export const sampleResult: HazardMindResult = {
     },
   ],
 };
+
+// Blank result for the IDLE state — no location, no data, empty download URLs.
+// The dashboard starts on this (a clean spinning globe) and only shows real
+// numbers/links once a query's backend result arrives. This guarantees no
+// stale/demo (Rawalpindi) data ever leaks into the result, downloads, or panel.
+export const emptyResult: HazardMindResult = {
+  event_id: "",
+  location: "",
+  hazard_type: "",
+  overall_severity: "LOW",
+  satellite: { type: "", reason: "", cloud_cover: 0, scene_id: "" },
+  boundaries: {
+    region_boundary: { type: "FeatureCollection", features: [] },
+    risk_cities: [],
+    merged_polygon: {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "Polygon", coordinates: [[[0, 0], [0, 0], [0, 0], [0, 0]]] },
+    },
+    bbox: [0, 0, 0, 0],
+  },
+  artifacts: { true_color_url: "", index_url: "", classification_url: "", geojson_url: "" },
+  analysis: {
+    index_type: "",
+    mean_value: 0,
+    affected_area_km2: 0,
+    damage_percent: 0,
+    total_zones: 0,
+    zones: { type: "FeatureCollection", features: [] },
+  },
+  hazard: {
+    flood_risk: "LOW",
+    earthquake_risk: "LOW",
+    landslide_risk: "LOW",
+    confidence_scores: { flood: 0, earthquake: 0, landslide: 0 },
+  },
+  impact: {
+    population_affected: 0,
+    hospitals_at_risk: 0,
+    roads_blocked_km: 0,
+    schools_affected: 0,
+    vulnerability_score: 0,
+    critical_facilities: [],
+  },
+  routes: { evacuation_routes: { type: "FeatureCollection", features: [] } },
+  report: { summary: "", recommendations: [], pdf_url: "", map_url: "" },
+  agent_log: [],
+};
