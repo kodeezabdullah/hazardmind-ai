@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers3, MapPinned, Radar } from "lucide-react";
+import { Layers3, MapPinned, Radar, X } from "lucide-react";
 import { LayerControls } from "./LayerControls";
 import type { HazardMindResult, LayerKey, LayerState } from "../lib/types";
 
@@ -8,6 +8,8 @@ type MapLegendRailProps = {
   layers: LayerState;
   result: HazardMindResult;
   onToggleLayer: (layer: LayerKey) => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
 };
 
 const legendItems = [
@@ -17,7 +19,22 @@ const legendItems = [
   ["Low", "bg-teal-400"],
 ] as const;
 
-export function MapLegendRail({ layers, result, onToggleLayer }: MapLegendRailProps) {
+export function MapLegendRail({ layers, result, onToggleLayer, collapsed = false, onToggle }: MapLegendRailProps) {
+  // Collapsed: just a floating layers icon. Click to expand the full rail.
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        className="map-legend-fab"
+        onClick={onToggle}
+        aria-label="Show GIS legend and layer controls"
+        title="Layers & legend"
+      >
+        <Layers3 className="h-5 w-5" />
+      </button>
+    );
+  }
+
   return (
     <aside className="map-legend-rail" aria-label="Map intelligence and GIS legend">
       <header className="map-legend-header">
@@ -28,6 +45,17 @@ export function MapLegendRail({ layers, result, onToggleLayer }: MapLegendRailPr
           <p className="hud-eyebrow">map intelligence</p>
           <h2>GIS Legend</h2>
         </div>
+        {onToggle ? (
+          <button
+            type="button"
+            className="map-legend-close"
+            onClick={onToggle}
+            aria-label="Hide legend"
+            title="Hide"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        ) : null}
       </header>
 
       <section className="map-rail-section">

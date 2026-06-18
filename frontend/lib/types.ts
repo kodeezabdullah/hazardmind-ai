@@ -49,6 +49,8 @@ export type HazardMindResult = {
     risk_cities: string[];
     merged_polygon: GeoJSON.Feature;
     bbox: [number, number, number, number];
+    // Optional: the real scene/image footprint, distinct from the camera bbox.
+    scene_bbox?: [number, number, number, number];
   };
   artifacts: Artifacts;
   analysis: {

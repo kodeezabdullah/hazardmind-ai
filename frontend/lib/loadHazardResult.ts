@@ -9,8 +9,6 @@ export type HazardResultLoad = {
   warnings: string[];
 };
 
-const demoResultPath = "/demo-results/demo-peshawar-flood.json";
-
 export async function loadHazardResult(eventId: string): Promise<HazardResultLoad> {
   const warnings: string[] = [];
   const apiUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
@@ -34,29 +32,15 @@ export async function loadHazardResult(eventId: string): Promise<HazardResultLoa
       warnings.push(`Backend result unavailable; using demo fallback. ${safeError(error)}`);
     }
   } else {
-    warnings.push("NEXT_PUBLIC_API_URL is not set; using demo fallback.");
+    warnings.push("NEXT_PUBLIC_API_URL is not set; using bundled Rawalpindi demo data.");
   }
 
-  try {
-    const response = await fetch(demoResultPath, { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`Demo result returned ${response.status}`);
-    }
-
-    const payload = await response.json();
-    return {
-      result: normalizeHazardResult(payload, eventId),
-      source: "demo-fallback",
-      warnings,
-    };
-  } catch (error) {
-    warnings.push(`Demo result JSON unavailable; using bundled sample data. ${safeError(error)}`);
-    return {
-      result: normalizeHazardResult(sampleResult, eventId),
-      source: "demo-fallback",
-      warnings,
-    };
-  }
+  // No backend configured: use the bundled Rawalpindi sample (real R2 artifacts).
+  return {
+    result: normalizeHazardResult(sampleResult, eventId),
+    source: "demo-fallback",
+    warnings,
+  };
 }
 
 function unwrapHazardResult(payload: unknown): unknown {
@@ -71,7 +55,95 @@ function unwrapHazardResult(payload: unknown): unknown {
     return report;
   }
 
+  // Backend /results shape: { job_id, status, satellite, hazard, impact, report }
+  // where satellite/hazard/impact/report are the raw DB rows. Flatten it into the
+  // top-level fields normalizeHazardResult expects (backend stays untouched).
+  if (data.satellite || data.hazard || data.impact || data.report) {
+    return adaptBackendResults(data);
+  }
+
   return payload;
+}
+
+// Map the backend's per-agent DB rows onto the flat HazardMindResult shape.
+function adaptBackendResults(data: Record<string, unknown>): Record<string, unknown> {
+  const satellite = asRecord(data.satellite);
+  const hazard = asRecord(data.hazard);
+  const impact = asRecord(data.impact);
+  const report = asRecord(data.report);
+
+  // satellite_results: urls + bounds/bbox + zone stats
+  const bbox =
+    normalizeBbox(data.bbox) ??
+    normalizeBbox(satellite.bbox) ??
+    normalizeBbox(satellite.bounds) ??
+    undefined;
+
+  // hazard_zones row carries the severity + per-hazard risk levels.
+  const severity = hazard.severity ?? hazard.risk_level;
+  const hazardType = String(hazard.hazard_type ?? data.disaster_type ?? "").toLowerCase();
+  const perHazard = {
+    flood_risk: hazardType.includes("flood") ? severity : undefined,
+    earthquake_risk: hazardType.includes("earth") || hazard.earthquake_mmi != null ? severity : undefined,
+    landslide_risk: hazardType.includes("land") || hazard.landslide_probability != null ? severity : undefined,
+  };
+
+  // /results has no top-level location; derive it from the satellite risk_cities.
+  const riskCities = Array.isArray(satellite.risk_cities) ? (satellite.risk_cities as unknown[]) : [];
+  const cityName = riskCities.length ? String(riskCities[0]) : undefined;
+
+  return {
+    event_id: data.event_id ?? data.job_id,
+    location: data.location ?? satellite.location ?? cityName,
+    hazard_type: hazard.hazard_type ?? data.disaster_type,
+    overall_severity: severity,
+    satellite: {
+      type: satellite.satellite_type,
+      cloud_cover: satellite.cloud_cover,
+      scene_id: satellite.scene_id,
+    },
+    boundaries: {
+      bbox,
+      // PNG/zone footprint uses the satellite bounds when present.
+      scene_bbox: normalizeBbox(satellite.bounds) ?? bbox,
+      risk_cities: satellite.risk_cities,
+    },
+    artifacts: {
+      true_color_url: satellite.true_color_url,
+      index_url: satellite.index_url,
+      classification_url: satellite.classification_url,
+      geojson_url: satellite.geojson_url,
+    },
+    analysis: {
+      affected_area_km2: satellite.affected_area_km2 ?? hazard.area_km2,
+      damage_percent: satellite.damage_percent,
+      total_zones: satellite.total_zones,
+    },
+    hazard: {
+      ...perHazard,
+      confidence_scores: {
+        flood: hazard.overall_confidence,
+        earthquake: hazard.overall_confidence,
+        landslide: hazard.overall_confidence,
+      },
+    },
+    impact: {
+      total_affected: impact.total_affected,
+      hospitals_at_risk: impact.hospitals_at_risk,
+      schools_at_risk: impact.schools_at_risk,
+      roads_blocked: impact.roads_blocked,
+      vulnerability_score: impact.vulnerability_score,
+    },
+    routes: {
+      evacuation_routes: impact.evacuation_routes,
+    },
+    report: {
+      summary: report.executive_summary,
+      pdf_url: report.pdf_url,
+      map_url: report.map_url,
+    },
+    agent_log: report.agent_log,
+  };
 }
 
 function normalizeHazardResult(payload: unknown, requestedEventId: string): HazardMindResult {
@@ -124,6 +196,7 @@ function normalizeHazardResult(payload: unknown, requestedEventId: string): Haza
       risk_cities: stringArray(boundaries.risk_cities, fallback.boundaries.risk_cities),
       merged_polygon: asFeature(boundaries.merged_polygon) ?? bboxPolygon(bbox),
       bbox,
+      scene_bbox: normalizeBbox(boundaries.scene_bbox) ?? undefined,
     },
     artifacts: {
       true_color_url: stringValue(artifacts.true_color_url, satellite.true_color_url, fallback.artifacts.true_color_url),

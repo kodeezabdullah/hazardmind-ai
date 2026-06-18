@@ -1,16 +1,33 @@
 import type { HazardMindResult } from "./types";
 
+// Real artifacts from our live Rawalpindi pipeline run (event 7d28eeaa), served
+// from the public Cloudflare R2 bucket. The zone polygons + PNG risk maps below
+// are the actual outputs the satellite/hazard agents produced.
+const R2 = "https://pub-720f47eaad2f4997a76a02f8bf14f58a.r2.dev/events/7d28eeaa-cc0b-447f-b0f1-fe9e6ff57842";
+
+// Demo scene footprint (from the pipeline's `bounds`). It is only approximate
+// here because the demo data is hand-assembled.
+//
+// IN PRODUCTION this is not needed: the backend returns the boundary AND the PNG
+// `bounds` together from the same satellite clip, so the PNG maps line up inside
+// the real boundary automatically (same georeferencing). HazardMap already drapes
+// the PNGs on `result.boundaries.scene_bbox ?? bbox`, so wiring the backend is all
+// that's required to make it pixel-accurate. PNG overlays stay OFF by default so
+// the demo's approximate alignment isn't shown until real bounds are available.
+export const SCENE_BBOX: [number, number, number, number] = [72.617206, 33.135627, 73.374205, 33.669574];
+export const RAWALPINDI_BBOX: [number, number, number, number] = SCENE_BBOX;
+
 export const sampleResult: HazardMindResult = {
-  event_id: "demo-peshawar-flood",
-  location: "Peshawar, Pakistan",
+  event_id: "7d28eeaa-cc0b-447f-b0f1-fe9e6ff57842",
+  location: "Rawalpindi, Pakistan",
   hazard_type: "Flood",
-  overall_severity: "CRITICAL",
+  overall_severity: "LOW",
 
   satellite: {
-    type: "sentinel-1",
-    reason: "cloud_cover_above_30_percent_sar_selected",
-    cloud_cover: 42,
-    scene_id: "S1A_DEMO_PESHAWAR_20260613",
+    type: "sentinel-2",
+    reason: "low_cloud_cover_optical_selected",
+    cloud_cover: 8,
+    scene_id: "S2A_RAWALPINDI_20260613",
   },
 
   boundaries: {
@@ -18,80 +35,59 @@ export const sampleResult: HazardMindResult = {
       type: "FeatureCollection",
       features: [],
     },
-    risk_cities: ["Peshawar"],
+    risk_cities: ["Rawalpindi"],
     merged_polygon: {
       type: "Feature",
-      properties: { name: "Peshawar analysis area" },
+      properties: { name: "Rawalpindi analysis area" },
       geometry: {
         type: "Polygon",
         coordinates: [
           [
-            [71.4, 33.9],
-            [71.65, 33.9],
-            [71.65, 34.1],
-            [71.4, 34.1],
-            [71.4, 33.9],
+            [SCENE_BBOX[0], SCENE_BBOX[1]],
+            [SCENE_BBOX[2], SCENE_BBOX[1]],
+            [SCENE_BBOX[2], SCENE_BBOX[3]],
+            [SCENE_BBOX[0], SCENE_BBOX[3]],
+            [SCENE_BBOX[0], SCENE_BBOX[1]],
           ],
         ],
       },
     },
-    bbox: [71.4, 33.9, 71.65, 34.1],
+    // Camera focuses on the city; image/zone footprint stays on SCENE_BBOX.
+    bbox: RAWALPINDI_BBOX,
+    scene_bbox: SCENE_BBOX,
   },
 
+  // Real PNG risk maps + zones GeoJSON from the pipeline (Cloudflare R2).
   artifacts: {
-    true_color_url: "",
-    index_url: "",
-    classification_url: "",
-    geojson_url: "",
+    true_color_url: `${R2}/true_color.png`,
+    index_url: `${R2}/index_map.png`,
+    classification_url: `${R2}/classification.png`,
+    geojson_url: `${R2}/zones.geojson`,
   },
 
   analysis: {
-    index_type: "SAR VV/VH ratio",
-    mean_value: 0.24,
-    affected_area_km2: 153.37,
-    damage_percent: 24.3,
-    total_zones: 22,
+    index_type: "NDWI (Sentinel-2)",
+    mean_value: 0.12,
+    affected_area_km2: 3.98,
+    damage_percent: 1.2,
+    total_zones: 2,
+    // Lightweight placeholder; HazardMap fetches the real zones from
+    // artifacts.geojson_url (R2) and renders those instead.
     zones: {
       type: "FeatureCollection",
       features: [
         {
           type: "Feature",
-          properties: {
-            zone_id: "FZ-01",
-            severity: "critical",
-            class_name: "deep_water",
-            area_km2: 12.4,
-          },
+          properties: { zone_id: "WZ-01", severity: "low", class_name: "wet_soil", area_km2: 1.99 },
           geometry: {
             type: "Polygon",
             coordinates: [
               [
-                [71.47, 33.96],
-                [71.56, 33.96],
-                [71.56, 34.03],
-                [71.47, 34.03],
-                [71.47, 33.96],
-              ],
-            ],
-          },
-        },
-        {
-          type: "Feature",
-          properties: {
-            zone_id: "FZ-02",
-            severity: "high",
-            class_name: "water",
-            area_km2: 8.7,
-          },
-          geometry: {
-            type: "Polygon",
-            coordinates: [
-              [
-                [71.43, 33.93],
-                [71.5, 33.93],
-                [71.5, 33.98],
-                [71.43, 33.98],
-                [71.43, 33.93],
+                [72.88, 33.46],
+                [72.9, 33.46],
+                [72.9, 33.48],
+                [72.88, 33.48],
+                [72.88, 33.46],
               ],
             ],
           },
@@ -101,97 +97,85 @@ export const sampleResult: HazardMindResult = {
   },
 
   hazard: {
-    flood_risk: "CRITICAL",
-    earthquake_risk: "MEDIUM",
+    flood_risk: "LOW",
+    earthquake_risk: "LOW",
     landslide_risk: "LOW",
     confidence_scores: {
-      flood: 0.91,
-      earthquake: 0.67,
-      landslide: 0.54,
+      flood: 0.34,
+      earthquake: 0.21,
+      landslide: 0.18,
     },
   },
 
   impact: {
-    population_affected: 540000,
-    hospitals_at_risk: 14,
-    roads_blocked_km: 89,
-    schools_affected: 67,
-    vulnerability_score: 8.2,
+    population_affected: 4200,
+    hospitals_at_risk: 0,
+    roads_blocked_km: 2,
+    schools_affected: 1,
+    vulnerability_score: 2.4,
+    // Facilities near the analysed scene footprint (not the distant city centre).
     critical_facilities: [
       {
-        name: "Lady Reading Hospital",
+        name: "Rural Health Centre",
         type: "hospital",
-        lat: 34.015,
-        lng: 71.57,
-        risk: "HIGH",
+        lat: 33.42,
+        lng: 72.87,
+        risk: "LOW",
       },
       {
-        name: "Khyber Teaching Hospital",
-        type: "hospital",
-        lat: 33.998,
-        lng: 71.487,
-        risk: "MEDIUM",
+        name: "Community School",
+        type: "school",
+        lat: 33.3,
+        lng: 72.88,
+        risk: "LOW",
       },
     ],
   },
 
   routes: {
+    // No evacuation routes for a LOW-severity event.
     evacuation_routes: {
       type: "FeatureCollection",
-      features: [
-        {
-          type: "Feature",
-          properties: { name: "Evacuation Route 1" },
-          geometry: {
-            type: "LineString",
-            coordinates: [
-              [71.49, 33.97],
-              [71.53, 34.0],
-              [71.59, 34.06],
-            ],
-          },
-        },
-      ],
+      features: [],
     },
   },
 
   report: {
     summary:
-      "Critical flood risk has been detected across high-density areas of Peshawar. Satellite-derived classification identifies multiple deep-water and high-risk zones, with significant exposure to population, hospitals, roads, and schools. Immediate evacuation, road clearance, and medical support are recommended.",
+      "Satellite analysis of Rawalpindi shows no significant flooding. NDWI classification detects only minor wet-soil patches (~4 km2) at LOW severity, with negligible exposure to population and infrastructure. No evacuation is required; routine monitoring is recommended.",
     recommendations: [
-      "Prioritize evacuation in critical flood zones.",
-      "Deploy emergency medical support near hospitals at risk.",
-      "Clear blocked road corridors for rescue access.",
-      "Open temporary shelters for displaced families.",
-      "Monitor flood expansion using updated satellite imagery.",
+      "No evacuation required — overall flood risk is LOW.",
+      "Continue routine monitoring of low-lying wet-soil areas.",
+      "Maintain drainage readiness ahead of the monsoon season.",
+      "Re-run analysis if heavy rainfall is forecast.",
     ],
-    pdf_url: "",
-    map_url: "",
+    pdf_url: `${R2}/report.pdf`,
+    map_url: `${R2}/index_map.png`,
   },
 
   agent_log: [
     {
       agent: "hazardmind-satellite",
       status: "complete",
-      message: "Sentinel-1 SAR selected due to cloud cover above 30%. Zones vectorized and uploaded.",
+      message: "Sentinel-2 optical scene selected (cloud cover 8%). NDWI computed; zones vectorized and uploaded.",
       timestamp: "2026-06-13T18:00:00Z",
     },
     {
       agent: "hazardmind-hazard",
       status: "complete",
-      message: "Flood risk classified as CRITICAL. Earthquake and landslide risks assessed.",
+      message: "Flood risk classified as LOW. Only minor wet-soil patches detected.",
       timestamp: "2026-06-13T18:01:00Z",
     },
     {
       agent: "hazardmind-impact",
       status: "complete",
-      message: "Population and infrastructure exposure calculated.",
+      message: "Population and infrastructure exposure calculated — negligible.",
       timestamp: "2026-06-13T18:02:00Z",
     },
     {
       agent: "hazardmind-report",
       status: "complete",
-      message: "Executive report and dashboard output generated.",
+      message: "Executive report generated: no flood, routine monitoring advised.",
       timestamp: "2026-06-13T18:03:00Z",
     },
   ],
