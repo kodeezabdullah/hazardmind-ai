@@ -1,3 +1,5 @@
+"use client";
+
 import { Download, FileText, MapPinned } from "lucide-react";
 import type { HazardMindResult } from "../lib/types";
 
@@ -8,9 +10,17 @@ type ReportActionsProps = {
 
 export function ReportActions({ result, currentEventId }: ReportActionsProps) {
   const pdfDisabled = !result.report.pdf_url;
-  const mapDisabled = !result.report.map_url;
-  const currentMapPath = currentEventId ? `/map/${currentEventId}` : "";
-  const mapIsCurrentPage = Boolean(currentMapPath && result.report.map_url.includes(currentMapPath));
+  const eventId = currentEventId || result.event_id;
+  const mapDisabled = !eventId;
+  const mapHref = eventId ? resolveMapSnapshotUrl(eventId, result.report.map_url) : "";
+  const mapIsCurrentPage = Boolean(currentEventId && currentEventId === eventId);
+
+  function handleOpenMapSnapshot() {
+    if (!eventId) {
+      return;
+    }
+    window.open(resolveMapSnapshotUrl(eventId, result.report.map_url), "_blank", "noopener,noreferrer");
+  }
 
   return (
     <section className="mt-3 grid grid-cols-2 gap-2">
@@ -47,7 +57,11 @@ export function ReportActions({ result, currentEventId }: ReportActionsProps) {
       ) : (
         <a
           className="flex items-center justify-center gap-2 rounded-md border border-violet-300/24 bg-violet-300/10 px-2.5 py-1.5 text-xs font-semibold text-violet-50 transition hover:border-violet-200/50 hover:bg-violet-300/16"
-          href={result.report.map_url}
+          href={mapHref}
+          onClick={(event) => {
+            event.preventDefault();
+            handleOpenMapSnapshot();
+          }}
           rel="noreferrer"
           target="_blank"
         >
@@ -64,4 +78,28 @@ export function ReportActions({ result, currentEventId }: ReportActionsProps) {
       </button>
     </section>
   );
+}
+
+function resolveMapSnapshotUrl(eventId: string, mapUrl?: string | null) {
+  const fallbackPath = `/map/${encodeURIComponent(eventId)}`;
+
+  if (typeof window === "undefined") {
+    return fallbackPath;
+  }
+
+  const origin = window.location.origin;
+
+  if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
+    return `${origin}${fallbackPath}`;
+  }
+
+  if (!mapUrl || mapUrl.includes("vercel.app")) {
+    return `${origin}${fallbackPath}`;
+  }
+
+  if (mapUrl.startsWith("/")) {
+    return `${origin}${mapUrl}`;
+  }
+
+  return mapUrl;
 }

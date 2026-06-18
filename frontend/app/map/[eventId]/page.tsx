@@ -1,4 +1,4 @@
-import { DashboardShell } from "../../../components/DashboardShell";
+import { MapSnapshotView } from "../../../components/MapSnapshotView";
 
 type EventMapPageProps = {
   params: {
@@ -7,5 +7,5 @@ type EventMapPageProps = {
 };
 
 export default function EventMapPage({ params }: EventMapPageProps) {
-  return <DashboardShell eventId={params.eventId} routeMode="map" />;
+  return <MapSnapshotView eventId={params.eventId} />;
 }
