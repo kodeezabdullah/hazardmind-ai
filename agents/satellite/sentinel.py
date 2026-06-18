@@ -287,18 +287,32 @@ def _scene_aoi_overlap(scene: dict, aoi) -> float:
 
 
 def _scene_score(scene: dict, aoi) -> float:
-    """Coverage-aware score for a scene: overlap% * (1 - cloud_cover/100).
+    """Coverage- and recency-aware score for a scene.
 
-    A scene that covers more of the AOI and is less cloudy scores higher. Cloud
-    cover is treated as 0 when unknown (Sentinel-1 has none). The score is in
-    0..1; higher is better.
+    Base: overlap% * (1 - cloud_cover/100) — a scene that covers more of the AOI
+    and is less cloudy scores higher. Cloud cover is treated as 0 when unknown
+    (Sentinel-1 has none).
+
+    Recency: the base is multiplied by an exponential-decay recency factor so
+    that, all else comparable, the LATEST scene wins (this is what you want for a
+    *current* disaster verification — the imagery must reflect conditions now).
+    The decay is gentle (half-life ~20 days) so a far newer but nearly-empty or
+    fully-clouded tile still loses to a well-covered, clear, slightly older one —
+    we never trade a usable scene for a useless newer one. The score is in 0..1;
+    higher is better.
     """
     overlap = _scene_aoi_overlap(scene, aoi)
     cc = _scene_cloud_cover(scene)
     if cc == float("inf"):
         cc = 0.0
     cc = max(0.0, min(100.0, cc))
-    return overlap * (1.0 - cc / 100.0)
+    base = overlap * (1.0 - cc / 100.0)
+
+    age = _scene_age_days(scene)
+    if age is None:
+        return base  # unknown date: fall back to pure coverage/cloud score
+    recency = 0.5 ** (age / _RECENCY_HALFLIFE_DAYS)
+    return base * recency
 
 
 def _scene_covers_geom(scene: dict, geom, min_fraction: float = 0.10) -> bool:
@@ -673,6 +687,32 @@ def _scene_cloud_cover(scene: dict) -> float:
             except (TypeError, ValueError):
                 return float("inf")
     return float("inf")
+
+
+def _scene_age_days(scene: dict) -> Optional[float]:
+    """Age of a scene in days from now (UTC), or None if the date is unreadable."""
+    raw = (scene.get("ContentDate") or {}).get("Start") or scene.get("OriginDate")
+    if not raw:
+        return None
+    txt = str(raw).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        # Trim sub-second precision variants the parser rejects.
+        try:
+            dt = datetime.fromisoformat(txt[:19] + "+00:00")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+
+
+# Recency half-life (days): a scene this many days older than the newest viable
+# one is worth ~halved on the recency factor. Tuned so that, among scenes of
+# comparable coverage/cloud, the LATEST wins — but a far newer scene that is
+# nearly empty or fully clouded still loses to a well-covered slightly older one.
+_RECENCY_HALFLIFE_DAYS = 20.0
 
 
 if __name__ == "__main__":

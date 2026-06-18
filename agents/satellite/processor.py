@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import zipfile
 from typing import Optional
 
@@ -188,18 +189,155 @@ _CLASS_SCHEMES = {
 # --------------------------------------------------------------------------- #
 # Step 7B: download + extract the bands we actually need
 # --------------------------------------------------------------------------- #
+# Network-resilience policy for the CDSE download (and, by extension, a
+# mid-pipeline internet drop). A single int timeout in `requests` applies to
+# BOTH connect and each read, so a dead mid-stream socket blocks for the whole
+# value before raising — which froze the pipeline for minutes during an outage.
+# We instead use a (connect, read) tuple so a stall is detected quickly, and we
+# retry-with-backoff against a TIME BUDGET rather than a fixed attempt count:
+# if the connection comes back within OUTAGE_GRACE_SECONDS we resume from the
+# `.part` and continue; if it stays down past the budget we give up so the
+# caller can abort and clean everything up.
+DOWNLOAD_CONNECT_TIMEOUT = 15      # seconds to establish a TCP/TLS connection
+DOWNLOAD_READ_TIMEOUT = 90         # seconds of silence mid-stream before failing
+OUTAGE_GRACE_SECONDS = 7 * 60      # tolerate an internet outage up to ~7 minutes
+RETRY_BACKOFF_START = 5            # first retry waits this many seconds
+RETRY_BACKOFF_MAX = 30            # backoff is capped here
+
+# CDSE OData base used to walk the per-product Nodes tree (the in-archive file
+# listing) so we can download only the band rasters we need instead of the whole
+# ~868 MB .SAFE zip. NOTE: CDSE does NOT honour HTTP Range anywhere (the zip, the
+# node `$value`, and the final storage URL all reply 200 + the full body, never
+# 206) — verified empirically. So true byte-resume is impossible against this
+# provider. Per-band download is still a large win: an interruption restarts only
+# the one band in flight (a 10 m JP2 is ~120 MB, the 20 m SWIR ~30 MB) rather
+# than the entire 868 MB archive, and any band already fully on disk is reused
+# across retries AND process restarts (resume at band granularity).
+ODATA_BASE = "https://catalogue.dataspace.copernicus.eu/odata/v1"
+
+
+def _stream_to_file_with_retry(
+    session: requests.Session,
+    url: str,
+    headers: dict,
+    dest_path: str,
+    label: str,
+    timeout: tuple = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT),
+    grace_seconds: int = OUTAGE_GRACE_SECONDS,
+) -> Optional[str]:
+    """Stream one CDSE object to `dest_path`, outage-tolerant, within a time budget.
+
+    CDSE does NOT honour HTTP Range on any of its download endpoints (the product
+    `$value`, the per-node `$value`, and the final storage URL all reply 200 with
+    the full body, never 206 — verified empirically). So we cannot resume a
+    partial transfer byte-for-byte; on a connection drop we restart this object's
+    download from scratch. To keep that affordable, the caller downloads small
+    objects (individual band rasters, ~30-120 MB) rather than the whole 868 MB
+    archive, so a restart only re-fetches the one file in flight.
+
+    We retry with exponential backoff against a TIME BUDGET, not a fixed attempt
+    count: if the connection recovers within `grace_seconds` (~7 min) we keep
+    going; if it stays down past the budget we give up cleanly (delete the
+    `.part`, return None) so the caller can abort and clear everything.
+
+    A fully-downloaded `dest_path` already on disk is reused as-is (resume at
+    file granularity across retries AND process restarts). Returns `dest_path`,
+    or None on give-up / failure.
+    """
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        logger.info("Reusing cached %s (%d bytes)", label, os.path.getsize(dest_path))
+        return dest_path
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    part_path = f"{dest_path}.part"
+
+    deadline = time.monotonic() + grace_seconds
+    backoff = RETRY_BACKOFF_START
+    attempt = 0
+
+    while True:
+        attempt += 1
+        total_size: Optional[int] = None
+        try:
+            # No Range: CDSE ignores it. Always (re)fetch the whole object.
+            with session.get(
+                url, headers=headers, stream=True, timeout=timeout
+            ) as response:
+                response.raise_for_status()
+                length = response.headers.get("Content-Length")
+                if length is not None:
+                    total_size = int(length)
+
+                with open(part_path, "wb") as out:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            out.write(chunk)
+
+            final_size = os.path.getsize(part_path)
+            if total_size is not None and final_size < total_size:
+                raise requests.exceptions.ChunkedEncodingError(
+                    f"incomplete: {final_size}/{total_size} bytes"
+                )
+
+            os.replace(part_path, dest_path)
+            logger.info("Downloaded %s (%d bytes)", label, final_size)
+            return dest_path
+
+        except (
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            # A failed attempt leaves a junk `.part` (CDSE can't resume it);
+            # drop it so the next attempt starts clean.
+            try:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+            except OSError:
+                pass
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "Giving up on %s after %d attempts / outage exceeded %ds: %s",
+                    label,
+                    attempt,
+                    grace_seconds,
+                    exc,
+                )
+                return None
+            wait = min(backoff, max(1, int(remaining)))
+            logger.warning(
+                "Download of %s interrupted (%s); restarting in %ds "
+                "(attempt %d, %ds of outage budget left)",
+                label,
+                exc,
+                wait,
+                attempt,
+                int(remaining),
+            )
+            time.sleep(wait)
+            backoff = min(backoff * 2, RETRY_BACKOFF_MAX)
+        except requests.RequestException as exc:
+            logger.error("Failed to download %s: %s", label, exc)
+            return None
+        except OSError as exc:
+            logger.error("Failed to write %s to %s: %s", label, dest_path, exc)
+            return None
+
+
 def _download_product_zip(
     scene_metadata: dict,
     token: str,
-    timeout: int = 600,
-    max_retries: int = 4,
+    timeout: tuple = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT),
+    grace_seconds: int = OUTAGE_GRACE_SECONDS,
 ) -> Optional[str]:
-    """Download a scene's full product archive from CDSE (resumable).
+    """Download a scene's full product archive (.zip) from CDSE, outage-tolerant.
 
-    CDSE products are large (often hundreds of MB) and the stream can drop
-    mid-transfer. The download is resumable: on a connection error we re-issue
-    the request with an HTTP Range header and append from where we left off,
-    rather than restarting. Returns the path to the downloaded `.zip`, or None.
+    Fallback path used when per-band Nodes download is unavailable (e.g. an
+    unexpected archive layout). Downloads the whole ~868 MB .SAFE archive via the
+    `$value` endpoint with the shared retry/grace-budget logic. Returns the
+    `.zip` path, or None.
     """
     product_id = scene_metadata.get("Id")
     if not product_id:
@@ -209,119 +347,188 @@ def _download_product_zip(
     name = scene_metadata.get("Name", product_id)
     os.makedirs(TEMP_ROOT, exist_ok=True)
     dest_path = os.path.join(TEMP_ROOT, f"{product_id}.zip")
-    part_path = f"{dest_path}.part"
-
-    # A previously completed download can be reused as-is.
-    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-        logger.info("Reusing cached product archive %s", dest_path)
-        return dest_path
-
     url = DOWNLOAD_URL.format(product_id=product_id)
     auth_header = {"Authorization": f"Bearer {token}"}
 
-    # Start fresh: a stale partial could be from a different scene or a server
-    # that doesn't honor Range, so don't trust it.
-    if os.path.exists(part_path):
-        try:
-            os.remove(part_path)
-        except OSError:
-            pass
+    logger.info("Downloading scene %s (full archive) from CDSE", name)
+    with _CDSESession() as session:
+        return _stream_to_file_with_retry(
+            session,
+            url,
+            auth_header,
+            dest_path,
+            label=f"scene {name}",
+            timeout=timeout,
+            grace_seconds=grace_seconds,
+        )
 
-    logger.info("Downloading scene %s from CDSE", name)
-    total_size: Optional[int] = None
+
+def _node_url(product_id: str, segments: list) -> str:
+    """Build a CDSE OData Nodes(...) traversal URL for an in-product path.
+
+    `segments` is the ordered list of node names from the product root down to
+    the target (e.g. ["<SAFE>", "GRANULE", "<granule>", "IMG_DATA", "<jp2>"]).
+    Node names are wrapped in Nodes(<name>); the name itself is single-quote
+    free in CDSE products, so no extra escaping is needed beyond URL-encoding.
+    """
+    from urllib.parse import quote
+
+    path = "".join(f"/Nodes({quote(s, safe='')})" for s in segments)
+    return f"{ODATA_BASE}/Products({product_id}){path}/$value"
+
+
+def _list_nodes(session: requests.Session, product_id: str, segments: list,
+                headers: dict, timeout: tuple) -> list:
+    """Return child node names under the given product path (one OData hop)."""
+    from urllib.parse import quote
+
+    path = "".join(f"/Nodes({quote(s, safe='')})" for s in segments)
+    url = f"{ODATA_BASE}/Products({product_id}){path}/Nodes"
+    resp = session.get(url, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    body = resp.json()
+    items = body.get("result", body.get("value", []))
+    return [n.get("Name", "") for n in items if n.get("Name")]
+
+
+def _resolve_s2_band_nodes(
+    session: requests.Session,
+    product_id: str,
+    band_tokens: list,
+    headers: dict,
+    timeout: tuple,
+) -> dict:
+    """Map each Sentinel-2 L1C band token to its JP2 node path segments.
+
+    Walks SAFE -> GRANULE -> <granule> -> IMG_DATA and matches each requested
+    token (B03, B08, B11, TCI, ...) to its `<tile>_<token>.jp2`. L1C IMG_DATA is
+    flat (no R10m/R20m subdirs). Returns {token: [seg, seg, ...]} for the bands
+    that were located. Raises on a traversal/HTTP error so the caller can fall
+    back to the whole-zip download.
+    """
+    safe_children = _list_nodes(session, product_id, [], headers, timeout)
+    safe_dir = next((n for n in safe_children if n.endswith(".SAFE")), None)
+    if not safe_dir:
+        raise ValueError("no .SAFE root node in product")
+
+    granules = _list_nodes(
+        session, product_id, [safe_dir, "GRANULE"], headers, timeout
+    )
+    if not granules:
+        raise ValueError("no GRANULE node in product")
+    granule = granules[0]
+
+    img_base = [safe_dir, "GRANULE", granule, "IMG_DATA"]
+    jp2s = _list_nodes(session, product_id, img_base, headers, timeout)
+
+    resolved: dict = {}
+    for token in band_tokens:
+        upper = token.upper()
+        # JP2 filenames look like T43SCT_20260608T054641_B03.jp2 / _TCI.jp2.
+        match = next(
+            (f for f in jp2s
+             if f.lower().endswith(".jp2") and f.upper().endswith(f"_{upper}.JP2")),
+            None,
+        )
+        if not match:
+            logger.warning("Band %s not found in IMG_DATA node listing", token)
+            continue
+        resolved[token] = img_base + [match]
+    return resolved
+
+
+def _download_bands_via_nodes(
+    scene_metadata: dict,
+    token: str,
+    event_id: str,
+    band_tokens: list,
+    satellite_type: str,
+    grace_seconds: int = OUTAGE_GRACE_SECONDS,
+) -> Optional[dict]:
+    """Download only the needed band rasters via the CDSE Nodes tree.
+
+    Primary download path for Sentinel-2: instead of the whole ~868 MB .SAFE
+    zip, fetch each requested band JP2 individually (~30-120 MB each) straight
+    into `<temp>/<event_id>/bands/`. CDSE doesn't honour Range, but per-band
+    download means a connection drop only restarts the one band in flight, not
+    the whole archive — and any band already fully on disk is reused. The ~7-min
+    outage budget is SHARED across all bands of the scene (a sustained outage
+    aborts the scene, not each band independently). Returns {token: path} for the
+    bands fetched, or None on traversal failure (caller falls back to zip).
+    """
+    product_id = scene_metadata.get("Id")
+    if not product_id:
+        return None
+    if satellite_type != "sentinel-2":
+        # Per-band Nodes mapping here only knows the S2 L1C IMG_DATA layout.
+        return None
+
+    bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
+    os.makedirs(bands_dir, exist_ok=True)
+    auth_header = {"Authorization": f"Bearer {token}"}
+    timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
+
+    # Fast path: if every requested band is already fully on disk, return them
+    # without ANY network I/O. This skips the Nodes tree-walk entirely (4 HTTP
+    # listings that, on a flaky link, can each hang up to the read timeout
+    # before raising), so a fully-cached scene resumes instantly across a
+    # restart instead of stalling on the catalogue.
+    cached = {}
+    for tok in band_tokens:
+        cand = os.path.join(bands_dir, f"{tok}.jp2")
+        if os.path.exists(cand) and os.path.getsize(cand) > 0:
+            cached[tok] = cand
+    if len(cached) == len(band_tokens):
+        for tok, path in cached.items():
+            logger.info("Reusing cached band %s (%d bytes)", tok, os.path.getsize(path))
+        return cached
 
     try:
         with _CDSESession() as session:
-            for attempt in range(max_retries + 1):
-                downloaded = (
-                    os.path.getsize(part_path)
-                    if os.path.exists(part_path)
-                    else 0
+            node_map = _resolve_s2_band_nodes(
+                session, product_id, band_tokens, auth_header, timeout
+            )
+            if not node_map:
+                logger.warning(
+                    "No band nodes resolved for %s; will fall back to zip",
+                    scene_metadata.get("Name", product_id),
                 )
-                headers = dict(auth_header)
-                mode = "wb"
-                if downloaded:
-                    headers["Range"] = f"bytes={downloaded}-"
-                    mode = "ab"
+                return None
 
-                try:
-                    with session.get(
-                        url, headers=headers, stream=True, timeout=timeout
-                    ) as response:
-                        response.raise_for_status()
+            # The outage budget governs how long we tolerate a *stall* (no
+            # progress), NOT total download time — on a slow-but-alive link a
+            # ~300 MB scene legitimately takes several minutes, and that must
+            # not be mistaken for an outage. Each band that finishes proves the
+            # connection is alive, so it gets its OWN fresh `grace_seconds`
+            # budget (enforced inside _stream_to_file_with_retry per file). A
+            # sustained outage still aborts: the in-flight band's own budget
+            # expires with no completion. This is the per-band analogue of the
+            # whole-zip path's "progress resets the clock".
+            band_paths: dict = {}
+            for tok, segments in node_map.items():
+                out_path = os.path.join(bands_dir, f"{tok}.jp2")
+                url = _node_url(product_id, segments)
+                result = _stream_to_file_with_retry(
+                    session,
+                    url,
+                    auth_header,
+                    out_path,
+                    label=f"band {tok}",
+                    timeout=timeout,
+                    grace_seconds=grace_seconds,
+                )
+                if result is None:
+                    logger.error("Band %s download failed; aborting scene", tok)
+                    return None
+                band_paths[tok] = result
 
-                        if total_size is None:
-                            length = response.headers.get("Content-Length")
-                            content_range = response.headers.get("Content-Range")
-                            if content_range and "/" in content_range:
-                                try:
-                                    total_size = int(
-                                        content_range.rsplit("/", 1)[1]
-                                    )
-                                except ValueError:
-                                    total_size = None
-                            elif length is not None and not downloaded:
-                                total_size = int(length)
-
-                        # Server ignored our Range (replied 200): rewrite.
-                        if downloaded and response.status_code == 200:
-                            mode = "wb"
-                            downloaded = 0
-
-                        with open(part_path, mode) as out:
-                            for chunk in response.iter_content(
-                                chunk_size=1024 * 1024
-                            ):
-                                if chunk:
-                                    out.write(chunk)
-
-                    final_size = os.path.getsize(part_path)
-                    if total_size is not None and final_size < total_size:
-                        raise requests.exceptions.ChunkedEncodingError(
-                            f"incomplete: {final_size}/{total_size} bytes"
-                        )
-
-                    os.replace(part_path, dest_path)
-                    logger.info(
-                        "Downloaded scene to %s (%d bytes)", dest_path, final_size
-                    )
-                    return dest_path
-
-                except (
-                    requests.exceptions.ChunkedEncodingError,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                ) as exc:
-                    if attempt >= max_retries:
-                        logger.error(
-                            "Giving up on scene %s after %d attempts: %s",
-                            name,
-                            attempt + 1,
-                            exc,
-                        )
-                        raise
-                    resumed = (
-                        os.path.getsize(part_path)
-                        if os.path.exists(part_path)
-                        else 0
-                    )
-                    logger.warning(
-                        "Download of %s interrupted (%s); resuming from "
-                        "%d bytes (attempt %d/%d)",
-                        name,
-                        exc,
-                        resumed,
-                        attempt + 1,
-                        max_retries,
-                    )
-    except requests.RequestException as exc:
-        logger.error("Failed to download scene %s: %s", name, exc)
+            return band_paths
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        logger.warning(
+            "Per-band Nodes download failed (%s); falling back to whole-zip",
+            exc,
+        )
         return None
-    except OSError as exc:
-        logger.error("Failed to write downloaded scene to %s: %s", dest_path, exc)
-        return None
-
-    return None
 
 
 def _extract_bands(
@@ -510,24 +717,37 @@ def download_imagery(
 
     per_scene_paths = []
     for idx, scene in enumerate(scenes):
-        zip_path = _download_product_zip(scene, token)
-        if zip_path is None:
-            logger.warning("Skipping scene %d: download failed", idx)
-            continue
         # Each scene's bands go in their own subdir so same-named JP2s from
         # different tiles don't clobber each other before mosaicking. Key the
         # subdir on the scene's stable product Id (not a positional index):
-        # _extract_bands reuses an already-present file, so a bare scene_<idx>
-        # would serve a *previous* run's tile when the same event_id is
-        # re-processed with a different scene selection.
+        # band download/extract reuses an already-present file, so a bare
+        # scene_<idx> would serve a *previous* run's tile when the same event_id
+        # is re-processed with a different scene selection.
         if len(scenes) > 1:
             scene_key = scene.get("Id") or f"scene_{idx}"
             scene_event = f"{event_id}/scene_{scene_key}"
         else:
             scene_event = event_id
-        paths = _extract_bands(
-            zip_path, scene_event, band_tokens, satellite_type
+
+        # PRIMARY path: download only the bands we need via the Nodes tree
+        # (~30-120 MB each) instead of the whole ~868 MB .SAFE zip. This shrinks
+        # the per-interruption restart cost from the full archive to one band,
+        # since CDSE does not honour HTTP Range for true byte-resume.
+        paths = _download_bands_via_nodes(
+            scene, token, scene_event, band_tokens, satellite_type
         )
+
+        # FALLBACK: whole-archive download + in-zip extract (unusual layouts,
+        # Sentinel-1, or a Nodes traversal failure).
+        if not paths:
+            zip_path = _download_product_zip(scene, token)
+            if zip_path is None:
+                logger.warning("Skipping scene %d: download failed", idx)
+                continue
+            paths = _extract_bands(
+                zip_path, scene_event, band_tokens, satellite_type
+            )
+
         if paths:
             per_scene_paths.append(paths)
 

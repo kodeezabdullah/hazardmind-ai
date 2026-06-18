@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Optional
@@ -68,17 +69,165 @@ HAZARD_AGENT = "@hazardmind-hazard"
 # back in the room (acks / nudges / pipeline summary). One analysis per event.
 _completed_event_ids: set[str] = set()
 
+# The Band room the current disaster was dispatched in. The orchestrator now
+# creates a fresh per-event room and adds us to it, so we must post our ack /
+# progress / completion back into THAT room — not a hardcoded static room. The
+# room id arrives as the LangGraph `thread_id` (see _coroutine); run_pipeline
+# stashes it here so the deterministic _post_* helpers can read it. Falls back
+# to BAND_ROOM_ID only if, somehow, no room was captured.
+_active_room: Optional[str] = None
+
+
+def _set_active_room(room_id: Optional[str]) -> None:
+    """Record the room the current dispatch arrived in (the post target)."""
+    global _active_room
+    if room_id:
+        _active_room = str(room_id)
+
+
+def _current_room() -> Optional[str]:
+    """The room to post into: the dispatch room, else the static fallback."""
+    return _active_room or os.getenv("BAND_ROOM_ID")
+
+
+# Root-cause fix for LLM event_id truncation: the orchestrator's dispatch text
+# carries the FULL `event_id: <uuid>` line, and the Band adapter delivers that
+# message to `on_message` BEFORE the LLM ever runs (see _BoundEventIdAdapter).
+# We snapshot the full UUID per room there, so the tool can use the authoritative
+# id regardless of how the LLM later mangles its `event_id` argument. Keyed by
+# room id (== the LangGraph `thread_id` the tool receives).
+_room_event_ids: dict[str, str] = {}
+
+
+def _bind_room_event_id(room_id: Optional[str], event_id: Optional[str]) -> None:
+    """Record the full event_id seen in a room's inbound dispatch text."""
+    if room_id and event_id:
+        _room_event_ids[str(room_id)] = str(event_id)
+
+
+def _event_id_for_room(room_id: Optional[str]) -> Optional[str]:
+    """The full event_id captured from the inbound dispatch for this room."""
+    if not room_id:
+        return None
+    return _room_event_ids.get(str(room_id))
+
+
+# event_ids we have already auto-dispatched the tool for (see
+# _maybe_autodispatch). Distinct from _completed_event_ids (set only AFTER the
+# pipeline finishes): this guards against firing the tool twice while it is
+# still running, e.g. if the orchestrator's nudge arrives mid-pipeline.
+_autodispatched_event_ids: set[str] = set()
+
+
+def _parse_dispatch_fields(content: str) -> Optional[dict]:
+    """Extract the structured dispatch fields from an orchestrator message.
+
+    The orchestrator's satellite dispatch carries a `---` tail with
+    `event_id: <uuid>`, `location: <place>`, `disaster_type: <type>` (and an
+    optional `magnitude:`). We parse those deterministically so we can drive the
+    `processdisaster` tool ourselves — the Featherless adapter LLM stays the
+    primary brain for every *conversational* turn, but the one critical
+    imagery-processing tool-call no longer depends on the model reliably emitting
+    it (gemma frequently replies in prose instead, stalling the whole pipeline).
+
+    Returns a dict with location/disaster_type/event_id/magnitude when the
+    message is a genuine NEW disaster dispatch (has a location AND a disaster
+    type AND a full event_id), else None — so nudges, acks, handoffs and
+    check-ins (which lack these fields) never trigger a run.
+    """
+    if not content:
+        return None
+
+    fields: dict[str, str] = {}
+    for line in content.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key in ("event_id", "location", "disaster_type", "magnitude") and value:
+            fields.setdefault(key, value)
+
+    location = fields.get("location")
+    disaster_type = (fields.get("disaster_type") or "").lower()
+    event_id = fields.get("event_id")
+
+    # A genuine dispatch needs all three. Nudges/check-ins carry only event_id.
+    if not (location and disaster_type and event_id):
+        return None
+    if disaster_type not in ("flood", "earthquake", "landslide"):
+        return None
+
+    magnitude = None
+    if fields.get("magnitude"):
+        try:
+            magnitude = float(fields["magnitude"])
+        except (TypeError, ValueError):
+            magnitude = None
+
+    return {
+        "event_id": event_id,
+        "location": location,
+        "disaster_type": disaster_type,
+        "magnitude": magnitude,
+        "raw_message": content,
+    }
+
+
+async def _maybe_autodispatch(content: str, room_id: str) -> None:
+    """Deterministically run the satellite pipeline on a genuine NEW dispatch.
+
+    This is the reliability backbone: rather than trusting the Band-adapter LLM
+    (Featherless gemma) to emit the `processdisaster` tool-call — which it often
+    skips, answering in prose and stalling the pipeline — we detect a real
+    dispatch from its structured tail and invoke the tool directly. Fires at most
+    once per event_id; everything else (acks, nudges, handoffs) is left to the
+    LLM's conversational turn. Best-effort: never raises into message handling.
+    """
+    fields = _parse_dispatch_fields(content)
+    if not fields:
+        return
+
+    event_id = fields["event_id"]
+    if event_id in _autodispatched_event_ids or event_id in _completed_event_ids:
+        return
+    _autodispatched_event_ids.add(event_id)
+
+    # Post target is the dispatch room (matches the LangGraph thread_id the tool
+    # would otherwise capture).
+    _set_active_room(room_id)
+    logger.info(
+        "[autodispatch] genuine dispatch for event %s (%s/%s) — driving "
+        "processdisaster tool directly",
+        event_id, fields["location"], fields["disaster_type"],
+    )
+    try:
+        await run_pipeline(
+            ProcessDisasterInput(
+                event_id=event_id,
+                location=fields["location"],
+                disaster_type=fields["disaster_type"],
+                magnitude=fields["magnitude"],
+                raw_message=fields["raw_message"],
+            )
+        )
+    except Exception:  # noqa: BLE001 - tool failures are reported in-room, never crash the listener
+        logger.exception("[autodispatch] pipeline failed for event %s", event_id)
+        # Allow a later genuine retry if this was a transient failure.
+        _autodispatched_event_ids.discard(event_id)
+
 
 def _post_satellite_message(content: str) -> bool:
     """Post a chat message to the Band room as the satellite agent.
 
+    Posts into the room the current disaster was dispatched in (_current_room).
     Mentions the orchestrator (an agent cannot @mention itself on Band). Used
     for the initial ack and for in-progress heartbeats so the room shows the
     satellite is alive and working, not silent. Best-effort: returns True on a
     successful post, False otherwise (never raises).
     """
     api_key = os.getenv("BAND_API_KEY")
-    room_id = os.getenv("BAND_ROOM_ID")
+    room_id = _current_room()
     orchestrator_id = os.getenv("ORCHESTRATOR_AGENT_ID")  # mention orchestrator, not self
     if not api_key or not room_id or not orchestrator_id:
         return False
@@ -127,24 +276,136 @@ def _post_progress(event_id: str, step: str, detail: str) -> None:
         logger.info("Posted progress (%s) to Band room for event %s", step, event_id)
 
 
+def _persist_satellite_result(event_id: str, structured: dict) -> None:
+    """Write the satellite result straight to the DB (the reliable channel).
+
+    Band's REST /messages returns an EMPTY history for these per-event rooms, so
+    the orchestrator can't read the satellite's posted JSON and ends up forwarding
+    an empty ``data: {}`` to hazard — leaving the whole downstream chain with no
+    data to analyse (observed live). The DB is the dependable hand-off medium:
+    the satellite persists its own row here, and the orchestrator/hazard read the
+    payload from the DB instead of trusting the room transcript.
+    """
+    db_url = os.getenv("NEON_DATABASE_URL")
+    if not db_url:
+        return
+    try:
+        import asyncpg
+
+        # Columns mirror satellite_results; jsonb cols (bounds/bbox/risk_cities)
+        # are passed as JSON strings.
+        def _f(k):
+            v = structured.get(k)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _i(k):
+            v = structured.get(k)
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        async def _write():
+            conn = await asyncpg.connect(db_url)
+            try:
+                async with conn.transaction():
+                    await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO satellite_results
+                            (event_id, satellite_type, cloud_cover, scene_id,
+                             true_color_url, index_url, classification_url, geojson_url,
+                             affected_area_km2, damage_percent, total_zones,
+                             bounds, bbox, risk_cities)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                        """,
+                        event_id,
+                        structured.get("satellite_type"),
+                        _f("cloud_cover"),
+                        structured.get("scene_id"),
+                        structured.get("true_color_url"),
+                        structured.get("index_url"),
+                        structured.get("classification_url"),
+                        structured.get("geojson_url"),
+                        _f("affected_area_km2"),
+                        _f("damage_percent"),
+                        _i("total_zones"),
+                        json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
+                        json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
+                        json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
+                    )
+            finally:
+                await conn.close()
+
+        asyncio.run(_write())
+        logger.info("Persisted satellite_results row for event %s (DB hand-off)", event_id)
+    except Exception as exc:  # noqa: BLE001 - DB write is best-effort; room post still happens
+        logger.warning("Could not persist satellite_results for %s: %s", event_id, exc)
+
+
 def _post_completion(event_id: str, band_message: str, structured: dict) -> None:
-    """Post the satellite's completion signal to the room directly.
+    """Post the satellite's completion signal to the room AND persist to DB.
 
     The orchestrator advances the pipeline only on a genuine completion signal.
     The Band Anthropic adapter is LLM-driven, and the model tends to paraphrase
     its result instead of relaying the structured payload verbatim — so we post
     the authoritative signal ourselves: the natural hand-off message, an explicit
-    "satellite complete" marker, and the full JSON object on the tail. This makes
-    detection independent of LLM phrasing while the model's own chatter still
-    reads naturally in the room.
+    "satellite complete" marker, and the full JSON object on the tail. We ALSO
+    write the result to the DB, because Band's REST history is empty for these
+    rooms and the room transcript can't be relied on to carry the payload
+    downstream (see _persist_satellite_result).
     """
+    # DB hand-off first — the reliable channel.
+    _persist_satellite_result(event_id, structured)
+
     content = (
         f"{band_message}\n\n"
         f"satellite complete\n"
-        f"{json.dumps(structured)}"
+        f"---\n"
+        f"{json.dumps(_slim_completion_payload(structured))}"
     )
     if _post_satellite_message(content):
         logger.info("Posted completion signal to Band room for event %s", event_id)
+
+
+# Verbose nested keys dropped from the room completion JSON. The downstream agents
+# (and the orchestrator's detector) read the headline scalars + artifact URLs; the
+# full geometry/validation detail is heavy and, replayed into the next agent's
+# Band-adapter LLM turn, overflowed the Featherless 32k context cap. The complete
+# payload is still written to the DB via insert_satellite_result.
+_COMPLETION_DROP_KEYS = frozenset(
+    {
+        "bounds_corners",
+        "bounds_leaflet",
+        "validations",
+        "class_counts",
+        "concerns",
+        # region_boundary is a full MultiPolygon (hundreds of coord pairs, ~20k
+        # chars) — by far the biggest field. Downstream agents use the bbox/bounds
+        # scalars + artifact URLs, not the raw geometry (which is on R2 as
+        # zones.geojson). Dropping it keeps the room transcript small enough that
+        # the next agent's 32k-context Band adapter never overflows.
+        "region_boundary",
+        "geojson",
+        "coordinates",
+    }
+)
+
+
+def _slim_completion_payload(data):
+    """Recursively drop verbose keys so the room completion JSON stays small."""
+    if isinstance(data, dict):
+        return {
+            k: _slim_completion_payload(v)
+            for k, v in data.items()
+            if k not in _COMPLETION_DROP_KEYS
+        }
+    if isinstance(data, list):
+        return [_slim_completion_payload(v) for v in data]
+    return data
 
 
 # LLM intelligence layer (Featherless chain + Opus last resort). Shared across
@@ -385,6 +646,171 @@ def _search_with_recovery(
     return None
 
 
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# A UUID that directly follows an `event_id` label, in either the dispatch's
+# `event_id: <uuid>` line form or a JSON `"event_id": "<uuid>"` form. Preferred
+# over a bare first-UUID match so a stray UUID elsewhere in the text (should one
+# ever appear) cannot be mistaken for the event id.
+_EVENT_ID_RE = re.compile(
+    r"event_id\"?\s*[:=]\s*\"?\s*("
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    re.IGNORECASE,
+)
+# A Band @mention is rendered into message content as `@[[<agent-uuid>]]`. That
+# UUID is an AGENT id, never the event id, so it must be stripped before any
+# bare-UUID scan — otherwise the room's intro/title message (which @mentions the
+# satellite but carries no `event_id:` label) would bind the satellite's OWN
+# agent id as the event id (the truncated-event bug observed live).
+_MENTION_RE = re.compile(r"@\[\[[^\]]*\]\]")
+
+# The agent's own Band id, populated at startup (see main()). A bare UUID equal
+# to this is the agent's own mention and is never the event id.
+_OWN_AGENT_ID: Optional[str] = None
+
+
+def _strip_mentions(content: str) -> str:
+    """Remove `@[[<agent-uuid>]]` mention tokens so their ids aren't scanned."""
+    return _MENTION_RE.sub(" ", content or "")
+
+
+def _extract_event_id_from_text(content: str) -> Optional[str]:
+    """The full event_id UUID from a dispatch/handoff: label-anchored, else first.
+
+    Mention tokens (`@[[<agent-uuid>]]`) and the agent's own id are excluded from
+    the bare-UUID fallback so the room intro message — which mentions the agent
+    but has no `event_id:` label — can never bind an agent id as the event id.
+    """
+    if not content:
+        return None
+    # Label-anchored is always authoritative (works even with mentions present).
+    labeled = _EVENT_ID_RE.search(content)
+    if labeled:
+        return labeled.group(1)
+    # Bare fallback: scan AFTER stripping @mentions, and skip our own agent id.
+    cleaned = _strip_mentions(content)
+    for cand in _UUID_RE.findall(cleaned):
+        if _OWN_AGENT_ID and cand.lower() == _OWN_AGENT_ID.lower():
+            continue
+        return cand
+    return None
+
+
+def _recover_full_event_id(
+    event_id: str,
+    raw_message: Optional[str],
+    room_id: Optional[str] = None,
+) -> str:
+    """Resolve the authoritative full-UUID event_id, defending against LLM mangling.
+
+    The Band adapter's model populates the ``event_id`` tool argument from the
+    dispatch text and sometimes truncates it to the leading 8-char segment
+    (e.g. ``e9e83455`` instead of ``e9e83455-8ea6-44b7-...``). The downstream DB
+    columns are UUID-typed, so a truncated id makes the hazard agent's insert
+    fail (``invalid UUID ... length must be 32..36``).
+
+    Resolution order (most authoritative first):
+      1. The full event_id captured from the room's inbound dispatch in
+         ``on_message`` BEFORE the LLM ran (``_event_id_for_room``) — the
+         root-cause fix; the LLM cannot corrupt this. Preferred whenever the
+         LLM-supplied id is absent, truncated, or merely a prefix of it.
+      2. The LLM-supplied ``event_id`` if it is already a full UUID.
+      3. A UUID recovered from ``raw_message`` (the dispatch text threaded
+         through the tool), preferring one the truncated prefix starts.
+    Returns the original value unchanged only if nothing better is found.
+    """
+    passed = (event_id or "").strip()
+    passed_is_full = bool(passed) and bool(_UUID_RE.fullmatch(passed))
+
+    # (1) Room-bound id — the source the LLM never touches.
+    bound = _event_id_for_room(room_id)
+    if bound and _UUID_RE.fullmatch(bound):
+        if not passed_is_full or passed.lower() != bound.lower():
+            # Only log a correction when the LLM gave us something different.
+            if passed and passed.lower() != bound.lower():
+                logger.warning(
+                    "Using room-bound event_id %s (LLM tool arg was %r)",
+                    bound, event_id,
+                )
+            return bound
+
+    # (2) LLM arg is already a valid full UUID.
+    if passed_is_full:
+        return passed
+
+    # (3) Recover from the dispatch text carried as raw_message. Strip @mentions
+    # and drop our own agent id first — otherwise a `@[[<agent-uuid>]]` mention
+    # (which is NOT the event id) would be recovered as the event id.
+    if raw_message:
+        own = (_OWN_AGENT_ID or "").lower()
+        candidates = [
+            c for c in _UUID_RE.findall(_strip_mentions(raw_message))
+            if not (own and c.lower() == own)
+        ]
+        if candidates:
+            prefix = passed.lower()
+            for cand in candidates:
+                if prefix and cand.lower().startswith(prefix):
+                    logger.warning(
+                        "Recovered full event_id %s from raw_message (LLM passed "
+                        "truncated %r)", cand, event_id,
+                    )
+                    return cand
+            logger.warning(
+                "Recovered full event_id %s from raw_message (LLM passed %r)",
+                candidates[0], event_id,
+            )
+            return candidates[0]
+
+    if passed:
+        logger.error(
+            "event_id %r is not a full UUID and could not be recovered (no room "
+            "binding, no raw_message match); downstream DB writes may fail",
+            event_id,
+        )
+    return event_id
+
+
+class _BoundEventIdAdapter(LangGraphAdapter):
+    """LangGraph adapter that snapshots the full event_id before the LLM runs.
+
+    The Band runtime delivers each inbound room message to ``on_message`` (with
+    the raw text and ``room_id``) BEFORE the LangGraph/LLM turn that decides to
+    call the ``processdisaster`` tool. The orchestrator's dispatch text carries
+    the full ``event_id: <uuid>`` line, so here we extract that UUID and bind it
+    to the room. The tool then resolves the authoritative id by room
+    (``_recover_full_event_id`` step 1), which the LLM cannot corrupt — fixing
+    the truncated-UUID class of bug at its source rather than recovering after.
+    """
+
+    async def on_message(self, msg, *args, room_id: str, **kwargs):  # type: ignore[override]
+        try:
+            content = getattr(msg, "content", "") or ""
+            logger.info(
+                "[on_message DEBUG] room=%s content=%r", room_id, content[:400]
+            )
+            found = _extract_event_id_from_text(content)
+            if found:
+                _bind_room_event_id(room_id, found)
+                logger.info(
+                    "Bound full event_id %s to room %s from inbound dispatch",
+                    found, room_id,
+                )
+            # Deterministic dispatch: if this is a genuine NEW disaster dispatch,
+            # drive the processdisaster tool ourselves (in the background so the
+            # listener stays responsive) instead of relying on the Featherless
+            # adapter LLM to emit the tool-call. The LLM still handles this turn
+            # conversationally; the tool's process-once guard makes any duplicate
+            # tool-call from the LLM a no-op.
+            asyncio.create_task(_maybe_autodispatch(content, room_id))
+        except Exception:  # noqa: BLE001 - capture must never break message handling
+            logger.debug("Could not bind event_id from inbound message")
+        return await super().on_message(msg, *args, room_id=room_id, **kwargs)
+
+
 async def run_pipeline(params: ProcessDisasterInput) -> str:
     """Async tool entry point — runs the (blocking) pipeline off the event loop.
 
@@ -415,7 +841,9 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
       5. a natural Band hand-off message (not raw JSON)
       6. a confidence quality gate before sending
     """
-    event_id = params.event_id
+    event_id = _recover_full_event_id(
+        params.event_id, params.raw_message, room_id=_current_room()
+    )
     location = params.location
     disaster_type = params.disaster_type
 
@@ -470,11 +898,23 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # list names it as a standalone token (e.g. "disaster_type", "city"),
             # avoiding spurious clarification loops on phrases like
             # "confirmation of disaster type".
+            # The EXPLICIT tool args (params.location / params.disaster_type),
+            # extracted by the dispatcher LLM from the orchestrator message, are
+            # authoritative. A core field is only genuinely missing when it is
+            # absent from BOTH the explicit args AND the re-parsed profile — so a
+            # confident dispatch ("flood in Rawalpindi") never triggers a false
+            # clarification just because the secondary parse was unsure.
             missing = {m.strip().lower() for m in (profile.get("missing_info") or [])}
             _LOC_TOKENS = {"location", "city", "place"}
             _TYPE_TOKENS = {"disaster_type", "disaster type", "type"}
-            loc_missing = (not profile.get("location")) or bool(missing & _LOC_TOKENS)
-            type_missing = (not profile.get("disaster_type")) or bool(missing & _TYPE_TOKENS)
+            have_location = bool(location) or bool(profile.get("location"))
+            have_type = bool(disaster_type) or bool(profile.get("disaster_type"))
+            loc_missing = (not have_location) or (
+                not bool(location) and bool(missing & _LOC_TOKENS)
+            )
+            type_missing = (not have_type) or (
+                not bool(disaster_type) and bool(missing & _TYPE_TOKENS)
+            )
             if profile.get("ambiguous") and (loc_missing or type_missing):
                 return _clarification(event_id, profile)
             # Enrich downstream inputs from the parsed profile where the tool
@@ -865,9 +1305,19 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
 # StructuredTool whose args schema is ProcessDisasterInput; keep the tool name
 # `processdisaster` (referenced by SYSTEM_PROMPT).
 def _build_process_disaster_tool():
+    from langchain_core.runnables import RunnableConfig
     from langchain_core.tools import StructuredTool
 
-    async def _coroutine(**kwargs) -> str:
+    async def _coroutine(config: RunnableConfig = None, **kwargs) -> str:
+        # LangChain injects the RunnableConfig; the band adapter sets the room
+        # id as `thread_id` (see langgraph adapter). Capture it so our direct
+        # _post_* signals land in the room the dispatch arrived in (the dynamic
+        # per-event room), not a hardcoded static room.
+        try:
+            thread_id = ((config or {}).get("configurable") or {}).get("thread_id")
+            _set_active_room(thread_id)
+        except Exception:  # noqa: BLE001 - room capture must never break the tool
+            logger.debug("Could not capture dispatch room id from tool config")
         return await run_pipeline(ProcessDisasterInput(**kwargs))
 
     return StructuredTool.from_function(
@@ -886,70 +1336,53 @@ PROCESS_DISASTER_TOOL = _build_process_disaster_tool()
 # --------------------------------------------------------------------------- #
 SYSTEM_PROMPT = f"""\
 You are HazardMind's satellite agent. You process Copernicus/Sentinel satellite \
-imagery for disaster zones and report the results to the hazard analysis agent.
+imagery for disaster zones and report results to the hazard analysis agent.
 
-When the orchestrator @mentions you with a disaster, extract the location, \
-disaster_type (flood/earthquake/landslide), magnitude (optional) and event_id, \
-then call the `processdisaster` tool exactly once with those values. ALSO pass \
-the original alert text verbatim as `raw_message` so the agent can parse it and \
-detect ambiguity.
+You have exactly ONE job: when the orchestrator @mentions you with a disaster, \
+call the `processdisaster` tool, WAIT for it to finish, and relay its result \
+to the room VERBATIM. The tool is the single source of truth. You never decide \
+on your own whether data is missing, ambiguous, or complete — the tool tells you.
 
-The tool returns a JSON object. Relay it as follows.
+STRICT RULES — follow exactly:
 
-When status is "complete": the tool returns a `band_message` field — a natural, \
-expert hand-off message already addressed to {HAZARD_AGENT}. Reply with that \
-`band_message` verbatim, THEN on a new line append the tool's full JSON result \
-(the entire object you received) so the downstream agents can parse the \
-structured payload off the tail of your message. If (and only if) \
-`band_message` is missing/empty, fall back to this exact format (still append \
-the JSON after it):
+1. DO NOT post ANY message before the tool returns. No "starting", no "I need \
+   clarification", no status notes, no acknowledgements. Your FIRST and ONLY \
+   output for a disaster is the tool's result, after it returns. Stay silent \
+   while the tool runs (it may take several minutes — that is normal).
 
-{HAZARD_AGENT} satellite processing complete.
-event_id: <event_id>
-satellite_type: <satellite_type>
-cloud_cover: <cloud_cover>
-index_type: <index_type>
-affected_area_km2: <affected_area_km2>
-water_percent: <water_percent>
-true_color_url: <true_color_url>
-index_url: <index_url>
-classification_url: <classification_url>
-geojson_url: <geojson_url>
-bbox: <bbox>
-region_boundary: <region_boundary>
-risk_cities: <risk_cities>
-status: complete
+2. When the orchestrator @mentions you with a disaster, extract location, \
+   disaster_type (flood/earthquake/landslide), magnitude (optional) and \
+   event_id, then call `processdisaster` ONCE with those values. ALSO pass the \
+   original alert text verbatim as `raw_message`. If you cannot find an \
+   event_id, call the tool anyway with the values you have — do NOT post a \
+   question instead.
 
-When status is "clarification_needed", the input was ambiguous. Reply asking \
-the orchestrator to clarify, listing the `missing_info` items:
+3. The tool returns a JSON object with a `status` field. Relay it like this — \
+   and ONLY this. Never write your own version of these messages, never invent \
+   a "missing fields" or "clarification" message of your own:
 
-{HAZARD_AGENT} I need clarification before I can run satellite analysis.
-event_id: <event_id>
-missing: <missing_info>
-status: clarification_needed
+   • status == "complete": the tool returns a `band_message` field (natural, \
+     expert prose already addressed to {HAZARD_AGENT}). Post the `band_message` \
+     EXACTLY as given, then a line containing only `---`, then the tool's FULL \
+     JSON result object exactly as received. Nothing else.
 
-When status is "error", reply with:
+   • status == "clarification_needed": the tool decided the input was genuinely \
+     ambiguous. Post the tool's `message` field verbatim, then `---`, then the \
+     full JSON object. Do NOT compose your own missing-field list — use only \
+     what the tool returned.
 
-{HAZARD_AGENT} satellite processing failed.
-event_id: <event_id>
-error: <error>
-status: error
+   • status == "error": post `{HAZARD_AGENT} satellite processing hit an \
+     error.`, then `---`, then the full JSON object.
 
-Do not invent any values — use only what the tool returns. Do not call the tool \
-unless a disaster analysis was requested.
+4. Use ONLY values the tool returned. Invent nothing. If a field is absent from \
+   the tool result, it is absent from your message.
 
-IMPORTANT — call the tool ONCE per disaster, then stop:
-- Only call `processdisaster` when the orchestrator dispatches a NEW disaster \
-  with an event_id you have not already analysed.
-- After you have reported a "complete" result for an event_id, your work for \
-  that event is DONE. Do NOT call the tool again for it, and do NOT keep \
-  replying. If the orchestrator (or anyone) posts acknowledgements, progress \
-  notes, "thanks", status check-ins, or a pipeline summary about an event you \
-  already completed, treat them as informational and DO NOT respond — silence \
-  is correct.
-- Reply again about a completed event ONLY if the orchestrator explicitly \
-  reports a problem with your result, an anomaly, or asks you to re-run/verify \
-  something specific. Otherwise stay quiet.
+5. Call the tool ONCE per event_id, then STOP. After you relay a "complete" \
+   result for an event_id, your work for it is DONE. Acknowledgements, progress \
+   notes, "thanks", status check-ins, nudges, or the pipeline summary about an \
+   event you already finished are informational — DO NOT respond. Silence is \
+   correct. Reply again only if the orchestrator explicitly reports a problem \
+   with your result or asks you to re-run/verify something specific.
 """
 
 
@@ -996,7 +1429,47 @@ async def _drain_room_backlog(agent_id: str, api_key: str, room_id: str) -> None
             await link.disconnect()
         except Exception:  # noqa: BLE001
             pass
-    logger.info("Startup backlog drain: cleared %d message(s)", drained)
+    logger.info("Startup backlog drain: cleared %d message(s) in room %s", drained, room_id)
+
+
+async def _list_agent_rooms(api_key: str, rest_url: str) -> list[str]:
+    """List every Band room this agent is currently a member of.
+
+    The orchestrator creates a fresh per-event room each run and adds us to it;
+    we auto-rejoin all of them on (re)connect. To avoid replaying a PREVIOUS
+    event's transcript, we must drain the backlog of EVERY joined room at
+    startup, not just the static BAND_ROOM_ID. Best-effort: returns [] on error.
+    """
+    import httpx as _httpx
+
+    rooms: list[str] = []
+    try:
+        url = f"{rest_url.rstrip('/')}/api/v1/agent/chats?page=1&page_size=100"
+        with _httpx.Client(timeout=15.0) as client:
+            resp = client.get(url, headers={"X-API-Key": api_key})
+            resp.raise_for_status()
+            body = resp.json()
+        items = body.get("data") if isinstance(body, dict) else body
+        for item in items or []:
+            rid = item.get("id") or item.get("chat_id") if isinstance(item, dict) else None
+            if rid:
+                rooms.append(str(rid))
+    except Exception:  # noqa: BLE001 - listing is best-effort
+        logger.warning("Could not list agent rooms for startup drain")
+    return rooms
+
+
+async def _drain_all_rooms(agent_id: str, api_key: str, rest_url: str) -> None:
+    """Drain the startup backlog of every room the agent belongs to.
+
+    This is the fix for stale-event replay: on startup the agent rejoins all of
+    its old per-event rooms, and without draining each one the SDK would replay
+    a previous run's dispatch and re-trigger analysis on a stale event_id.
+    """
+    rooms = await _list_agent_rooms(api_key, rest_url)
+    logger.info("Startup drain: %d joined room(s) to clear", len(rooms))
+    for rid in rooms:
+        await _drain_room_backlog(agent_id, api_key, rid)
 
 
 async def main() -> None:
@@ -1010,6 +1483,8 @@ async def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     agent_id = _require("BAND_AGENT_ID")
+    global _OWN_AGENT_ID
+    _OWN_AGENT_ID = agent_id
     api_key = _require("BAND_API_KEY")
     featherless_api_key = _require("FEATHERLESS_API_KEY")
     rest_url = os.getenv("THENVOI_REST_URL", "https://app.band.ai")
@@ -1017,12 +1492,44 @@ async def main() -> None:
         "THENVOI_WS_URL", "wss://app.band.ai/api/v1/socket/websocket"
     )
 
-    llm = ChatOpenAI(
+    # Band-adapter LLM: Featherless (gemma) PRIMARY + Gemini fallback. The handoff
+    # JSON is slimmed (no geometry), so a turn fits Featherless's 32k context.
+    # Featherless is the workhorse (real capacity) vs Gemini's 20-req/day free
+    # tier; its 4-unit concurrency 429 is absorbed by langchain backoff
+    # (max_retries=8). Gemini is fallback for the rare oversized/throttled turn.
+    feather = ChatOpenAI(
         model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
         api_key=featherless_api_key,
         base_url="https://api.featherless.ai/v1",
+        max_tokens=4096,
+        max_retries=8,
     )
-    adapter = LangGraphAdapter(
+    # Gemini fallback chain. Each free-tier key has its own ~20-req/day quota, so
+    # we chain BOTH keys after Featherless: gemma (primary) -> Gemini key 1 ->
+    # Gemini key 2. When key 1 429s on quota, the adapter falls through to key 2,
+    # roughly doubling the daily Gemini budget. gemini-3.1-flash-lite is the
+    # default model (confirmed to reliably emit tool-calls via the OpenAI-compat
+    # endpoint, unlike gemma).
+    _gemini_model = os.getenv("BAND_ADAPTER_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+    _gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    _gemini_fallbacks = []
+    for _key_var in (
+        "GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3",
+        "GEMINI_API_KEY_4", "GEMINI_API_KEY_5",
+    ):
+        _k = os.getenv(_key_var)
+        if _k:
+            _gemini_fallbacks.append(
+                ChatOpenAI(
+                    model=_gemini_model,
+                    api_key=_k,
+                    base_url=_gemini_base,
+                    max_tokens=4096,
+                    max_retries=2,
+                )
+            )
+    llm = feather.with_fallbacks(_gemini_fallbacks) if _gemini_fallbacks else feather
+    adapter = _BoundEventIdAdapter(
         llm=llm,
         checkpointer=InMemorySaver(),
         custom_section=SYSTEM_PROMPT,
@@ -1036,9 +1543,10 @@ async def main() -> None:
     # tries to answer each one (slow, and it invents phantom event_ids),
     # jamming it before it reaches the live dispatch. We only ever act on
     # messages that arrive AFTER we're connected.
-    room_id = os.getenv("BAND_ROOM_ID")
-    if room_id:
-        await _drain_room_backlog(agent_id, api_key, room_id)
+    # Drain the backlog of EVERY room we're a member of (the static room plus
+    # any per-event dynamic rooms we were added to in prior runs), so we never
+    # replay a stale event's dispatch on startup.
+    await _drain_all_rooms(agent_id, api_key, rest_url)
 
     agent = Agent.create(
         adapter=adapter,
@@ -1049,7 +1557,28 @@ async def main() -> None:
     )
 
     logger.info("Connecting satellite agent to Band...")
-    await agent.start()
+    # Band rate-limits rapid websocket reconnects (HTTP 429 / "reconnect
+    # rate-limited after recent supersede") when an agent restarts soon after a
+    # previous connection. Retry with exponential backoff so a restart during
+    # that window waits the limit out instead of crashing the process.
+    for attempt in range(1, 9):
+        try:
+            await agent.start()
+            break
+        except Exception as exc:  # noqa: BLE001 - retry transient ws 429s
+            msg = str(exc)
+            if "429" in msg or "rate-limit" in msg.lower() or "supersede" in msg.lower():
+                wait = min(60, 5 * (2 ** (attempt - 1)))
+                logger.warning(
+                    "Band websocket rate-limited (attempt %d/8); retrying in %ds",
+                    attempt, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+    else:
+        logger.error("Satellite could not connect after 8 attempts (Band 429).")
+        return
     try:
         logger.info("Connected as: %s. Waiting for disaster mentions...", agent.agent_name)
         await agent.run_forever()

@@ -41,6 +41,151 @@ Connects to the Band platform using the Anthropic adapter.
 
 ## Core Logic
 
+### Step 17: Real admin-boundary clipping (geoBoundaries) — DONE (code; live e2e pending)
+
+**The bug.** The clip area for each risk city was an **arbitrary ~6 km buffer
+circle**, not the city's real boundary. Root cause: OSM/Nominatim maps most
+cities as a **node (Point)**, not a boundary relation — verified live, even
+Lahore returns only a Point — so `_ensure_areal` buffered the centre point to a
+fixed `_CITY_POINT_BUFFER_DEG = 0.05` disk and the pipeline clipped the imagery
+to that circle. Unacceptable: it is neither the city nor any admin unit.
+
+**The workflow it must honour (per the user).** Pakistan's admin hierarchy, and
+the analysis area must match the level named:
+  * a **city** name (e.g. "Rawalpindi") -> its **tehsil** polygon
+  * a **district** name (e.g. "Rawalpindi District") -> the **district**
+  * a **province** (e.g. "Punjab") -> the **province**
+These levels **vary by country** (PAK has ADM1-3; USA only ADM1-2 so a US "city"
+resolves to its county/ADM2; BGD/IND go to ADM4), so the level mapping cannot be
+hardcoded — it is discovered per country.
+
+**The fix — `geoboundaries.py` + `boundary.py`.** A new `geoboundaries.py`
+resolves the **real administrative polygon at the correct level** from
+geoBoundaries (gbOpen, open per-country ADM1..ADMn GeoJSON):
+- `country_to_iso3(country)` — country name -> ISO3 (small map + Nominatim
+  `extratags` ISO3166-1:alpha3 fallback).
+- `_available_levels(iso)` — which ADM levels geoBoundaries actually publishes
+  for that country (cached).
+- `_target_level(place_token, available)` — intent mapping: province words ->
+  ADM1, district/division words (incl. `ضلع`, county, governorate) -> ADM2,
+  a bare city name -> the **finest** available level.
+- `resolve_admin_polygon(place, country)` — downloads the target level, matches
+  `shapeName` (accent/punctuation-tolerant, admin-word-stripped so "Rawalpindi
+  District" matches "RAWALPINDI"), and **climbs UP** (finer -> coarser) if the
+  target level has no match, so it always returns a REAL boundary, never a
+  circle. Returns `{geometry, level, shape_name, source}`.
+- Caching is **in-memory per process**; transient download/metadata failures are
+  **not cached** (retryable on the flaky link), only genuine 404s (level absent).
+
+`boundary.py` now resolves through a **source chain** in both
+`get_risk_city_boundaries` (`_resolve_city_geometry`) and `get_region_boundary`:
+1. **geoBoundaries** real admin polygon (authoritative);
+2. **Nominatim/OSM** areal relation if geoBoundaries misses;
+3. **buffer circle ONLY as a loud last-resort** (`_ensure_areal`, with a WARNING
+   that the area is approximate) — never the default.
+`get_risk_city_boundaries(location, cities)` is called with the full location as
+`region_name`, so the country is parsed from its tail (`_country_from_region`).
+
+**Verified live (resolver + integration):** Rawalpindi -> ADM3 tehsil
+`RAWALPINDI` (~1,930 km²); Rawalpindi District -> ADM2 `Rawalpindi` (~7,121 km²);
+Punjab -> ADM1 `Punjab`; Lahore -> ADM3 `LAHOR` (~377 km²); Houston/USA -> ADM2
+county (no ADM3 — graceful climb). `get_risk_city_boundaries('Pakistan',
+['Rawalpindi'])` returns the real tehsil polygon (valid geometry), no circle.
+Full pipeline e2e with the new clip not yet re-run.
+
+### Step 16: Network-resilient per-band download + event_id recovery — DONE (code; full live e2e still pending)
+
+Two real defects surfaced during a live Rawalpindi flood run on a flaky
+connection. Both are fixed in code (the per-band downloader is unit-tested live;
+the full pipeline e2e has not yet been re-run to green).
+
+**FIX 1 — CDSE ignores HTTP Range, so a dropped connection restarted the whole
+~868 MB `.SAFE` zip from byte 0 (`processor.py`).** The resumable whole-zip
+download streams to a `.part` and, on a connection break, re-issues with a
+`Range: bytes=<n>-` header — but CDSE's download host **replies HTTP 200 (not
+206), ignoring the Range**, so the resume logic correctly detects this and
+rewrites from scratch. On an unstable link (WebSocket/keepalive dropping every
+~60 s) the download therefore never completed: every break = start over.
+
+The fix downloads **each band node individually** instead of the monolithic zip:
+- `_download_bands_via_nodes(scene_metadata, token, event_id, band_tokens,
+  satellite_type)` — walks the product's OData **Nodes** tree
+  (`/odata/v1/Products(<Id>)/Nodes(...)`) via `_resolve_s2_band_nodes` to map
+  each needed band token (B03/B08/B11/TCI for an S2 flood) to its `IMG_DATA`
+  `.jp2` node URL, then streams each to `<event_id>/bands/<tok>.jp2`.
+  This downloads only the bands we use (~400 MB) instead of the full archive
+  (~868 MB) — roughly half — and a break costs at most ONE band, not everything.
+- `_stream_to_file_with_retry(session, url, auth, out_path, label, timeout,
+  grace_seconds)` — the reusable per-file retry loop (extracted from the old
+  whole-zip path): streams to `<out>.part`, resumes a partial via Range when the
+  server honors it, time-budgeted backoff, `os.replace` on a complete file. A
+  fully-present `<out>` is reused (logged "Reusing cached band").
+- **Per-band outage budget (the critical correctness fix).** The
+  `OUTAGE_GRACE_SECONDS` (~7 min) budget governs how long we tolerate a *stall*
+  (no progress), NOT total download time. An early version ran it as a single
+  wall-clock deadline shared across all bands — on a slow-but-alive link
+  (~0.6 MB/s) ~300 MB legitimately takes >7 min of *healthy* downloading, and it
+  wrongly aborted before the last band even though every band was succeeding.
+  Now **each band gets its OWN fresh `grace_seconds`** (a completed band proves
+  the link is alive → resets the clock); a sustained outage still aborts because
+  the in-flight band's own budget expires with no completion. This is the
+  per-band analogue of the whole-zip path's "progress resets the deadline".
+- **Fully-cached fast path.** Before any network I/O, if every requested band
+  `.jp2` is already on disk (non-zero), return them immediately — skips the
+  Nodes tree-walk entirely (4 HTTP listings that can each hang up to the read
+  timeout on a flaky link), so a fully-cached scene resumes instantly across a
+  restart instead of stalling on the catalogue.
+- Wired as the **primary S2 path** in `download_imagery`; the whole-zip extract
+  remains the fallback when the Nodes traversal fails.
+- **Live unit test (one scene, your connection):** 4 bands downloaded
+  (B03 124 MB, B08 134 MB, B11 34 MB, TCI 135 MB = 407 MB); an aborted run that
+  got 3 bands then resumed reused all 3 instantly and fetched only TCI on a fresh
+  budget → SUCCESS. Stack → clip → NDWI → PNGs → R2 upload then ran clean off the
+  cached bands.
+- **NOTE — temp dir uses the SHORT event_id.** The scene temp tree is
+  `<tempdir>/hazardmind-satellite/<event_id-as-passed>/bands/`. When the LLM
+  passes a truncated 8-char id (see FIX 2), the bands land under the short dir;
+  seeding/inspecting the cache must use whatever id the run actually used.
+
+**FIX 2 — the LLM truncates the UUID event_id, breaking downstream DB writes
+(`agent.py`).** The Band adapter's model populates the `event_id` tool argument
+from the dispatch text and sometimes passes only the leading 8-char segment
+(`e9e83455` instead of `e9e83455-8ea6-44b7-b2d0-6bfd7856c38d`). The orchestrator
+generates a full UUID4 and the `*_results`/`hazard_zones`/… DB columns are
+**UUID-typed**, so a truncated id makes the hazard agent's insert fail with
+`invalid UUID 'e9e83455': length must be between 32..36 characters, got 8`. The
+short id was leaking into the **inter-agent contract** (handoff JSON), not just
+local logging.
+
+**Root-cause fix — `_BoundEventIdAdapter` (keeps the UUID out of the LLM).** The
+Band LangGraph adapter delivers each inbound room message to `on_message` (with
+the raw text and `room_id`) BEFORE the LLM turn that calls `processdisaster`. A
+thin `LangGraphAdapter` subclass overrides `on_message` to extract the full
+`event_id: <uuid>` from the dispatch text and bind it to the room
+(`_bind_room_event_id`, keyed by the room id == the LangGraph `thread_id` the
+tool later receives), then delegates to `super().on_message`. The LLM never gets
+a chance to corrupt this snapshot.
+
+**Resolver — `_recover_full_event_id(event_id, raw_message, room_id)`** (called
+first thing in `_run_pipeline_sync`) resolves the authoritative id in priority
+order: (1) the room-bound full UUID from `on_message` — preferred whenever the
+LLM arg is absent/truncated/a prefix of it; (2) the LLM arg if already a full
+UUID; (3) a UUID recovered from `raw_message` (the dispatch text), preferring one
+the truncated prefix starts. Returns the original unchanged only if nothing
+better is found (logged). Unit-tested: room-bound beats truncated, room-bound
+with empty arg, already-full, recover-from-raw, unrecoverable→unchanged, and
+content extraction.
+
+**All four agents hardened.** `final_reports`/`hazard_zones`/`impact_data`/
+`satellite_results.event_id` are all UUID-typed (`shared/db/schema.sql`), so a
+truncated id would crash the INSERT in any of them (hazard crashed first in the
+observed run; impact/report would have hit the same wall once reached). The same
+`_BoundEventIdAdapter` + room-bound `_resolve_event_id` pattern is now applied to
+hazard, impact and report too (see each agent's CLAUDE.md). The observed run had
+*self-healed* — hazard's "invalid UUID" error bounced into the room and the
+satellite LLM re-called the tool with the full UUID — but that is no longer the
+mechanism relied on.
+
 ### Step 15: Full Band pipeline integration test — DONE
 
 The satellite agent was exercised end to end over a live Band room as part of

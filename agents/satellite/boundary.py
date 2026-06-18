@@ -23,6 +23,8 @@ import requests
 from shapely.geometry import mapping, shape
 from shapely.ops import unary_union
 
+from geoboundaries import country_to_iso3, resolve_admin_polygon
+
 logger = logging.getLogger(__name__)
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -49,9 +51,11 @@ def _nominatim_search(query: str, timeout: int = 30) -> Optional[dict]:
         "q": query,
         "format": "jsonv2",
         "polygon_geojson": 1,
+        "addressdetails": 1,
+        "accept-language": "en",  # force English place/country names (else localized, e.g. Urdu)
         "limit": 1,
     }
-    headers = {"User-Agent": USER_AGENT}
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en"}
 
     logger.info("Nominatim lookup: %s", query)
     try:
@@ -91,6 +95,27 @@ def get_region_boundary(location_name: str) -> Optional[dict]:
 
     Example: get_region_boundary("Punjab, Pakistan") -> full province boundary.
     """
+    # Try the real admin polygon first (province/district at the correct level
+    # for the country); fall back to Nominatim for the faded background layer.
+    place = location_name.split(",")[0].strip()
+    country = _country_from_region(location_name)
+    try:
+        resolved = resolve_admin_polygon(place, country)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("geoBoundaries region resolve failed for %r: %s", place, exc)
+        resolved = None
+    if resolved and resolved.get("geometry"):
+        try:
+            geometry = shape(resolved["geometry"])
+            if geometry.area > 0:
+                return {
+                    "name": resolved["shape_name"],
+                    "geojson": resolved["geometry"],
+                    "bbox": geometry.bounds,
+                }
+        except (ValueError, AttributeError) as exc:
+            logger.error("Invalid geoBoundaries region geometry %r: %s", place, exc)
+
     result = _nominatim_search(location_name)
     if result is None:
         return None
@@ -144,6 +169,125 @@ def _ensure_areal(geometry, label: str):
         return geometry
 
 
+def _country_from_region(region_name: str) -> str:
+    """Extract the country from a region string ('Punjab, Pakistan' -> 'Pakistan')."""
+    if not region_name:
+        return ""
+    return region_name.split(",")[-1].strip()
+
+
+def _looks_like_country(name: str) -> bool:
+    """True if `name` is plausibly a real country geoBoundaries can resolve.
+
+    A bare city ('Rawalpindi') arrives as the 'country' when the orchestrator
+    sends a location with no comma. We can't tell a city from a country by
+    string alone, so this is only used to decide whether to ATTEMPT geoBoundaries
+    directly first; the Nominatim country-inference path below is the real fix.
+    """
+    return bool(name) and country_to_iso3(name) is not None
+
+
+def _infer_country_via_nominatim(city: str) -> str:
+    """Look up a bare city on Nominatim and return its country name, or "".
+
+    Fixes the bare-city case ('Rawalpindi' with no country): without a country,
+    geoBoundaries can't resolve an ISO3 and the pipeline falls back to an
+    arbitrary buffer circle. Here we ask Nominatim what country the city is in,
+    so we can retry geoBoundaries for the REAL tehsil/admin polygon.
+    """
+    result = _nominatim_search(city)
+    if not result:
+        return ""
+    address = result.get("address") or {}
+    country = (address.get("country") or "").strip()
+    # The ISO 3166-1 alpha-2 code (e.g. "pk") is language-independent — far more
+    # robust than the localized country name (Nominatim may return it in the
+    # local script). country_to_iso3 (pycountry) resolves the alpha-2 directly,
+    # so prefer it whenever the plain name isn't a clean match. Works worldwide.
+    code = (address.get("country_code") or "").strip()
+    if code and not _looks_like_country(country):
+        if country_to_iso3(code):
+            logger.info(
+                "Using ISO alpha-2 %r for city %r (localized name was %r)",
+                code, city, country,
+            )
+            return code
+    if country:
+        logger.info("Inferred country %r for bare city %r via Nominatim", country, city)
+    return country
+
+
+def _resolve_city_geometry(city: str, region_name: str, country: str):
+    """Resolve a place to a REAL administrative polygon, with a source chain.
+
+    Priority (per the workflow: a city name -> its tehsil/finest admin unit, a
+    district name -> the district, a province -> the province):
+      1. geoBoundaries — the real admin polygon at the correct level for the
+         country (handles country-to-country variation in the admin hierarchy).
+      2. Nominatim/OSM — an areal admin relation if geoBoundaries misses.
+      3. Last resort ONLY — buffer the Nominatim centre point into a disk, with
+         a loud warning. Never the default; just a non-fatal floor so the
+         pipeline can still run when no real boundary exists anywhere.
+    Returns a shapely geometry or None.
+    """
+    # If `country` is not actually a country (the orchestrator sent a bare city
+    # like "Rawalpindi" with no comma, so _country_from_region returned the city
+    # itself), geoBoundaries can't resolve an ISO3 and we'd fall straight to an
+    # arbitrary buffer circle. Infer the real country from Nominatim first so we
+    # can resolve the proper tehsil/ADM polygon.
+    if not _looks_like_country(country):
+        inferred = _infer_country_via_nominatim(city)
+        if inferred:
+            country = inferred
+            if not region_name or _country_from_region(region_name) == city:
+                region_name = f"{city}, {inferred}"
+
+    # (1) geoBoundaries — the authoritative real boundary.
+    try:
+        resolved = resolve_admin_polygon(city, country)
+    except Exception as exc:  # noqa: BLE001 - never let the resolver crash the pipeline
+        logger.warning("geoBoundaries resolve failed for %r: %s", city, exc)
+        resolved = None
+    if resolved and resolved.get("geometry"):
+        try:
+            geom = shape(resolved["geometry"])
+            if geom.area > 0:
+                logger.info(
+                    "City %r -> %s %r via geoBoundaries",
+                    city, resolved["level"], resolved["shape_name"],
+                )
+                return geom
+        except (ValueError, AttributeError) as exc:
+            logger.error("Invalid geoBoundaries geometry for %r: %s", city, exc)
+
+    # (2) Nominatim/OSM areal relation.
+    query = f"{city}, {region_name}" if region_name else city
+    result = _nominatim_search(query)
+    if result is None:
+        return None
+    geojson = result.get("geojson")
+    if geojson is None:
+        logger.warning("City %r has no polygon geometry", city)
+        return None
+    try:
+        geometry = shape(geojson)
+    except (ValueError, AttributeError) as exc:
+        logger.error("Invalid geometry for city %r: %s", city, exc)
+        return None
+    if geometry.area > 0:
+        logger.info("City %r -> OSM areal relation (no geoBoundaries match)", city)
+        return geometry
+
+    # (3) Last resort: buffer the zero-area centre point. _ensure_areal logs a
+    # loud warning — this is a degraded fallback, not a real boundary.
+    logger.warning(
+        "City %r: no real admin polygon (geoBoundaries+OSM); falling back to "
+        "an ARBITRARY buffer circle — analysis area is approximate.",
+        city,
+    )
+    return _ensure_areal(geometry, city)
+
+
 def get_risk_city_boundaries(region_name: str, city_list: list) -> list:
     """Fetch a boundary polygon for each risk city.
 
@@ -155,34 +299,18 @@ def get_risk_city_boundaries(region_name: str, city_list: list) -> list:
 
     Example: get_risk_city_boundaries("Punjab, Pakistan", ["Lahore", "Multan"]).
     """
+    country = _country_from_region(region_name)
     boundaries = []
     for city in city_list:
-        query = f"{city}, {region_name}" if region_name else city
-        result = _nominatim_search(query)
-        if result is None:
+        geometry = _resolve_city_geometry(city, region_name, country)
+        if geometry is None:
             logger.warning("Skipping city with no boundary: %r", city)
             continue
-
-        geojson = result.get("geojson")
-        if geojson is None:
-            logger.warning("City %r has no polygon geometry", city)
-            continue
-
-        try:
-            geometry = shape(geojson)
-        except (ValueError, AttributeError) as exc:
-            logger.error("Invalid geometry for city %r: %s", city, exc)
-            continue
-
-        # Guarantee an areal footprint so the city is usable for coverage
-        # scoring and the merged AOI (Nominatim may return a Point/line).
-        geometry = _ensure_areal(geometry, city)
-        geojson = mapping(geometry)
 
         boundaries.append(
             {
                 "name": city,
-                "geojson": geojson,
+                "geojson": mapping(geometry),
                 "bbox": geometry.bounds,
             }
         )
