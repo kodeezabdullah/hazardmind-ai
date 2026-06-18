@@ -120,17 +120,27 @@ present.
 
 ### 3a. Satellite agent (16 GB RAM)
 
+**Disk sizing (measured):** one event peaks at roughly **3-3.5 GB** of working
+files (2-3 scene `.zip` archives at ~0.8-1.1 GB each plus ~400 MB of extracted
+bands/mosaic), then it is cleaned up. The satellite image itself is ~3-4 GB
+(GDAL stack). A **30 GB** disk is comfortable: OS + Docker image (~10 GB) + one
+event's peak (~3.5 GB) + headroom. The agent deletes both the extracted files and
+the cached scene archives after each run by default, so the disk does not grow
+over time (set `SATELLITE_KEEP_SCENE_CACHE=true` only for local dev to keep the
+re-download cache).
+
 ```bash
 gcloud compute instances create-with-container hazardmind-satellite \
   --zone=${REGION}-a \
   --machine-type=e2-standard-4 \
-  --boot-disk-size=50GB \
+  --boot-disk-size=30GB \
   --container-image=$REPO/satellite:latest \
   --container-restart-policy=always
 ```
 
 `e2-standard-4` is 4 vCPU / 16 GB RAM — the satellite agent's raster mosaic step
-benefits from this. The 50 GB disk gives room for the temporary band downloads.
+benefits from this. The 30 GB disk gives room for the Docker image plus one
+event's temporary band downloads (cleaned up after each run).
 
 Now copy the env file onto the VM and restart the container with it. The simplest
 reliable way is to pass env vars at creation time. Re-create with the env file:
@@ -145,7 +155,7 @@ ENVFLAGS=$(grep -vE '^\s*#|^\s*$' agents/satellite/.env | sed 's/^/--container-e
 gcloud compute instances create-with-container hazardmind-satellite \
   --zone=${REGION}-a \
   --machine-type=e2-standard-4 \
-  --boot-disk-size=50GB \
+  --boot-disk-size=30GB \
   --container-image=$REPO/satellite:latest \
   --container-restart-policy=always \
   $ENVFLAGS

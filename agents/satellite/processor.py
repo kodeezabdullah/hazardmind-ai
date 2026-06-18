@@ -1779,13 +1779,21 @@ def process_satellite_imagery(
 
 
 async def cleanup_event_temp(event_id: str) -> None:
-    """Remove an event's extracted bands + exported PNGs after R2 upload.
+    """Remove an event's working files after the results are safe on R2.
 
-    Deletes only `<temp>/hazardmind-satellite/<event_id>/` — the extracted band
-    rasters and the PNG/GeoJSON outputs (including per-city subdirs). The
-    downloaded `.zip` product archives live directly under TEMP_ROOT (keyed by
-    product Id, not event_id) and are intentionally kept, so a re-process of the
-    same event reuses the cached download instead of re-fetching hundreds of MB.
+    Always deletes `<temp>/hazardmind-satellite/<event_id>/` — the extracted band
+    rasters and the PNG/GeoJSON outputs.
+
+    The downloaded `.zip` scene archives (~0.8-1.6 GB each, keyed by product Id)
+    are a re-download cache. Keeping them speeds up re-processing the same scene
+    locally, but on an ephemeral cloud VM with a bounded disk they accumulate and
+    eventually fill the volume. So zip cleanup is controlled by an env flag:
+
+        SATELLITE_KEEP_SCENE_CACHE=true   -> keep the .zip archives (local/dev)
+        (unset / false)                   -> delete them too (production default)
+
+    The final imagery products always live on Cloudflare R2, so deleting the
+    local cache never loses any output.
     """
     import shutil
 
@@ -1796,6 +1804,26 @@ async def cleanup_event_temp(event_id: str) -> None:
             logger.info("[Cleanup] Removed %s", temp_dir)
         except OSError as exc:
             logger.warning("[Cleanup] Could not remove %s: %s", temp_dir, exc)
+
+    keep_cache = os.getenv("SATELLITE_KEEP_SCENE_CACHE", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if keep_cache:
+        return
+
+    # Production: also drop the cached scene .zip archives so the VM disk does not
+    # fill up over many events.
+    try:
+        for name in os.listdir(TEMP_ROOT):
+            if name.endswith(".zip") or name.endswith(".zip.part"):
+                path = os.path.join(TEMP_ROOT, name)
+                try:
+                    os.remove(path)
+                    logger.info("[Cleanup] Removed cached archive %s", path)
+                except OSError as exc:
+                    logger.warning("[Cleanup] Could not remove %s: %s", path, exc)
+    except FileNotFoundError:
+        pass
 
 
 if __name__ == "__main__":
