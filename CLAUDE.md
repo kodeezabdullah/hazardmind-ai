@@ -86,7 +86,7 @@ class PipelineState(TypedDict):
 
 - [x] `agents/satellite` — converted: `node.py` wraps `run_pipeline`/`_run_pipeline_sync` as a LangGraph node; Band adapter/room/mention machinery stripped from `agent.py`, all raster/boundary/cross-validation logic untouched
 - [x] `agents/hazard` — converted: `node.py` wraps `analyze_hazard` as a LangGraph node; Band adapter/room/mention machinery stripped from `agent.py`, `_normalise_satellite_payload` adapter and all deterministic hazard math untouched
-- [ ] `agents/impact` — convert `run_impact_analysis` into a node; keep the no-significant-disaster gate and parallel Task1+Task2 (`asyncio.gather`) untouched
+- [x] `agents/impact` — converted: `node.py` wraps `run_impact_analysis` as a LangGraph node; Band adapter/room/mention/UUID-recovery machinery stripped from `agent.py`, the no-significant-disaster gate and parallel Task1+Task2 (`asyncio.gather`) untouched
 - [ ] `agents/report` — convert `run_report_pipeline` into a node; keep strict-mode validation (`_assert_required_report_sections`) untouched
 - [ ] `backend/orchestrator` — replace with a `StateGraph` build (`satellite → hazard → impact → report`) + `.ainvoke()`/`.astream()` driver; port `cross_validate_and_discuss`'s anomaly logic to run between nodes (conditional edges or a post-node hook), drop the Band-posting side
 - [ ] Delete Band code — see the deletion list above; grep for `band`, `Band`, `THENVOI`, `@mention` across the repo before declaring this done
