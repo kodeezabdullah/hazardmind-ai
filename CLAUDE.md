@@ -85,7 +85,7 @@ class PipelineState(TypedDict):
 ## Agent Migration Status
 
 - [x] `agents/satellite` — converted: `node.py` wraps `run_pipeline`/`_run_pipeline_sync` as a LangGraph node; Band adapter/room/mention machinery stripped from `agent.py`, all raster/boundary/cross-validation logic untouched
-- [ ] `agents/hazard` — convert `analyze_hazard` into a node; keep `_normalise_satellite_payload` adapter, keep deterministic earthquake/landslide math untouched
+- [x] `agents/hazard` — converted: `node.py` wraps `analyze_hazard` as a LangGraph node; Band adapter/room/mention machinery stripped from `agent.py`, `_normalise_satellite_payload` adapter and all deterministic hazard math untouched
 - [ ] `agents/impact` — convert `run_impact_analysis` into a node; keep the no-significant-disaster gate and parallel Task1+Task2 (`asyncio.gather`) untouched
 - [ ] `agents/report` — convert `run_report_pipeline` into a node; keep strict-mode validation (`_assert_required_report_sections`) untouched
 - [ ] `backend/orchestrator` — replace with a `StateGraph` build (`satellite → hazard → impact → report`) + `.ainvoke()`/`.astream()` driver; port `cross_validate_and_discuss`'s anomaly logic to run between nodes (conditional edges or a post-node hook), drop the Band-posting side
