@@ -176,6 +176,22 @@ async def insert_satellite_result(event_id: str, data: dict) -> None:
             )
 
 
+async def count_active_events() -> int:
+    """Number of events currently running (status 'processing'/'received'), used to
+    cap concurrency so the LLM provider's concurrency limit is not exceeded. Only
+    counts events updated in the last 30 min so a stuck/abandoned event doesn't
+    block new ones forever."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT count(*) FROM disaster_events
+            WHERE status IN ('processing', 'received')
+              AND updated_at > now() - interval '30 minutes'
+            """
+        )
+
+
 async def get_event_status(event_id: str) -> Optional[dict]:
     """Return the event's status and step (plus progress/timestamps)."""
     pool = await get_pool()

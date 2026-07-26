@@ -249,7 +249,14 @@ class OrchestratorAgent:
 
         agent_id and api_key are loaded from agent_config.yaml under the
         ``orchestrator_agent`` key.
+
+        Band can rate-limit a rapid reconnect ("WebSocket reconnect rate-limited
+        after recent supersede"), so we retry with backoff until the websocket
+        comes up and only then mark `connected = True`. This keeps the /health
+        flag honest after a restart-induced throttle.
         """
+        import asyncio as _asyncio
+
         from band import Agent
 
         adapter = get_best_adapter()
@@ -259,9 +266,22 @@ class OrchestratorAgent:
             ws_url=BAND_WS_URL,
             rest_url=BAND_REST_URL,
         )
-        await self.agent.start()
-        self.connected = True
-        logger.info("Orchestrator connected")
+
+        delay = 15
+        for attempt in range(1, 9):
+            try:
+                await self.agent.start()
+                self.connected = True
+                logger.info("Orchestrator connected")
+                return
+            except Exception as exc:  # noqa: BLE001 - retry websocket throttles
+                logger.warning(
+                    "Orchestrator connect attempt %d failed (%s); retrying in %ds",
+                    attempt, type(exc).__name__, delay,
+                )
+                await _asyncio.sleep(delay)
+                delay = min(delay * 2, 120)
+        logger.error("Orchestrator could not connect after retries")
 
     # -- helpers --------------------------------------------------------------
 

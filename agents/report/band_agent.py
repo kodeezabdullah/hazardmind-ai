@@ -457,28 +457,37 @@ def _build_adapter_llm():
     """
     from langchain_openai import ChatOpenAI
 
-    feather = ChatOpenAI(
-        model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
-        api_key=os.getenv("FEATHERLESS_API_KEY", ""),
-        base_url="https://api.featherless.ai/v1",
-        max_tokens=4096,
-        max_retries=1,  # fail FAST to Gemini: long 429 backoff starved the ws keepalive
-    )
-    # Multi-key Gemini fallback chain (Featherless stays PRIMARY). Chaining
-    # several free Gemini keys makes the shared 4-unit concurrency 429 disappear.
-    model = os.getenv("BAND_ADAPTER_FALLBACK_MODEL", "gemini-3.1-flash-lite")
-    base = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    fallbacks = []
+    # Gemini is the PRIMARY model (no shared 4-unit concurrency cap like
+    # Featherless, which 429s under load). We chain several free Gemini keys as
+    # the primary cascade, then Featherless as the final fallback.
+    gemini_model = os.getenv("BAND_ADAPTER_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+    gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_clients = []
     for key_var in (
         "GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3",
         "GEMINI_API_KEY_4", "GEMINI_API_KEY_5",
     ):
         k = os.getenv(key_var)
         if k:
-            fallbacks.append(
-                ChatOpenAI(model=model, api_key=k, base_url=base, max_tokens=4096, max_retries=2)
+            gemini_clients.append(
+                ChatOpenAI(model=gemini_model, api_key=k, base_url=gemini_base, max_tokens=4096, max_retries=2)
             )
-    return feather.with_fallbacks(fallbacks) if fallbacks else feather
+
+    # Featherless as the LAST-RESORT fallback (only if every Gemini key fails).
+    feather = ChatOpenAI(
+        model=os.getenv("BAND_ADAPTER_MODEL", "google/gemma-4-31B-it"),
+        api_key=os.getenv("FEATHERLESS_API_KEY", ""),
+        base_url="https://api.featherless.ai/v1",
+        max_tokens=4096,
+        max_retries=1,
+    )
+
+    if gemini_clients:
+        primary = gemini_clients[0]
+        fallbacks = gemini_clients[1:] + [feather]
+        return primary.with_fallbacks(fallbacks)
+    # No Gemini keys configured — fall back to Featherless only.
+    return feather
 
 
 async def run_live_agent() -> None:
@@ -516,6 +525,10 @@ async def run_live_agent() -> None:
                 low = content.lower()
                 if _is_impact_handoff(content) or "impact" in low:
                     await _maybe_autodispatch_report(content, room_id)
+                    # Autodispatch already generated the report + posted completion.
+                    # Skip the Band-adapter LLM (a second LLM call per message that
+                    # burned the Gemini RPM quota and caused duplicate responses).
+                    return None
             except Exception:  # noqa: BLE001 - capture must never break handling
                 pass
             return await super().on_message(msg, *args, room_id=room_id, **kwargs)

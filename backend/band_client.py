@@ -848,14 +848,22 @@ async def notify_satellite(
 # (not just the 8-char prefix): each agent's `_BoundEventIdAdapter.on_message`
 # binds the authoritative full UUID from this line, immune to the @mention
 # rendering (`@[[<agent-uuid>]]`) that would otherwise poison a bare-UUID scan.
-def event_room_intro(location: str, event_id: str) -> str:
+def event_room_intro(location: str, event_id: str, disaster_type: str = "") -> str:
+    # The intro can be delivered to the satellite agent as its processing
+    # trigger BEFORE the dedicated dispatch body. If it omits disaster_type the
+    # satellite falls back to a flood/NDWI default, so always carry the full
+    # location + disaster_type + event_id here.
+    dtype_line = f"disaster_type: {disaster_type}\n" if disaster_type else ""
     return (
-        f"HazardMind — {location} disaster response (event {event_id[:8]})\n"
+        f"HazardMind — {location} {disaster_type} disaster response "
+        f"(event {event_id[:8]})\n"
+        f"location: {location}\n"
+        f"{dtype_line}"
         f"event_id: {event_id}"
     )
 
 
-async def create_event_room(event_id: str, location: str) -> str:
+async def create_event_room(event_id: str, location: str, disaster_type: str = "") -> str:
     """Create a fresh Band room for one disaster event and add every agent.
 
     Each /analyze run gets its own room so the transcript is scoped to a single
@@ -940,7 +948,7 @@ async def create_event_room(event_id: str, location: str) -> str:
     # room is recognizable in band.ai. Best-effort — never block room creation.
     try:
         await send_text_message(
-            event_room_intro(location, event_id), room_id=room_id
+            event_room_intro(location, event_id, disaster_type), room_id=room_id
         )
     except Exception:  # noqa: BLE001 - title intro is best-effort
         logger.exception("Band room %s: failed to post intro message", room_id)

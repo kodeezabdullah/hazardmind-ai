@@ -310,18 +310,30 @@ async def generate_assumptions_limitations(context: dict) -> tuple[dict, str]:
 
 
 async def generate_executive_summary_with_aiml(context: dict, detailed_report: dict) -> dict:
-    response = await call_aiml(
-        build_executive_summary_prompt(context, detailed_report),
-        system="You write clear, concise executive disaster response summaries.",
-        max_tokens=900,
-        purpose="executive_summary",
-    )
+    prompt = build_executive_summary_prompt(context, detailed_report)
+    system = "You write clear, concise executive disaster response summaries."
+
+    # PRIMARY: AIML (Claude Opus). It can be out-of-funds / permission-denied, so
+    # DON'T let that fail the whole report — fall back to Gemini, then Featherless.
+    response = await call_aiml(prompt, system=system, max_tokens=900, purpose="executive_summary")
     if response["ok"] and response["content"]:
-        return {
-            "ok": True,
-            "source": "aiml",
-            "summary": response["content"],
-        }
+        return {"ok": True, "source": "aiml", "summary": response["content"]}
+
+    # FALLBACK 1: Gemini (multi-key, no concurrency cap).
+    try:
+        gem = await call_gemini(prompt, system=system, max_tokens=900)
+        if gem.get("ok") and gem.get("content"):
+            return {"ok": True, "source": "gemini", "summary": gem["content"]}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # FALLBACK 2: Featherless.
+    try:
+        fl = await call_featherless(prompt, system=system, max_tokens=900)
+        if fl.get("ok") and fl.get("content"):
+            return {"ok": True, "source": "featherless", "summary": fl["content"]}
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "ok": False,

@@ -8,9 +8,11 @@ from fastapi.responses import JSONResponse
 
 from band_client import create_event_room, inbound_store
 from db import (
+    count_active_events,
     create_disaster_event,
     get_event_results,
     get_event_status,
+    update_event_status,
 )
 from orchestrator import OrchestratorAgent
 from models import (
@@ -31,6 +33,19 @@ orchestrator = OrchestratorAgent()
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(request: AnalyzeRequest):
+    # Concurrency cap: the Featherless free tier allows only 4 concurrency units
+    # and each LLM request costs 2, so more than 2 events running at once causes
+    # 429 "concurrency limit exceeded" failures (the report agent in particular).
+    # We cap to MAX_CONCURRENT_EVENTS (default 2). Rather than fail the request
+    # (which the frontend would surface as an error), we WAIT here until a slot is
+    # free, so the frontend just sees a slightly slower /analyze and never errors.
+    max_concurrent = int(os.getenv("MAX_CONCURRENT_EVENTS", "2"))
+    wait_deadline = asyncio.get_event_loop().time() + 8 * 60  # cap the wait at 8 min
+    while await count_active_events() >= max_concurrent:
+        if asyncio.get_event_loop().time() > wait_deadline:
+            break  # don't hold the request forever; let it through after the cap
+        await asyncio.sleep(5)
+
     # event_id is generated ONCE here and reused by every agent.
     event_id = str(uuid.uuid4())
 
@@ -55,7 +70,9 @@ async def analyze(request: AnalyzeRequest):
     room_id = os.getenv("BAND_ROOM_ID")
     if os.getenv("DYNAMIC_BAND_ROOMS", "false").strip().lower() in ("1", "true", "yes"):
         try:
-            room_id = await create_event_room(event_id, request.location)
+            room_id = await create_event_room(
+                event_id, request.location, request.disaster_type
+            )
         except Exception:  # noqa: BLE001 - dynamic room is best-effort
             logger.exception(
                 "event_id=%s: room creation failed; using static room", event_id
@@ -71,8 +88,26 @@ async def analyze(request: AnalyzeRequest):
     )
 
     # Hand off to the orchestrator: sets status -> processing/satellite and
-    # mentions the satellite agent in the event's Band room.
-    await orchestrator.start_pipeline(event_id, disaster_data, room_id=room_id)
+    # mentions the satellite agent in the event's Band room. If the Band post
+    # fails (e.g. the room can't be created and the static room is unavailable),
+    # don't 500 the request — mark the event failed and return cleanly so the
+    # frontend gets a job_id and a clear status instead of an error.
+    try:
+        await orchestrator.start_pipeline(event_id, disaster_data, room_id=room_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event_id=%s: start_pipeline failed", event_id)
+        try:
+            await update_event_status(event_id, status="failed", step="dispatch")
+        except Exception:  # noqa: BLE001
+            pass
+        return JSONResponse(
+            status_code=200,
+            content={
+                "job_id": event_id,
+                "status": "failed",
+                "message": "Could not dispatch the pipeline to Band; please retry shortly.",
+            },
+        )
 
     # Watch the pipeline in the background so the request returns immediately.
     asyncio.create_task(_monitor(event_id, room_id))

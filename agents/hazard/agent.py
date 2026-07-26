@@ -686,6 +686,12 @@ class _BoundEventIdAdapter(LangGraphAdapter):
             )
             if trigger:
                 await _maybe_autodispatch_hazard(content, room_id)
+                # The deterministic autodispatch already did the work (and posts
+                # its own handoff). Do NOT also run the Band-adapter LLM on this
+                # message — that was a SECOND LLM call per message, which burned
+                # the Gemini RPM quota and produced duplicate/contradictory
+                # responses. Returning here keeps exactly one LLM run per event.
+                return None
         except Exception as exc:  # noqa: BLE001 - capture must never break handling
             print(f"[hazard] on_message autodispatch error: {exc!r}", flush=True)
         return await super().on_message(msg, *args, room_id=room_id, **kwargs)

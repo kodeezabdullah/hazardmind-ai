@@ -667,6 +667,10 @@ async def main() -> None:
                 low = content.lower()
                 if _extract_hazard_payload(content) is not None or "hazard" in low:
                     await _maybe_autodispatch_impact(content, room_id)
+                    # Autodispatch already ran the analysis + posted the handoff.
+                    # Skip the Band-adapter LLM (a second LLM call per message that
+                    # burned the Gemini RPM quota and caused duplicate responses).
+                    return None
             except Exception:  # noqa: BLE001 - capture must never break handling
                 pass
             return await super().on_message(msg, *args, room_id=room_id, **kwargs)

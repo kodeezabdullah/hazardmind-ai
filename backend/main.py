@@ -2,7 +2,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import close_pool, ping as db_ping
@@ -19,7 +19,19 @@ async def lifespan(app: FastAPI):
         await orchestrator.connect()
     except Exception:  # noqa: BLE001 - API still serves reads if Band is down
         logger.exception("Orchestrator failed to connect on startup")
+
+    # Background cleanup: every CLEANUP_INTERVAL_HOURS (default 12), clear stuck
+    # events and drain old Band room backlogs so agents never replay finished
+    # events. Best-effort; never blocks startup.
+    import asyncio as _asyncio
+
+    from cleanup import cleanup_loop
+
+    cleanup_task = _asyncio.create_task(cleanup_loop())
+
     yield
+
+    cleanup_task.cancel()
     await close_pool()
 
 
