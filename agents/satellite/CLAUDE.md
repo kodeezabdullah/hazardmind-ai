@@ -1,5 +1,99 @@
 # Satellite Agent
 
+> **NOTE on the rest of this file:** everything below this section is a
+> historical engineering log written during the Band-SDK era and is now stale
+> — the agent no longer connects to Band (see the root `CLAUDE.md`'s
+> Band→LangChain migration tracker; this agent's Band adapter/`agent_config.yaml`/
+> `room_drain.py` were removed). Treat the sections below as history of *why*
+> the deterministic pipeline logic looks the way it does, not as current
+> integration instructions. A full rewrite is tracked as a known issue in the
+> root `CLAUDE.md`.
+
+## 2026-07-26 — Coverage/CRS correctness pass (100% valid-pixel AOI coverage)
+
+Fixed the satellite agent's coverage and correctness bugs (Band/LangGraph
+transport was already migrated; this pass is pipeline-logic correctness, not
+transport). Full detail: see the git commit for this date and
+`tests/test_bug_fixes.py`.
+
+**BUG 1 (critical, fixed).** S1 GRD measurement TIFFs carry **GCPs, not an
+affine geotransform** — a plain `rasterio.open()` reported `crs=None` and an
+identity transform, so `clip_to_polygon` read WGS84 degree coordinates as pixel
+indices and collapsed the clip to ~1x2 px / 0% valid on every Sentinel-1 flood
+run. Fixed by `_open_georeferenced()` (a `WarpedVRT` over `src.get_gcps()`,
+warping S1 into the AOI's UTM zone) wired into `stack_bands`, plus a
+degenerate-transform guard in `clip_to_polygon` that refuses to clip an
+unresolved raster rather than silently shipping a near-empty result.
+
+**BUG 2 (fixed).** Coverage is now measured on VALID pixels, not footprint
+overlap. **Sentinel-2 switched from L1C to L2A** so the Scene Classification
+Layer (SCL) is available for real cloud/shadow/cirrus masking
+(`_scl_cloud_mask`); `compute_coverage()` eroded the AOI mask by one pixel to
+build an "interior AOI" (boundary-pixel rasterization is not a real gap),
+requires **100%** interior coverage to pass, and reports disjoint uncovered
+regions geometrically (area/bbox, nodata-vs-cloud attribution) on any gap, no
+matter how small.
+
+> **⚠️ SCIENCE-PHASE FOLLOW-UP REQUIRED — NDWI/NDVI thresholds need
+> revalidation.** L2A is surface reflectance; L1C (the previous source) is
+> top-of-atmosphere. The existing thresholds (`NDWI_WATER_THRESHOLD=0.3`,
+> `NDVI_DAMAGE_THRESHOLD=0.2`, and the 0.5 "severe" cutoff) were observed/tuned
+> against **L1C** values and were **NOT retuned** in this pass (out of
+> scope — this pass was transport/coverage correctness only). Index values will
+> shift under L2A. Do not trust absolute NDWI/NDVI risk levels until this is
+> revalidated against L2A reflectance in a dedicated science pass.
+>
+> **L2A availability is not universal** — older archive dates may be L1C-only.
+> The catalogue query now filters to `MSIL2A`; if no L2A candidate reaches 100%
+> coverage the pipeline reports `insufficient_coverage` explicitly rather than
+> silently falling back to L1C. `processing_level` ("L2A" for all current S2
+> runs) rides in the result/DB payload for downstream visibility.
+
+**BUG 3 (fixed).** Scene selection is now a **tiered, temporally-coherent**
+search instead of greedy set-cover: tier 1 same-date/same-orbit, tier 2 ±3d,
+tier 3 ±7d (same relative orbit), tier 4 ±14d (any orbit). Sentinel-1 **never**
+mixes ascending/descending in one mosaic in any tier. The first tier reaching
+100% interior coverage wins; tiers 3/4 lower confidence via `ConfidenceTracker`
+and append a `temporal_spread` anomaly. **If no tier reaches 100%, the pipeline
+returns `status:"failed", reason:"insufficient_coverage"` with gap geometry —
+it never analyses a partial AOI and reports a risk level for it.**
+`coverage_percent`, `coverage_tier`, `temporal_spread_days`,
+`acquisition_count` now ride in the result.
+
+**BUG 4 (fixed).** `sentinel.dedupe_by_acquisition()` collapses COG/non-COG
+(and other format) twins of one physical acquisition into a single download
+candidate; a pre-download AOI-footprint-intersection check drops scenes that
+can never contribute before any bytes move; `DOOMED_DOWNLOAD_LIMIT` (3)
+consecutive failed/non-contributing downloads aborts a tier early;
+`_add_bytes_downloaded`/`_bytes_downloaded_total` log cumulative bytes and ride
+in the result as `bytes_downloaded`.
+
+**BUG 5 (fixed).** `index_calibrated` (bool) and `index_units`
+(`"dB_uncalibrated"` for SAR, `"NDWI_ratio"`/`"NDVI_ratio"` for optical) are now
+explicit fields on every result, so the hazard agent can branch on a real
+contract field instead of inferring calibration status from `satellite_type`.
+SAR is still `10*log10(raw GRD DN)` — no calibration LUT, no speckle filter, no
+terrain correction (calibration itself is NOT implemented this pass, only made
+explicit) — and a MEDIUM concern is appended via the tracker stating the SAR
+index must not be threshold-compared.
+
+**BUG 6 (dead code, deleted).** `stance_engine.py`/`StanceEngine` (Band-room
+push-back logic with no orchestrator conversation to push back into,
+post-migration) and `intelligence.py`'s `decide_landsat_fallback` (decided a
+fallback the pipeline has no ingestion path to execute) were both confirmed
+unreferenced by any pipeline code and deleted, not left dormant.
+
+**BUG 7 (instrumented).** Per-stage peak RSS (download+mosaic / stack / clip /
+index / vectorize) is now logged and returned as `memory_report` on success.
+`cleanup_event_temp` is now guaranteed via a `finally` in `_run_pipeline_sync`
+— previously only the success path cleaned up, so every error/exception exit
+left the (potentially multi-GB) working tree on disk.
+
+New dependencies: `scipy` (mask erosion + connected-component gap labelling),
+`psutil` (RSS sampling) — both added to `requirements.txt`.
+
+---
+
 Processes Copernicus/Sentinel satellite imagery for disaster zones.
 
 ## Responsibilities

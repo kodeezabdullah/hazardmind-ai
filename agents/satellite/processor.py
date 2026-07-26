@@ -71,22 +71,103 @@ MOSAIC_MAX_SCENES = 3
 # (FIX 3).
 MIN_VALID_PIXEL_PERCENT = 5.0
 
+# BUG 4c: if this many consecutive downloads within a tier fail to clip or add
+# no coverage, abort the tier rather than working through every candidate.
+DOOMED_DOWNLOAD_LIMIT = 3
+
+# Per-tier date window (days) for log/anomaly text; mirrors sentinel.COVERAGE_TIERS.
+COVERAGE_TIERS_DAYS = {1: 0, 2: 3, 3: 7, 4: 14}
+
+# BUG 4d: cumulative bytes downloaded this process (for per-run logging). A
+# simple module-level counter incremented by the streaming download helpers.
+_BYTES_DOWNLOADED = 0
+
+
+def _add_bytes_downloaded(n: int) -> None:
+    """Record `n` freshly-downloaded bytes (BUG 4d logging)."""
+    global _BYTES_DOWNLOADED
+    if n and n > 0:
+        _BYTES_DOWNLOADED += int(n)
+
+
+def _bytes_downloaded_total() -> int:
+    """Cumulative bytes downloaded so far this process."""
+    return _BYTES_DOWNLOADED
+
+
+# BUG 7 — per-stage peak-RSS instrumentation. Peak memory is 8-16 GB and rises
+# with tile count; this records the peak resident-set size observed after each
+# pipeline stage so we can see WHERE the peak occurs and how it scales with the
+# number of tiles per mosaic. No processing is restructured — this only measures.
+_STAGE_PEAK_RSS: dict = {}
+
+
+def _rss_mb() -> float:
+    """Current process resident-set size in MB, or 0.0 if psutil is absent."""
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / 1e6
+    except Exception:
+        return 0.0
+
+
+def _mem_stage(stage: str, tiles: Optional[int] = None) -> None:
+    """Record peak RSS for a named stage (keeps the max seen per stage)."""
+    rss = _rss_mb()
+    if rss <= 0.0:
+        return
+    prev = _STAGE_PEAK_RSS.get(stage, {"peak_mb": 0.0, "tiles": tiles})
+    if rss > prev["peak_mb"]:
+        prev["peak_mb"] = round(rss, 1)
+    if tiles is not None:
+        prev["tiles"] = tiles
+    _STAGE_PEAK_RSS[stage] = prev
+    logger.info(
+        "[MEM] stage=%s rss=%.1f MB%s",
+        stage, rss, f" tiles={tiles}" if tiles is not None else "",
+    )
+
+
+def memory_report() -> dict:
+    """Peak RSS per stage seen so far this process (BUG 7)."""
+    if not _STAGE_PEAK_RSS:
+        return {}
+    peak_stage = max(_STAGE_PEAK_RSS, key=lambda s: _STAGE_PEAK_RSS[s]["peak_mb"])
+    return {
+        "per_stage": dict(_STAGE_PEAK_RSS),
+        "peak_stage": peak_stage,
+        "peak_mb": _STAGE_PEAK_RSS[peak_stage]["peak_mb"],
+    }
+
 # Sentinel-2 bands to download per disaster type. TCI (true-colour image) is
 # always included for the true_color export. Keys are the band tokens that
 # appear in JP2 filenames inside the .SAFE archive (e.g. "..._B03_10m.jp2").
+# Sentinel-2 is now sourced as **L2A** (surface reflectance) so the Scene
+# Classification Layer (SCL) is available for real cloud/shadow/cirrus masking of
+# the coverage metric (BUG 2). SCL is included in every disaster's band set. NOTE
+# (science phase, do not action this session): NDWI/NDVI values shift between L1C
+# TOA and L2A surface reflectance, so the 0.3/0.5 NDWI and 0.2 NDVI thresholds
+# were observed against L1C and REQUIRE REVALIDATION against L2A.
 _S2_BANDS = {
-    "flood": ["B03", "B08", "B11", "TCI"],
-    "earthquake": ["B02", "B04", "B08", "TCI"],
-    "landslide": ["B03", "B04", "B08", "TCI"],
+    "flood": ["B03", "B08", "B11", "TCI", "SCL"],
+    "earthquake": ["B02", "B04", "B08", "TCI", "SCL"],
+    "landslide": ["B03", "B04", "B08", "TCI", "SCL"],
 }
-_S2_DEFAULT_BANDS = ["B04", "B03", "B02", "TCI"]
+_S2_DEFAULT_BANDS = ["B04", "B03", "B02", "TCI", "SCL"]
 
-# Native resolution (m) of each Sentinel-2 band we touch. 20 m bands (B11) are
-# resampled to 10 m during stacking.
+# Native resolution (m) of each Sentinel-2 band we touch. 20 m bands (B11, SCL)
+# are resampled to 10 m during stacking.
 _S2_BAND_RES = {
     "B02": 10, "B03": 10, "B04": 10, "B08": 10,
-    "B11": 20, "TCI": 10,
+    "B11": 20, "TCI": 10, "SCL": 20,
 }
+
+# SCL (Scene Classification Layer) class values to treat as invalid for the
+# valid-pixel coverage metric: 0 no-data, 1 saturated/defective, 3 cloud shadow,
+# 8 cloud medium-prob, 9 cloud high-prob, 10 thin cirrus, 11 snow/ice. Kept as
+# valid: 2 dark/topo shadow, 4 vegetation, 5 bare soil, 6 water, 7 unclassified.
+_SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
 
 # Sentinel-1 polarizations.
 _S1_POLARIZATIONS = ["VV", "VH"]
@@ -272,6 +353,7 @@ def _stream_to_file_with_retry(
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             out.write(chunk)
+                            _add_bytes_downloaded(len(chunk))  # BUG 4d
 
             final_size = os.path.getsize(part_path)
             if total_size is not None and final_size < total_size:
@@ -280,7 +362,10 @@ def _stream_to_file_with_retry(
                 )
 
             os.replace(part_path, dest_path)
-            logger.info("Downloaded %s (%d bytes)", label, final_size)
+            logger.info(
+                "Downloaded %s (%d bytes; cumulative %.1f MB this run)",
+                label, final_size, _bytes_downloaded_total() / 1e6,
+            )
             return dest_path
 
         except (
@@ -398,13 +483,19 @@ def _resolve_s2_band_nodes(
     headers: dict,
     timeout: tuple,
 ) -> dict:
-    """Map each Sentinel-2 L1C band token to its JP2 node path segments.
+    """Map each Sentinel-2 band token to its JP2 node path segments (L1C or L2A).
 
     Walks SAFE -> GRANULE -> <granule> -> IMG_DATA and matches each requested
-    token (B03, B08, B11, TCI, ...) to its `<tile>_<token>.jp2`. L1C IMG_DATA is
-    flat (no R10m/R20m subdirs). Returns {token: [seg, seg, ...]} for the bands
-    that were located. Raises on a traversal/HTTP error so the caller can fall
-    back to the whole-zip download.
+    token (B03, B08, B11, TCI, SCL, ...) to its JP2 node.
+
+    - **L1C**: IMG_DATA is flat, filenames end `_<token>.jp2`.
+    - **L2A**: IMG_DATA holds resolution subdirs `R10m/`, `R20m/`, `R60m/` and
+      filenames carry the resolution suffix (`..._B03_10m.jp2`, `..._SCL_20m.jp2`).
+      We prefer the finest resolution a token is published at (10 m for the
+      spectral bands and TCI, 20 m for SCL — SCL has no 10 m variant).
+
+    Returns {token: [seg, seg, ...]} for the bands located. Raises on a
+    traversal/HTTP error so the caller can fall back to the whole-zip download.
     """
     safe_children = _list_nodes(session, product_id, [], headers, timeout)
     safe_dir = next((n for n in safe_children if n.endswith(".SAFE")), None)
@@ -419,21 +510,64 @@ def _resolve_s2_band_nodes(
     granule = granules[0]
 
     img_base = [safe_dir, "GRANULE", granule, "IMG_DATA"]
-    jp2s = _list_nodes(session, product_id, img_base, headers, timeout)
+    img_children = _list_nodes(session, product_id, img_base, headers, timeout)
 
-    resolved: dict = {}
+    # Detect L2A: IMG_DATA contains R10m/R20m/R60m resolution subdirectories.
+    res_subdirs = [c for c in img_children if re.fullmatch(r"R\d+m", c)]
+    is_l2a = bool(res_subdirs)
+
+    if not is_l2a:
+        # L1C: flat IMG_DATA, filenames end `_<token>.jp2`.
+        jp2s = img_children
+        resolved: dict = {}
+        for token in band_tokens:
+            upper = token.upper()
+            match = next(
+                (f for f in jp2s
+                 if f.lower().endswith(".jp2")
+                 and f.upper().endswith(f"_{upper}.JP2")),
+                None,
+            )
+            if not match:
+                logger.warning("Band %s not found in L1C IMG_DATA listing", token)
+                continue
+            resolved[token] = img_base + [match]
+        return resolved
+
+    # L2A: descend into resolution subdirs. List each once and cache.
+    listings: dict = {}
+    for sub in ("R10m", "R20m", "R60m"):
+        if sub in res_subdirs:
+            listings[sub] = _list_nodes(
+                session, product_id, img_base + [sub], headers, timeout
+            )
+
+    # Finest-resolution preference per token. SCL is only 20 m / 60 m.
+    pref = {"SCL": ("R20m", "R60m")}
+    default_pref = ("R10m", "R20m", "R60m")
+
+    resolved = {}
     for token in band_tokens:
         upper = token.upper()
-        # JP2 filenames look like T43SCT_20260608T054641_B03.jp2 / _TCI.jp2.
-        match = next(
-            (f for f in jp2s
-             if f.lower().endswith(".jp2") and f.upper().endswith(f"_{upper}.JP2")),
-            None,
-        )
-        if not match:
-            logger.warning("Band %s not found in IMG_DATA node listing", token)
+        order = pref.get(upper, default_pref)
+        found = None
+        for sub in order:
+            files = listings.get(sub)
+            if not files:
+                continue
+            match = next(
+                (f for f in files
+                 if f.lower().endswith(".jp2")
+                 and f"_{upper}_" in f.upper()),
+                None,
+            )
+            if match:
+                found = img_base + [sub, match]
+                break
+        if not found:
+            logger.warning("Band %s not found in L2A IMG_DATA listings", token)
             continue
-        resolved[token] = img_base + [match]
+        resolved[token] = found
     return resolved
 
 
@@ -616,13 +750,26 @@ def _match_band_members(
     return sorted(cand, key=res_rank)
 
 
-def _mosaic_bands(per_scene_paths: list, event_id: str) -> dict:
+def _mosaic_bands(
+    per_scene_paths: list, event_id: str, satellite_type: str = "sentinel-2",
+    dst_crs=None,
+) -> dict:
     """Mosaic per-band rasters from several scenes into single rasters.
 
     `per_scene_paths` is a list of {band_token: path} dicts (one per scene). For
     each band token present in any scene, the matching rasters are merged with
     `rasterio.merge` (which fills nodata gaps from later scenes) and written to
     `<temp>/<event_id>/bands/<token>.tif`. Returns {band_token: mosaic_path}.
+
+    BUG 1 follow-up: S1 GRD source rasters carry GCPs, not an affine — merging
+    them RAW (as this function did before) hands `rasterio.merge` two datasets
+    that both report `crs=None`/identity, which it correctly refuses
+    ("upside down rasters cannot be merged") because there is nothing
+    meaningful to align. Each source is now resolved via `_open_georeferenced`
+    (the same GCP->UTM warp `stack_bands` uses) into a COMMON `dst_crs` before
+    merging, so every source shares one real projection/orientation and the
+    merge can align them properly. S2 sources (already affine) pass through
+    `_open_georeferenced` as a no-op.
     """
     bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
     os.makedirs(bands_dir, exist_ok=True)
@@ -641,9 +788,13 @@ def _mosaic_bands(per_scene_paths: list, event_id: str) -> dict:
             continue
 
         datasets = []
+        raw_handles = []
         try:
             for src in sources:
-                datasets.append(rasterio.open(src))
+                ds, raw = _open_georeferenced(src, dst_crs)
+                datasets.append(ds)
+                if raw is not None:
+                    raw_handles.append(raw)
             arr, transform = rio_merge(datasets)
             profile = datasets[0].profile.copy()
             profile.update(
@@ -652,6 +803,7 @@ def _mosaic_bands(per_scene_paths: list, event_id: str) -> dict:
                 width=arr.shape[2],
                 count=arr.shape[0],
                 transform=transform,
+                crs=datasets[0].crs,
             )
             out_path = os.path.join(bands_dir, f"{token}.tif")
             with rasterio.open(out_path, "w", **profile) as dst:
@@ -673,6 +825,8 @@ def _mosaic_bands(per_scene_paths: list, event_id: str) -> dict:
         finally:
             for ds in datasets:
                 ds.close()
+            for raw in raw_handles:
+                raw.close()
 
     return mosaicked
 
@@ -683,12 +837,15 @@ def download_imagery(
     event_id: str,
     token: str,
     disaster_type: str,
+    dst_crs=None,
 ) -> Optional[dict]:
     """Download the product(s) and extract the bands needed for this disaster.
 
     Args:
         selection: dict from `sentinel.select_satellite` (carries
             "satellite_type").
+        dst_crs: target CRS for mosaicking GCP-georeferenced (S1 GRD) sources
+            (BUG 1 follow-up) — see `_mosaic_bands`. Ignored for S2.
         scene_metadata: a single scene dict from `sentinel.search_imagery`, or a
             list of scene dicts to mosaic into one coverage (FIX 2).
         event_id: namespaces extracted bands under <temp>/<event_id>/bands/.
@@ -784,15 +941,106 @@ def download_imagery(
     if len(per_scene_paths) == 1:
         band_paths = per_scene_paths[0]
     else:
-        band_paths = _mosaic_bands(per_scene_paths, event_id)
+        band_paths = _mosaic_bands(
+            per_scene_paths, event_id, satellite_type, dst_crs
+        )
 
     return {"satellite_type": satellite_type, "band_paths": band_paths}
 
 
 # --------------------------------------------------------------------------- #
+# CRS / georeferencing resolution (BUG 1 — S1 GRD carries GCPs, not an affine)
+# --------------------------------------------------------------------------- #
+def _utm_epsg_for_lonlat(lon: float, lat: float) -> int:
+    """Return the EPSG code of the UTM zone containing (lon, lat)."""
+    zone = int(np.floor((lon + 180.0) / 6.0)) % 60 + 1
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+def _open_georeferenced(path: str, dst_crs=None):
+    """Open a band, resolving GCP georeferencing (S1 GRD) into a real CRS/grid.
+
+    S1 GRD measurement TIFFs carry **GCPs (ground control points), not an affine
+    geotransform**: a plain ``rasterio.open()`` reports ``crs=None`` and an
+    identity transform, which makes ``clip_to_polygon`` read WGS84 degree
+    coordinates as pixel indices and collapse the clip to ~1x2 px (BUG 1 / the
+    audit's BUG B). When GCPs are present we wrap the dataset in a ``WarpedVRT``
+    that reprojects into a real map projection with a proper affine, so every
+    downstream step (stack -> clip -> index -> vectorize -> bounds) gets valid
+    georeferencing exactly like the S2 (already-affine) path.
+
+    ``dst_crs`` picks the target projection: pass the AOI's UTM zone so pixels
+    stay square-ish in metres (areas/thresholds are then metric); when None the
+    GCPs' own CRS (usually EPSG:4326) is used. S2 rasters (already affine,
+    ``get_gcps()`` empty) pass straight through unchanged.
+
+    Returns ``(dataset, src_to_close)``: the dataset the caller should read from,
+    and (for the warped path) the underlying source handle the caller must also
+    close. For the pass-through path ``src_to_close`` is None.
+    """
+    from rasterio.vrt import WarpedVRT
+    from rasterio.warp import calculate_default_transform
+
+    src = rasterio.open(path)
+    try:
+        gcps, gcp_crs = src.get_gcps()
+    except (rasterio.errors.RasterioError, ValueError):
+        gcps, gcp_crs = ([], None)
+
+    identity = src.transform == rasterio.Affine.identity()
+    if gcps and (src.crs is None or identity):
+        src_crs = gcp_crs or rasterio.crs.CRS.from_epsg(4326)
+        if dst_crs is None:
+            dst_crs = src_crs
+        try:
+            transform, width, height = calculate_default_transform(
+                src_crs, dst_crs, src.width, src.height, gcps=gcps,
+            )
+            vrt = WarpedVRT(
+                src,
+                src_crs=src_crs,
+                crs=dst_crs,
+                transform=transform,
+                width=width,
+                height=height,
+                resampling=Resampling.bilinear,
+            )
+            logger.info(
+                "Resolved GCP georeferencing for %s -> %s (%dx%d)",
+                os.path.basename(path),
+                dst_crs,
+                width,
+                height,
+            )
+            return vrt, src
+        except (rasterio.errors.RasterioError, ValueError) as exc:
+            logger.error(
+                "Failed to warp GCP-georeferenced raster %s: %s", path, exc
+            )
+            src.close()
+            raise
+    return src, None
+
+
+def _dst_crs_from_polygon(merged_polygon) -> Optional[object]:
+    """Pick a metric target CRS (the AOI-centroid UTM zone) for GCP warping."""
+    if not merged_polygon:
+        return None
+    try:
+        centroid = shape(merged_polygon).centroid
+        return rasterio.crs.CRS.from_epsg(
+            _utm_epsg_for_lonlat(centroid.x, centroid.y)
+        )
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Step 7C: stack bands into one aligned cube
 # --------------------------------------------------------------------------- #
-def stack_bands(band_paths: dict, satellite_type: str) -> Optional[dict]:
+def stack_bands(
+    band_paths: dict, satellite_type: str, dst_crs=None
+) -> Optional[dict]:
     """Stack per-band rasters into one aligned numpy cube.
 
     Uses the first 10 m band as the reference grid; coarser bands (e.g. the
@@ -824,32 +1072,52 @@ def stack_bands(band_paths: dict, satellite_type: str) -> Optional[dict]:
             if satellite_type == "sentinel-2"
             else 10,
         )
-        with rasterio.open(band_paths[ref_token]) as ref:
-            ref_h, ref_w = ref.height, ref.width
-            ref_transform = ref.transform
-            ref_crs = ref.crs
+        # S1 GRD bands carry GCPs (crs=None, identity transform); resolve them
+        # into a real projected grid via _open_georeferenced so the reference
+        # grid — and every downstream clip — has valid georeferencing (BUG 1).
+        # S2 (already affine) passes straight through. dst_crs, when supplied,
+        # warps S1 into the AOI's UTM zone so pixels are metric.
+        ref_ds, ref_src = _open_georeferenced(band_paths[ref_token], dst_crs)
+        try:
+            ref_h, ref_w = ref_ds.height, ref_ds.width
+            ref_transform = ref_ds.transform
+            ref_crs = ref_ds.crs
+        finally:
+            ref_ds.close()
+            if ref_src is not None:
+                ref_src.close()
 
         bands: dict = {}
         for token, path in band_paths.items():
             if token.upper() == "TCI":
                 continue
-            with rasterio.open(path) as src:
-                arr = src.read(
+            src_ds, src_raw = _open_georeferenced(path, dst_crs)
+            try:
+                arr = src_ds.read(
                     1,
                     out_shape=(ref_h, ref_w),
                     resampling=Resampling.bilinear,
                 ).astype("float32")
                 bands[token] = arr
+            finally:
+                src_ds.close()
+                if src_raw is not None:
+                    src_raw.close()
 
         tci = None
         if "TCI" in band_paths:
-            with rasterio.open(band_paths["TCI"]) as src:
-                count = min(src.count, 3)
-                tci = src.read(
+            tci_ds, tci_raw = _open_georeferenced(band_paths["TCI"], dst_crs)
+            try:
+                count = min(tci_ds.count, 3)
+                tci = tci_ds.read(
                     indexes=list(range(1, count + 1)),
                     out_shape=(count, ref_h, ref_w),
                     resampling=Resampling.bilinear,
                 ).astype("uint8")
+            finally:
+                tci_ds.close()
+                if tci_raw is not None:
+                    tci_raw.close()
     except rasterio.errors.RasterioError as exc:
         logger.error("Failed to stack bands: %s", exc)
         return None
@@ -897,6 +1165,20 @@ def clip_to_polygon(
     crs = stacked["crs"]
     transform = stacked["transform"]
     h, w = stacked["shape"]
+
+    # Degenerate-georeferencing guard (BUG 1). An unresolved GCP raster reports
+    # crs=None and an identity transform; the window math below would then read
+    # WGS84 degree coordinates (~73, ~34) as pixel indices and collapse the clip
+    # to a 1x2 px sliver. _open_georeferenced should have resolved this upstream;
+    # if it did not, refuse to clip rather than silently ship a near-empty result.
+    if crs is None or transform == rasterio.Affine.identity():
+        logger.error(
+            "Raster has no usable georeferencing (crs=%s, identity transform=%s); "
+            "GCP resolution failed — refusing to clip",
+            crs,
+            transform == rasterio.Affine.identity(),
+        )
+        return None
 
     # Reproject the WGS84 polygon to the raster CRS.
     try:
@@ -1075,6 +1357,12 @@ def calculate_indices(
         index_type = "SAR"
         scheme_key = "SAR"
         threshold = SAR_WATER_THRESHOLD_DB
+        # BUG 5 — the SAR index is 10*log10(raw GRD DN): NO radiometric
+        # calibration LUT, NO speckle filter, NO terrain correction. It is a
+        # relative DN-space number, NOT calibrated sigma0 dB, so it must not be
+        # threshold-compared as if it were.
+        index_calibrated = False
+        index_units = "dB_uncalibrated"
     elif disaster == "flood":
         b03, b08 = bands.get("B03"), bands.get("B08")
         if b03 is None or b08 is None:
@@ -1084,6 +1372,8 @@ def calculate_indices(
         index_type = "NDWI"
         scheme_key = "NDWI"
         threshold = NDWI_WATER_THRESHOLD
+        index_calibrated = True
+        index_units = "NDWI_ratio"
     else:
         b08, b04 = bands.get("B08"), bands.get("B04")
         if b08 is None or b04 is None:
@@ -1093,6 +1383,8 @@ def calculate_indices(
         index_type = "NDVI"
         scheme_key = "NDVI_LANDSLIDE" if disaster == "landslide" else "NDVI_QUAKE"
         threshold = NDVI_DAMAGE_THRESHOLD
+        index_calibrated = True
+        index_units = "NDVI_ratio"
 
     # Graded classification: 0 safe, 1..N severity, 255 nodata/outside polygon.
     valid = np.isfinite(index)
@@ -1134,6 +1426,9 @@ def calculate_indices(
         "mean_value": mean_value,
         "threshold_used": threshold,
         "class_counts": class_counts,
+        # BUG 5 calibration contract (see the branch above).
+        "index_calibrated": index_calibrated,
+        "index_units": index_units,
     }
 
 
@@ -1392,27 +1687,215 @@ def vectorize_classification(
 # --------------------------------------------------------------------------- #
 # Step 7I: master pipeline
 # --------------------------------------------------------------------------- #
-def _valid_pixel_percent(clipped: dict) -> float:
-    """Percentage of in-polygon pixels that carry real (non-nodata) data.
+def _reference_band(clipped: dict):
+    """Pick a spectral band to measure nodata from (never SCL/TCI).
 
-    Looks at one source band inside the clip mask: pixels that are finite and
-    non-zero count as valid. A scene that barely overlaps the AOI produces a
-    clip that is almost entirely nodata, which this catches (FIX 3).
+    SCL is a class layer (values are class ids, not radiance) and TCI is a
+    display product, so neither is a valid nodata reference. Prefer a real
+    spectral/backscatter band; fall back to any non-SCL band.
     """
     bands = clipped.get("bands") or {}
-    if not bands:
-        return 0.0
+    for tok, arr in bands.items():
+        if tok.upper() not in ("SCL", "TCI"):
+            return arr
+    # Only SCL present (shouldn't happen): fall back to it so we don't crash.
+    return next(iter(bands.values())) if bands else None
+
+
+def _scl_cloud_mask(clipped: dict):
+    """Boolean mask (True = cloud/shadow/cirrus/invalid) from the SCL band.
+
+    Returns None when there is no SCL band (e.g. Sentinel-1, or an L1C
+    fallback), meaning "no cloud information available — mask nothing".
+    """
+    bands = clipped.get("bands") or {}
+    scl = bands.get("SCL")
+    if scl is None:
+        return None
+    # SCL rides through stack/clip as float32 with NaN outside the polygon;
+    # round to the nearest class id and test membership.
+    scl_int = np.rint(np.nan_to_num(scl, nan=0.0)).astype("int16")
+    cloud = np.isin(scl_int, list(_SCL_INVALID_CLASSES))
+    return cloud
+
+
+def _valid_pixel_mask(clipped: dict):
+    """Boolean mask of pixels that carry real, usable data inside the AOI.
+
+    A pixel is valid when it is: inside the clip mask (the rasterized AOI),
+    finite and non-zero on a spectral band (nodata gate), AND — for Sentinel-2
+    with an SCL band — not flagged cloud/shadow/cirrus (BUG 2 cloud masking).
+    Returns (valid_mask, inside_mask, cloud_mask_or_None).
+    """
+    band = _reference_band(clipped)
+    if band is None:
+        return None, None, None
     mask = clipped.get("mask")
-    band = next(iter(bands.values()))
-    if mask is None:
-        inside = np.ones(band.shape, dtype=bool)
-    else:
-        inside = mask
+    inside = mask if mask is not None else np.ones(band.shape, dtype=bool)
+    nodata_ok = np.isfinite(band) & (band != 0)
+    cloud = _scl_cloud_mask(clipped)
+    valid = inside & nodata_ok
+    if cloud is not None:
+        valid = valid & (~cloud)
+    return valid, inside, cloud
+
+
+def _valid_pixel_percent(clipped: dict) -> float:
+    """Percentage of in-polygon pixels that carry real, usable (non-nodata,
+    non-cloud) data. Used as the quick candidate-acceptance gate (FIX 3). The
+    authoritative pass/fail coverage metric is `compute_coverage` (BUG 2/3).
+    """
+    valid, inside, _cloud = _valid_pixel_mask(clipped)
+    if valid is None:
+        return 0.0
     inside_count = int(np.count_nonzero(inside))
     if inside_count == 0:
         return 0.0
-    valid = np.isfinite(band) & (band != 0) & inside
     return 100.0 * int(np.count_nonzero(valid)) / inside_count
+
+
+def _erode_mask(mask, iterations: int = 1):
+    """Erode a boolean mask inward by `iterations` pixels (4-connectivity).
+
+    Used to build the "interior AOI" for the coverage pass/fail test: boundary
+    pixels are excluded because whether a rasterized boundary pixel falls inside
+    or outside the polygon is a convention artifact, not a real coverage gap.
+    Uses scipy when available, else a pure-numpy 4-neighbour shrink.
+    """
+    if mask is None:
+        return None
+    try:
+        from scipy.ndimage import binary_erosion
+
+        return binary_erosion(mask, iterations=iterations)
+    except Exception:  # scipy absent — cheap 4-neighbour fallback
+        m = mask
+        for _ in range(max(1, iterations)):
+            up = np.zeros_like(m); up[:-1, :] = m[1:, :]
+            dn = np.zeros_like(m); dn[1:, :] = m[:-1, :]
+            lf = np.zeros_like(m); lf[:, :-1] = m[:, 1:]
+            rt = np.zeros_like(m); rt[:, 1:] = m[:, :-1]
+            m = m & up & dn & lf & rt
+        return m
+
+
+def _gap_geometry(gap_mask, transform, crs) -> list:
+    """Describe uncovered regions as disjoint components with area + bbox (WGS84).
+
+    `gap_mask` is a boolean array (True = uncovered pixel inside the interior
+    AOI). Returns a list of {area_km2, bbox:{west,south,east,north}, pixels}
+    dicts, one per connected component, so a caller can report WHERE coverage is
+    missing (BUG 2/3), not just how much. Empty list when there are no gaps.
+    """
+    if gap_mask is None or not gap_mask.any():
+        return []
+    try:
+        from scipy.ndimage import label as _label
+
+        labelled, n = _label(gap_mask)
+        components = range(1, n + 1)
+        comp_of = lambda i: labelled == i  # noqa: E731
+    except Exception:
+        # No scipy: treat the whole gap as one component.
+        components = [1]
+        comp_of = lambda i: gap_mask  # noqa: E731
+
+    px_area_km2 = abs(transform.a * transform.e) / 1e6  # metres^2 -> km^2
+    out = []
+    for i in components:
+        comp = comp_of(i)
+        rows = np.any(comp, axis=1)
+        cols = np.any(comp, axis=0)
+        r0, r1 = np.where(rows)[0][[0, -1]]
+        c0, c1 = np.where(cols)[0][[0, -1]]
+        # Pixel-corner extent of the component's bbox in the raster CRS.
+        x0 = transform.c + c0 * transform.a
+        x1 = transform.c + (c1 + 1) * transform.a
+        y0 = transform.f + r0 * transform.e
+        y1 = transform.f + (r1 + 1) * transform.e
+        try:
+            west, south, east, north = transform_bounds(
+                crs, "EPSG:4326",
+                min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+            )
+        except (rasterio.errors.RasterioError, ValueError):
+            west = south = east = north = None
+        pixels = int(np.count_nonzero(comp))
+        out.append({
+            "pixels": pixels,
+            "area_km2": round(pixels * px_area_km2, 4),
+            "bbox": None if west is None else {
+                "west": round(west, 6), "south": round(south, 6),
+                "east": round(east, 6), "north": round(north, 6),
+            },
+        })
+    out.sort(key=lambda g: g["area_km2"], reverse=True)
+    return out
+
+
+def compute_coverage(clipped: dict) -> dict:
+    """Real valid-pixel coverage of the AOI, with interior-AOI pass/fail + gaps.
+
+    Replaces footprint/geometric overlap as the authoritative coverage metric
+    (BUG 2). Coverage is measured on VALID pixels — inside the rasterized AOI,
+    carrying non-nodata data, and (Sentinel-2) not cloud/shadow/cirrus per SCL.
+
+    Per the coverage contract:
+      - `interior_coverage_percent` is the PASS/FAIL metric and must be 100.0.
+        The interior AOI is the clip mask eroded inward by one pixel, so
+        boundary-pixel rasterization artifacts never count as gaps.
+      - `full_aoi_coverage_percent` is informational (slightly < 100 from the
+        boundary pixels the erosion drops).
+      - Any uncovered region inside the interior AOI is a genuine gap regardless
+        of size; `gaps` lists them geometrically (area/bbox), and `gap_cause`
+        splits the uncovered pixels into nodata-caused vs cloud-caused so the
+        caller can tell "more tiles would fix it" from "the sky was covered".
+    """
+    valid, inside, cloud = _valid_pixel_mask(clipped)
+    transform = clipped.get("transform")
+    crs = clipped.get("crs")
+    if valid is None or inside is None:
+        return {
+            "interior_coverage_percent": 0.0,
+            "full_aoi_coverage_percent": 0.0,
+            "covered": False,
+            "gaps": [],
+            "gap_cause": {"nodata": 0, "cloud": 0},
+        }
+
+    interior = _erode_mask(inside, 1)
+    # If erosion removes everything (a very thin AOI a pixel wide), fall back to
+    # the full mask so we don't vacuously "pass" on an empty interior.
+    if interior is None or not interior.any():
+        interior = inside
+
+    full_count = int(np.count_nonzero(inside))
+    full_valid = int(np.count_nonzero(valid & inside))
+    int_count = int(np.count_nonzero(interior))
+    int_valid = int(np.count_nonzero(valid & interior))
+
+    full_pct = round(100.0 * full_valid / full_count, 4) if full_count else 0.0
+    int_pct = round(100.0 * int_valid / int_count, 4) if int_count else 0.0
+
+    gap_mask = interior & (~valid)
+    gaps = _gap_geometry(gap_mask, transform, crs) if transform is not None else []
+
+    # Attribute each interior gap pixel to nodata vs cloud.
+    band = _reference_band(clipped)
+    nodata_gap = interior & ~(np.isfinite(band) & (band != 0)) if band is not None else gap_mask
+    cloud_gap = interior & cloud if cloud is not None else np.zeros_like(gap_mask)
+    gap_cause = {
+        "nodata": int(np.count_nonzero(gap_mask & nodata_gap)),
+        "cloud": int(np.count_nonzero(gap_mask & cloud_gap & ~nodata_gap)),
+    }
+
+    return {
+        "interior_coverage_percent": int_pct,
+        "full_aoi_coverage_percent": full_pct,
+        "covered": int_pct >= 100.0,
+        "gaps": gaps,
+        "gap_cause": gap_cause,
+    }
 
 
 def _compute_bounds(clipped: dict) -> Optional[dict]:
@@ -1480,21 +1963,36 @@ def _attempt_clip(
     the download/stack/clip stages fails.
     """
     satellite_type = selection.get("satellite_type", "sentinel-2")
+    n_tiles = len(scenes) if isinstance(scenes, list) else 1
 
     imagery = download_imagery(
         selection, scenes, event_id, token, disaster_type
     )
     if imagery is None:
         return None
+    # BUG 7 — the mosaic step lives inside download_imagery (_mosaic_bands), so
+    # this peak covers download + mosaic; sample it against the tile count so we
+    # can see how peak RSS scales with tiles per mosaic.
+    _mem_stage("download+mosaic", tiles=n_tiles)
 
-    stacked = stack_bands(imagery["band_paths"], satellite_type)
+    # For S1 GRD (GCP-georeferenced), warp into the AOI's UTM zone so the grid
+    # is metric and clip_to_polygon has a real affine to work with (BUG 1). S2
+    # is already affine and ignores dst_crs.
+    dst_crs = (
+        _dst_crs_from_polygon(merged_polygon)
+        if satellite_type == "sentinel-1"
+        else None
+    )
+    stacked = stack_bands(imagery["band_paths"], satellite_type, dst_crs)
     if stacked is None:
         return None
+    _mem_stage("stack", tiles=n_tiles)
 
     clipped = clip_to_polygon(stacked, merged_polygon)
     if clipped is None:
         return None
 
+    _mem_stage("clip", tiles=n_tiles)
     # Stash the pre-clip stacked cube so the caller can re-clip the same
     # imagery to individual city polygons without downloading/stacking again.
     clipped["_stacked"] = stacked
@@ -1526,6 +2024,7 @@ def _render_clip(
     if indices is None:
         logger.error("Index calculation failed for %s", out_id)
         return None
+    _mem_stage("index")
 
     pngs = export_png(indices, clipped, out_id, disaster_type)
     if pngs is None:
@@ -1539,6 +2038,7 @@ def _render_clip(
         disaster_type,
         scheme_key=indices["scheme_key"],
     )
+    _mem_stage("vectorize")
 
     return {
         "satellite_type": satellite_type,
@@ -1547,6 +2047,9 @@ def _render_clip(
         "mean_index": indices["mean_value"],
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
+        # BUG 5 — calibration contract rides through to the result dict.
+        "index_calibrated": indices.get("index_calibrated"),
+        "index_units": indices.get("index_units"),
         "png_paths": pngs,
         "geojson": geojson,
         # Geographic extent of the PNGs, for map georeferencing. All PNGs from
@@ -1631,45 +2134,41 @@ def process_satellite_imagery(
     disaster_type: str,
     city_geoms=None,
     city_boundaries=None,
+    tracker=None,
 ) -> Optional[dict]:
-    """Run the full remote-sensing pipeline, coverage-aware with fallback.
+    """Run the full remote-sensing pipeline to 100% valid-pixel AOI coverage.
 
     download_imagery -> stack_bands -> clip_to_polygon -> calculate_indices
         -> export_png -> vectorize_classification
 
-    `scene_metadata` may be a single scene dict (legacy) or the ranked list from
-    `sentinel.search_imagery(..., return_ranked=True)`. With a ranked list:
+    Coverage is measured on VALID pixels (non-nodata, and for Sentinel-2 non-cloud
+    per SCL) of the AOI, NOT on footprint overlap (BUG 2). Scene selection is a
+    tiered, temporally-coherent search (BUG 3): the anchor is the most recent
+    acquisition; tiers widen the date window (0, +/-3, +/-7, +/-14 d) and, for
+    tiers 1-3, require the same relative orbit; Sentinel-1 never mixes ascending
+    and descending passes in one mosaic. Within a tier, acquisitions are added
+    best-first and the cumulative mosaic is re-clipped until interior-AOI
+    coverage reaches 100%. The first tier that reaches 100% wins.
 
-    - FIX 2: if the best scene covers < COVERAGE_MOSAIC_THRESHOLD of the AOI, the
-      top MOSAIC_MAX_SCENES scenes are mosaicked before clipping.
-    - FIX 3: after clipping, if fewer than MIN_VALID_PIXEL_PERCENT of in-polygon
-      pixels carry data, the result is rejected and the next-best scene is
-      tried. If every candidate is too sparse, returns a
-      `{"status": "coverage_insufficient", ...}` marker instead of None.
+    Tiers 3 and 4 lower the confidence score (via `tracker`) and append an
+    anomaly naming the temporal spread. If NO tier reaches 100%, returns
+    ``{"status": "failed", "reason": "insufficient_coverage", ...}`` with the
+    best coverage achieved and the geometry of the uncovered gaps — the pipeline
+    NEVER analyses a partial AOI and reports a risk level for it.
 
     Args:
-        selection: dict from `sentinel.select_satellite`.
-        scene_metadata: scene dict or ranked list of scenes.
-        bbox: analysis bbox (kept for the result payload).
-        merged_polygon: merged risk geometry from `boundary.merge_risk_boundaries`.
-        event_id: namespaces all artifacts.
-        token: CDSE access token.
-        disaster_type: drives band selection, indices and styling.
-        city_geoms: optional list of per-city shapely geometries (WGS84). When
-            given, the mosaic uses greedy set-cover to spread scenes across all
-            cities instead of taking the top-N by score (which can bunch on one
-            city and leave scattered cities uncovered).
-        city_boundaries: optional list of per-city `{"name", "geojson"}` dicts.
-            When there is more than one city, the accepted mosaic is re-clipped
-            to each city polygon and a per-city artifact set (PNGs + GeoJSON +
-            bounds, namespaced under `<event_id>/cities/<slug>/`) is rendered
-            and returned under the result's `cities` key. The expensive
-            download+stack is reused, so this is cheap.
+        selection / scene_metadata / bbox / merged_polygon / event_id / token /
+        disaster_type: as before.
+        city_geoms: per-city shapely geometries (WGS84), used only as a hint for
+            spreading a tier's scenes across scattered cities.
+        city_boundaries: per-city `{"name","geojson"}`; when >1, per-city
+            artifacts are rendered from the same accepted mosaic.
+        tracker: the event's `ConfidenceTracker`; tiers 3/4 add a concern and
+            lower confidence through it.
 
-    Returns the result dict on success, a `coverage_insufficient` marker if no
-    candidate has enough valid data, or None if a stage hard-fails. On success
-    the result carries the merged-AOI artifacts plus, for a multi-city AOI, a
-    `cities` list of per-city artifact sets.
+    On success returns the merged result dict, which now also carries
+    `coverage_percent`, `full_aoi_coverage_percent`, `coverage_tier`,
+    `temporal_spread_days`, `acquisition_count` and `bytes_downloaded`.
     """
     satellite_type = selection.get("satellite_type", "sentinel-2")
 
@@ -1682,125 +2181,234 @@ def process_satellite_imagery(
         logger.error("No scenes provided to process_satellite_imagery")
         return None
 
-    # Build the ordered list of candidate attempts. The first candidate is a
-    # mosaic of the top scenes when the single best does not cover enough of the
-    # AOI (FIX 2); the remaining candidates are individual scenes for fallback.
-    best_overlap = scenes[0].get("_overlap")
-    candidates = []
-    if (
-        best_overlap is not None
-        and best_overlap * 100 < COVERAGE_MOSAIC_THRESHOLD
-        and len(scenes) > 1
-    ):
-        # Greedy set-cover over the individual city polygons so the mosaic
-        # spreads across scattered cities instead of bunching on the single
-        # best-covered one. Falls back to top-N by score when no city geometries
-        # are supplied.
-        from sentinel import select_mosaic_scenes
+    from sentinel import (
+        build_coverage_tiers,
+        dedupe_by_acquisition,
+        scene_acq_date,
+        scene_orbit_direction,
+    )
 
-        mosaic_set = select_mosaic_scenes(scenes, city_geoms, MOSAIC_MAX_SCENES)
-        logger.info(
-            "Best scene covers only %.0f%% of AOI (< %.0f%%); mosaicking %d "
-            "scene(s) (set-cover over %d cities)",
-            best_overlap * 100,
-            COVERAGE_MOSAIC_THRESHOLD,
-            len(mosaic_set),
-            len([g for g in (city_geoms or []) if g is not None]),
-        )
-        candidates.append(("mosaic", mosaic_set))
-    candidates.extend(("single", [s]) for s in scenes)
+    # BUG 4a: collapse COG/non-COG twins of one acquisition to a single candidate
+    # BEFORE any download, so we never fetch the same acquisition twice.
+    scenes = dedupe_by_acquisition(scenes)
 
-    best_seen = -1.0
-    for kind, scene_set in candidates:
-        attempt_id = (
-            f"{event_id}/mosaic" if kind == "mosaic" else event_id
-        )
-        clipped = _attempt_clip(
-            selection,
-            scene_set,
-            merged_polygon,
-            attempt_id,
-            token,
-            disaster_type,
-        )
-        if clipped is None:
-            continue
-
-        valid = clipped.get("valid_percent", 0.0)
-        best_seen = max(best_seen, valid)
-        if valid < MIN_VALID_PIXEL_PERCENT:
-            names = [s.get("Name") for s in scene_set]
-            logger.warning(
-                "Candidate (%s) has only %.2f%% valid pixels (< %.1f%%); "
-                "trying next best. Scenes: %s",
-                kind,
-                valid,
-                MIN_VALID_PIXEL_PERCENT,
-                names,
+    # BUG 4b: validate real geometric intersection in a common CRS before
+    # downloading. A scene whose footprint doesn't intersect the AOI at all can
+    # never contribute valid pixels, so drop it up front (no wasted download).
+    from sentinel import _scene_aoi_overlap
+    try:
+        aoi_shape = shape(merged_polygon) if merged_polygon else None
+    except (ValueError, AttributeError, TypeError):
+        aoi_shape = None
+    if aoi_shape is not None:
+        pre = len(scenes)
+        scenes = [s for s in scenes if _scene_aoi_overlap(s, aoi_shape) > 0.0]
+        if len(scenes) < pre:
+            logger.info(
+                "Dropped %d scene(s) with zero AOI footprint intersection "
+                "before download", pre - len(scenes),
             )
-            continue
+    if not scenes:
+        logger.error("No candidate scene geometrically intersects the AOI")
+        return {
+            "status": "failed",
+            "reason": "insufficient_coverage",
+            "satellite_type": satellite_type,
+            "coverage_percent": 0.0,
+            "best_interior_coverage_percent": 0.0,
+            "gaps": [],
+            "detail": "no candidate scene intersects the AOI footprint",
+        }
 
-        logger.info(
-            "Candidate (%s) accepted with %.2f%% valid pixels", kind, valid
-        )
+    tiers = build_coverage_tiers(scenes, satellite_type)
+    if not tiers:
+        # No parseable acquisition dates — fall back to treating all scenes as a
+        # single tier-4 group so the coverage search still runs.
+        tiers = [(4, None, scenes)]
 
-        # Free the pre-clip stacked cube before the memory-heavy render tail.
-        # On a large multi-tile mosaic (e.g. Mindanao ≈ 650M px) the stacked
-        # cube is several GB; holding it through PNG export + vectorization on a
-        # 16 GB box pushes the process into paging/thrash. `_stacked` is only
-        # needed for per-city re-clipping, which is disabled, so drop it now.
-        if not (city_boundaries and len(city_boundaries) > 1):
-            clipped.pop("_stacked", None)
-            import gc
-            gc.collect()
+    bytes_before = _bytes_downloaded_total()
+    best_cov = None
+    best_interior = -1.0
 
-        # Render the cheap tail (indices -> PNGs -> vectorize -> bounds) for the
-        # whole merged AOI.
-        merged_result = _render_clip(
-            clipped, satellite_type, disaster_type, event_id
-        )
-        if merged_result is None:
-            logger.error("Aborting pipeline: merged render failed")
-            return None
-        merged_result["valid_percent"] = round(valid, 2)
-
-        # Per-city artifacts. The expensive download+stack is already done; for
-        # a multi-city AOI we re-clip the *same* stacked mosaic to each city
-        # polygon and render its own PNGs + GeoJSON. This is far cheaper than a
-        # fresh search per city and gives the hazard agent individual,
-        # easy-to-consume layers per city (in addition to the merged result).
-        if city_boundaries and len(city_boundaries) > 1:
-            cities = _render_per_city(
-                stacked=clipped.get("_stacked"),
-                satellite_type=satellite_type,
-                disaster_type=disaster_type,
-                event_id=event_id,
-                city_boundaries=city_boundaries,
+    for tier, orbit_dir, group in tiers:
+        # BUG 3: within a tier, add acquisitions best-first and re-measure real
+        # coverage until interior AOI hits 100%. Consecutive doomed downloads
+        # (valid pixels don't grow) abort the tier early (BUG 4c).
+        accepted: list = []
+        doomed_streak = 0
+        clipped = None
+        cov = None
+        for scene in group:
+            trial = accepted + [scene]
+            attempt_id = f"{event_id}/t{tier}"
+            trial_clip = _attempt_clip(
+                selection, trial, merged_polygon, attempt_id, token,
+                disaster_type,
             )
-            if cities:
-                merged_result["cities"] = cities
+            if trial_clip is None:
+                doomed_streak += 1
+                if doomed_streak >= DOOMED_DOWNLOAD_LIMIT:
+                    logger.warning(
+                        "Tier %d: %d consecutive failed/empty downloads; "
+                        "aborting tier", tier, doomed_streak,
+                    )
+                    break
+                continue
+            trial_cov = compute_coverage(trial_clip)
+            gained = trial_cov["interior_coverage_percent"] - (
+                cov["interior_coverage_percent"] if cov else 0.0
+            )
+            if gained <= 0.01 and accepted:
+                # This acquisition added no coverage — a doomed contribution.
+                doomed_streak += 1
                 logger.info(
-                    "Rendered %d per-city artifact set(s) for %s",
-                    len(cities),
-                    event_id,
+                    "Tier %d: %s added +%.3f%% coverage (doomed streak %d)",
+                    tier, scene.get("Name"), gained, doomed_streak,
+                )
+                if doomed_streak >= DOOMED_DOWNLOAD_LIMIT:
+                    logger.warning(
+                        "Tier %d: %d consecutive non-contributing downloads; "
+                        "aborting tier", tier, doomed_streak,
+                    )
+                    break
+                continue
+            doomed_streak = 0
+            accepted = trial
+            clipped = trial_clip
+            cov = trial_cov
+            logger.info(
+                "Tier %d: %d acq -> interior coverage %.3f%% (full %.3f%%)",
+                tier, len(accepted), cov["interior_coverage_percent"],
+                cov["full_aoi_coverage_percent"],
+            )
+            if cov["covered"]:
+                break
+
+        if cov and cov["interior_coverage_percent"] > best_interior:
+            best_interior = cov["interior_coverage_percent"]
+            best_cov = cov
+
+        if cov and cov["covered"]:
+            # 100% reached in this tier. Compute temporal spread + count.
+            dates = [d for d in (scene_acq_date(s) for s in accepted) if d]
+            spread = (max(dates) - min(dates)).days if len(dates) >= 2 else 0
+            logger.info(
+                "Coverage reached 100%% at tier %d (%d acquisition(s), "
+                "%d-day spread, orbit=%s)",
+                tier, len(accepted), spread, orbit_dir,
+            )
+
+            if not (city_boundaries and len(city_boundaries) > 1):
+                clipped.pop("_stacked", None)
+                import gc
+                gc.collect()
+
+            merged_result = _render_clip(
+                clipped, satellite_type, disaster_type, event_id
+            )
+            if merged_result is None:
+                logger.error("Aborting pipeline: merged render failed")
+                return None
+
+            bytes_after = _bytes_downloaded_total()
+            merged_result.update({
+                "valid_percent": round(cov["interior_coverage_percent"], 2),
+                "coverage_percent": cov["interior_coverage_percent"],
+                "full_aoi_coverage_percent": cov["full_aoi_coverage_percent"],
+                "coverage_tier": tier,
+                "temporal_spread_days": spread,
+                "acquisition_count": len(accepted),
+                "orbit_direction": orbit_dir,
+                "coverage_gaps": [],
+                "bytes_downloaded": bytes_after - bytes_before,
+                "processing_level": (
+                    "L2A" if satellite_type == "sentinel-2" else None
+                ),
+                # BUG 7 — per-stage peak RSS + which stage peaked, scaled by tiles.
+                "memory_report": memory_report(),
+            })
+
+            # Tiers 3 and 4 are a real limitation: a 7-14 day spread on a flood
+            # is stale imagery. Lower confidence + append an anomaly so it is
+            # visible downstream.
+            if tier >= 3 and tracker is not None:
+                sev = "HIGH" if tier == 4 else "MEDIUM"
+                tracker.add_concern(
+                    f"Coverage reached 100% only at tier {tier} "
+                    f"(±{COVERAGE_TIERS_DAYS.get(tier)}d window, "
+                    f"{spread}-day temporal spread across {len(accepted)} "
+                    f"acquisitions"
+                    + (", mixed relative orbits" if tier == 4 else "")
+                    + "); imagery is temporally dispersed for this disaster.",
+                    sev,
+                )
+                merged_result.setdefault("coverage_anomalies", []).append({
+                    "type": "temporal_spread",
+                    "tier": tier,
+                    "temporal_spread_days": spread,
+                    "acquisition_count": len(accepted),
+                    "severity": sev,
+                })
+
+            # BUG 5 — the SAR index is uncalibrated (10*log10 of raw GRD DN, no
+            # speckle filter, no terrain correction). Append a concern stating it
+            # must not be threshold-compared and lower confidence via the tracker
+            # (not a hardcoded number) so the limitation is visible downstream.
+            if merged_result.get("index_calibrated") is False and tracker is not None:
+                tracker.add_concern(
+                    "SAR index is uncalibrated (10*log10 of raw GRD DN; no "
+                    "radiometric calibration LUT, speckle filter, or terrain "
+                    "correction). It is a relative DN-space value in "
+                    f"'{merged_result.get('index_units')}', NOT calibrated "
+                    "sigma0 dB — it must not be threshold-compared as an "
+                    "absolute water/flood cutoff.",
+                    "MEDIUM",
                 )
 
-        logger.info("Satellite imagery pipeline complete for %s", event_id)
-        return merged_result
+            if city_boundaries and len(city_boundaries) > 1:
+                cities = _render_per_city(
+                    stacked=clipped.get("_stacked"),
+                    satellite_type=satellite_type,
+                    disaster_type=disaster_type,
+                    event_id=event_id,
+                    city_boundaries=city_boundaries,
+                )
+                if cities:
+                    merged_result["cities"] = cities
 
-    # Every candidate was too sparse to be usable.
+            logger.info("Satellite imagery pipeline complete for %s", event_id)
+            return merged_result
+
+    # No tier reached 100% coverage — fail honestly with gap geometry. NEVER
+    # analyse a partial AOI (BUG 3).
+    gaps = best_cov["gaps"] if best_cov else []
+    gap_cause = best_cov["gap_cause"] if best_cov else {"nodata": 0, "cloud": 0}
+    total_gap_km2 = round(sum(g["area_km2"] for g in gaps), 4)
+    bytes_after = _bytes_downloaded_total()
     logger.error(
-        "Coverage insufficient for %s: best candidate had only %.2f%% valid "
-        "pixels (need >= %.1f%%)",
-        event_id,
-        max(best_seen, 0.0),
-        MIN_VALID_PIXEL_PERCENT,
+        "INSUFFICIENT COVERAGE for %s: best interior coverage %.3f%% across all "
+        "tiers; %d uncovered region(s) totalling %.3f km^2 (nodata=%d px, "
+        "cloud=%d px). Refusing to analyse a partial AOI.",
+        event_id, max(best_interior, 0.0), len(gaps), total_gap_km2,
+        gap_cause["nodata"], gap_cause["cloud"],
     )
     return {
-        "status": "coverage_insufficient",
+        "status": "failed",
+        "reason": "insufficient_coverage",
         "satellite_type": satellite_type,
-        "best_valid_percent": round(max(best_seen, 0.0), 2),
-        "min_required_percent": MIN_VALID_PIXEL_PERCENT,
+        "coverage_percent": round(max(best_interior, 0.0), 3),
+        "best_interior_coverage_percent": round(max(best_interior, 0.0), 3),
+        "full_aoi_coverage_percent": (
+            best_cov["full_aoi_coverage_percent"] if best_cov else 0.0
+        ),
+        "uncovered_regions": len(gaps),
+        "uncovered_area_km2": total_gap_km2,
+        "gaps": gaps,
+        "gap_cause": gap_cause,
+        "bytes_downloaded": bytes_after - bytes_before,
+        "processing_level": (
+            "L2A" if satellite_type == "sentinel-2" else None
+        ),
     }
 
 

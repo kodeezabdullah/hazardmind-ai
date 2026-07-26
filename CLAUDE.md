@@ -240,7 +240,8 @@ class PipelineState(TypedDict):
 - **`agents/hazard/agent.py`'s `_normalise_satellite_payload` flat→nested adapter** — real and necessary, port it into the satellite→hazard graph edge, don't drop it.
 - **Hazard agent's `risk_polygons` is always `{}`** — unimplemented despite docs claiming PostGIS polygon generation. Not migration-blocking; flag if scope expands.
 - **`GEONAMES_USERNAME` default inconsistency** between `.env.example` and README — fix when touching impact's env docs.
-- Stale `CLAUDE.md` files in `agents/hazard/` and `agents/report/` describe the wrong Band adapter and (for report) the wrong map tech (claims MapLibre; it's Pillow) — **delete or rewrite these once Band is gone**, they'll be doubly wrong.
+- Stale `CLAUDE.md` files in `agents/hazard/` and `agents/report/` describe the wrong Band adapter and (for report) the wrong map tech (claims MapLibre; it's Pillow) — **delete or rewrite these once Band is gone**, they'll be doubly wrong. (`agents/satellite/CLAUDE.md` is equally stale — a 2026-07-26 dated section was added at its top flagging this; the rest of that file is history, not current instructions.)
+- **Satellite Sentinel-2 NDWI/NDVI thresholds need science-phase revalidation.** The 2026-07-26 coverage-correctness pass switched S2 from L1C (top-of-atmosphere) to L2A (surface reflectance) so real SCL cloud masking is available for the 100%-coverage requirement. `NDWI_WATER_THRESHOLD`/`NDVI_DAMAGE_THRESHOLD`/the 0.5 "severe" cutoff were tuned against L1C and were **not** retuned (out of scope for a correctness-only pass) — index values shift under L2A. See `agents/satellite/CLAUDE.md`'s 2026-07-26 section and `agents/satellite/processor.py`'s `_S2_BANDS` comment.
 
 ## Enterprise Gaps (Post-Migration Priority)
 

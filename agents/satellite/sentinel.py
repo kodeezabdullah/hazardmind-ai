@@ -343,6 +343,141 @@ def _scene_tile_id(scene: dict) -> Optional[str]:
     return match.group(1) if match else None
 
 
+# --------------------------------------------------------------------------- #
+# Acquisition-identity accessors (BUG 3 temporal coherence, BUG 4 dedup)
+# --------------------------------------------------------------------------- #
+def _scene_attr(scene: dict, name: str):
+    """Read a CDSE OData attribute value by Name, or None."""
+    for attr in scene.get("Attributes", []) or []:
+        if attr.get("Name") == name:
+            return attr.get("Value")
+    return None
+
+
+def scene_orbit_direction(scene: dict) -> Optional[str]:
+    """'ASCENDING' | 'DESCENDING' (upper-cased) or None.
+
+    For Sentinel-1, ascending and descending passes view terrain from opposite
+    look directions, so their backscatter is NOT comparable and must never be
+    mixed in one mosaic (BUG 3). Falls back to the S1 orbit letter in the
+    product Name (e.g. ``..._A_...`` implies ascending) when the attribute is
+    absent.
+    """
+    val = _scene_attr(scene, "orbitDirection")
+    if val:
+        return str(val).strip().upper()
+    return None
+
+
+def scene_relative_orbit(scene: dict) -> Optional[int]:
+    """The relative orbit number (int) or None.
+
+    Same relative orbit == same viewing geometry / acquisition track, so scenes
+    sharing it mosaic coherently. Read from the ``relativeOrbitNumber``
+    attribute.
+    """
+    val = _scene_attr(scene, "relativeOrbitNumber")
+    try:
+        return int(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def scene_datetime(scene: dict) -> Optional[datetime]:
+    """UTC acquisition datetime (ContentDate/Start or OriginDate), or None."""
+    raw = (scene.get("ContentDate") or {}).get("Start") or scene.get("OriginDate")
+    if not raw:
+        return None
+    txt = str(raw).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(txt[:19] + "+00:00")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def scene_acq_date(scene: dict):
+    """UTC acquisition date (date object) or None — the calendar day of capture."""
+    dt = scene_datetime(scene)
+    return dt.date() if dt else None
+
+
+def _base_acquisition_id(scene: dict) -> Optional[str]:
+    """Stable identity of the physical acquisition, ignoring product FORMAT.
+
+    A single Sentinel acquisition is published as multiple products — e.g. a
+    standard GRD and its Cloud-Optimized (GRD-COG) twin — that share the same
+    tile/date/orbit but have distinct product Ids. Downloading both is pure
+    waste (BUG 4). This derives a key that COLLAPSES those twins into one:
+
+      Sentinel-2: MGRS tile + acquisition datetime (to the second).
+      Sentinel-1: mission + mode + polarisation + start/stop timestamps parsed
+        from the product Name, which are identical across GRD/GRD-COG twins.
+
+    Falls back to the product Name with the trailing format/CRC token stripped.
+    """
+    name = (scene.get("Name") or "").strip()
+    # S2: tile + datetime uniquely identify the acquisition.
+    tile = _scene_tile_id(scene)
+    dt = scene_datetime(scene)
+    if tile and dt:
+        return f"S2:{tile}:{dt.strftime('%Y%m%dT%H%M%S')}"
+    # S1: parse mission/mode/product-type/polarisation/start/stop/orbit/dataTake
+    # from the product Name. The satellite letter spans A-D (S1A/B/C/D are all
+    # real, in-orbit or planned Sentinel-1 platforms — matching only [AB] here
+    # silently fell through to the weak fallback below for S1C/S1D scenes,
+    # which is exactly why a real S1D GRD/GRD-COG twin pair was NOT deduped in
+    # production). The trailing CRC/format hex + optional _COG suffix is
+    # deliberately EXCLUDED from the key: it is CDSE's per-product uniqueness
+    # stamp and legitimately differs between the standard and COG products of
+    # the SAME physical acquisition — everything through orbit+dataTake is the
+    # acquisition identity.
+    m = re.search(
+        r"(S1[A-D])_([A-Z]{2})_([A-Z0-9]{4})_[0-9A-Z]{4}_"
+        r"(\d{8}T\d{6})_(\d{8}T\d{6})_(\d+)_([0-9A-Z]+)",
+        name.upper(),
+    )
+    if m:
+        return "S1:" + ":".join(m.groups())
+    # Last resort: strip a trailing product-format hint from the Name.
+    return re.sub(r"(?i)[-_](cog|dgs|core)\b.*$", "", name) or (name or None)
+
+
+def dedupe_by_acquisition(scenes: list) -> list:
+    """Collapse products that are the SAME physical acquisition into one (BUG 4).
+
+    COG and non-COG (and any other format) variants of one acquisition share a
+    base acquisition id; downloading more than one is wasted bandwidth on a
+    guaranteed-identical clip. Keeps the first (best-ranked) product per
+    acquisition id, preserving input order. Products with no derivable id are
+    kept as-is (never silently dropped).
+    """
+    seen = set()
+    out = []
+    dropped = 0
+    for scene in scenes:
+        key = _base_acquisition_id(scene)
+        if key is not None and key in seen:
+            dropped += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        out.append(scene)
+    if dropped:
+        logger.info(
+            "Deduped %d duplicate acquisition product(s) (COG/non-COG twins) "
+            "-> %d unique acquisition(s)",
+            dropped,
+            len(out),
+        )
+    return out
+
+
 def backfill_uncovered_cities(
     ranked,
     city_entries,
@@ -454,6 +589,78 @@ def backfill_uncovered_cities(
 
     ranked.sort(key=lambda s: s.get("_score", 0.0), reverse=True)
     return ranked
+
+
+# Temporal-coherence tiers for reaching 100% coverage (BUG 3). Each entry is
+# (tier number, +/- day window around the anchor date, require same relative
+# orbit). Tier 4 relaxes the orbit constraint. Ascending/descending are NEVER
+# mixed within a Sentinel-1 mosaic in ANY tier (enforced separately).
+COVERAGE_TIERS = (
+    (1, 0, True),    # same acquisition date, same relative orbit
+    (2, 3, True),    # within +/-3 days, same relative orbit
+    (3, 7, True),    # within +/-7 days, same relative orbit
+    (4, 14, False),  # within +/-14 days, any orbit (same pass direction only)
+)
+
+
+def build_coverage_tiers(ranked, satellite_type: str):
+    """Yield ordered candidate scene groups per temporal-coherence tier (BUG 3).
+
+    Coverage must reach 100% using a *temporally coherent* mosaic, not an
+    arbitrary set-cover. This produces, for each tier in order, the list of
+    candidate groups to try (the caller downloads+clips group members until real
+    valid-pixel coverage hits 100%, then stops at the first tier that succeeds).
+
+    Coherence rules:
+      - The anchor is the most-recent acquisition (best for a *current*
+        disaster). Tiers widen the date window around it: 0, +/-3, +/-7, +/-14 d.
+      - Tiers 1-3 require the SAME relative orbit as the anchor; tier 4 relaxes
+        that.
+      - For Sentinel-1, ascending and descending are never mixed: each tier
+        yields groups split by orbit direction (the anchor's direction first).
+
+    Returns a list of ``(tier_number, orbit_direction_or_None, [scenes])`` in
+    the order they should be attempted. Scenes within a group stay best-first.
+    """
+    scenes = [s for s in ranked if scene_datetime(s) is not None]
+    if not scenes:
+        return []
+
+    # Anchor = most recent acquisition.
+    anchor = max(scenes, key=lambda s: scene_datetime(s))
+    anchor_date = scene_datetime(anchor).date()
+    anchor_orbit = scene_relative_orbit(anchor)
+    anchor_dir = scene_orbit_direction(anchor)
+    is_s1 = satellite_type == "sentinel-1"
+
+    groups = []
+    for tier, window_days, same_orbit in COVERAGE_TIERS:
+        in_window = [
+            s for s in scenes
+            if abs((scene_datetime(s).date() - anchor_date).days) <= window_days
+        ]
+        if same_orbit and anchor_orbit is not None:
+            in_window = [
+                s for s in in_window
+                if scene_relative_orbit(s) == anchor_orbit
+            ]
+        if not in_window:
+            continue
+
+        if is_s1:
+            # Split by orbit direction; never mix asc/desc. Anchor's dir first.
+            by_dir: dict = {}
+            for s in in_window:
+                d = scene_orbit_direction(s) or "UNKNOWN"
+                by_dir.setdefault(d, []).append(s)
+            ordered_dirs = sorted(
+                by_dir, key=lambda d: (d != anchor_dir, d)
+            )
+            for d in ordered_dirs:
+                groups.append((tier, d, by_dir[d]))
+        else:
+            groups.append((tier, None, in_window))
+    return groups
 
 
 def select_mosaic_scenes(ranked, city_geoms, max_scenes: int):
@@ -608,10 +815,15 @@ def search_imagery(
             "'cloudCover' and att/OData.CSC.DoubleAttribute/Value lt "
             f"{CLOUD_COVER_THRESHOLD})"
         )
-        # Restrict to a single processing level (L1C). The catalogue returns
-        # both L1C and L2A for the same tile; mixing them in a mosaic is unsafe
-        # (different band naming/scaling), and the extractor targets L1C.
-        filters.append("contains(Name,'MSIL1C')")
+        # Restrict to a single processing level: **L2A** (surface reflectance).
+        # L2A carries the Scene Classification Layer (SCL) the coverage metric
+        # needs for real cloud/shadow/cirrus masking (BUG 2); L1C has no SCL.
+        # The catalogue returns both L1C and L2A for the same tile; mixing
+        # processing levels in a mosaic is unsafe (different band naming/scaling),
+        # so we pin one. NOTE: L2A is not universal for older archive dates — if
+        # no L2A candidate reaches full coverage the pipeline reports that
+        # explicitly rather than silently downgrading to L1C.
+        filters.append("contains(Name,'MSIL2A')")
     elif satellite_type == SENTINEL_1:
         # Restrict to GRD (Ground Range Detected) products. The S1 catalogue also
         # returns RAW (level-0, `..._RAW__0S...`) and SLC products; RAW carries
