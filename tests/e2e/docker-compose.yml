@@ -1,0 +1,34 @@
+# Local PostGIS for the e2e pipeline test — keeps Neon's compute quota untouched.
+#
+# Usage:
+#   docker compose -f tests/e2e/docker-compose.yml up -d
+#   # wait until healthy, then run the test with the test DSN below.
+#
+# The e2e harness points NEON_DATABASE_URL at:
+#   postgresql://test:test@127.0.0.1:5433/hazardmind_test
+#
+# NOTE: on the machine this was authored on, Docker was not installed but a local
+# PostgreSQL 17 + PostGIS 3.6 service was already running, so the harness can also
+# target a locally-provisioned `hazardmind_test` DB on that instance instead of
+# this container (see tests/e2e/_env.py's HAZARDMIND_TEST_DSN override). This
+# compose file is the portable path for machines that DO have Docker.
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: hazardmind-e2e-postgis
+    environment:
+      POSTGRES_DB: hazardmind_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5433:5432"
+    volumes:
+      - hazardmind_e2e_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d hazardmind_test"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  hazardmind_e2e_pgdata:

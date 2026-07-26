@@ -11,10 +11,14 @@ import json
 import logging
 import os
 import traceback
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load THIS agent's own .env explicitly (not cwd-relative), override=False so a
+# parent-process variable (e.g. the e2e harness's local NEON_DATABASE_URL) wins.
+# See the satellite agent for the full rationale.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 logging.basicConfig(
     level=logging.INFO,

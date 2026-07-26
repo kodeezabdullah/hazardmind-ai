@@ -100,6 +100,7 @@ activemq-data/
 .envrc
 .venv
 .venv/
+.venv-e2e/
 venv/
 env/
 ENV/
@@ -155,3 +156,14 @@ _live_logs/
 _test_*.json
 _test_*.txt
 !frontend/lib/
+
+# E2E local Postgres data (docker named volume hazardmind_e2e_pgdata is
+# docker-managed; this ignores any bind-mounted pgdata if the compose is changed
+# to a host path, plus the harness's captured run logs).
+tests/e2e/pgdata/
+tests/e2e/_run_logs/
+tests/e2e/_run_logs.txt
+tests/e2e/*.log
+tests/e2e/.venv-e2e/
+tests/e2e/report_*.md
+tests/e2e/report_*.json

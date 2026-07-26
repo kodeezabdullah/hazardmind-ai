@@ -9,6 +9,7 @@ event_id and the satellite's result dict — no transport-layer indirection.
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import asyncpg
 from dotenv import load_dotenv
@@ -16,7 +17,10 @@ from dotenv import load_dotenv
 from analyzer import run_parallel_analysis
 from intelligence import quality_check
 
-load_dotenv()
+# Load THIS agent's own .env explicitly (not cwd-relative), override=False so a
+# parent-process variable (e.g. the e2e harness's local NEON_DATABASE_URL) wins.
+# See the satellite agent for the full rationale.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL")
 

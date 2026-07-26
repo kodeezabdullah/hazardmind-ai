@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -46,7 +47,13 @@ from sentinel import (
     select_satellite,
 )
 
-load_dotenv()
+# Load THIS agent's own .env explicitly (not cwd-relative), and never clobber a
+# variable already set by a parent process. In production each agent runs in its
+# own container/cwd so a bare load_dotenv() happened to work; when the whole
+# graph runs in ONE process (e.g. the e2e harness) a cwd-relative load would pull
+# the wrong agent's .env or none at all. override=False lets an already-exported
+# parent value (e.g. the harness pointing NEON_DATABASE_URL at local Postgres) win.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 logger = logging.getLogger(__name__)
 

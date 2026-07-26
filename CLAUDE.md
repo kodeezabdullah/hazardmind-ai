@@ -92,6 +92,45 @@ class PipelineState(TypedDict):
   **Known gap, not yet ported:** the old `cross_validate_and_discuss`'s specific anomaly *rules* (GDACS-extent-vs-satellite ratio, low-confidence warning, CRITICAL-risk broadcast, HIGH-risk-but-few-zones discrepancy, multi-disaster detection) were Band-room-discussion logic tied to natural-language messaging between agents — they were **not** reimplemented as a post-node hook. Each node still self-reports into `state["anomalies"]`/`state["confidence_scores"]`, but nothing currently cross-checks e.g. satellite extent against GDACS between stages. Flagged for a follow-up task, not silently dropped.
 - [x] Delete Band code — `backend/band_client.py`, `backend/agent_config.yaml`, `shared/utils/band_client.py`, Band-era `backend/test_*.py` files, `entrypoint.sh`'s agent_config.yaml generation, and `band-sdk` from `backend/requirements.txt` all removed; `backend/db.py`'s dead `insert_satellite_result` (only caller was the Band orchestrator's `_persist_satellite`) also removed. Remaining `band`/`Band`/`THENVOI` hits are docs-only (`CLAUDE.md`/`CODEBASE.md` historical notes) or explanatory comments referencing the old transport by name.
 
+## Single-Process / E2E Hardening (post-migration)
+
+- **Per-agent `.env` loading fixed for single-process runs.** `satellite`,
+  `hazard` and `impact` entry modules previously called bare `load_dotenv()`
+  (cwd-relative — fine one-container-per-agent, wrong when the whole graph runs
+  in one process). Now each loads `load_dotenv(Path(__file__).resolve().parent /
+  ".env", override=False)` — its OWN `.env`, and `override=False` so a
+  parent-process variable (e.g. the e2e harness pointing `NEON_DATABASE_URL` at
+  local Postgres) still wins. `report`'s modules already loaded `BASE_DIR /
+  ".env"` and were left as-is.
+- **Gemini backup-key rotation (`shared/utils/llm_fallback.py`).** On a
+  429/quota-exceeded from the primary `GEMINI_API_KEY`, the SAME request is
+  retried ONCE against `GEMINI_API_KEY_BACKUP`; if the backup also 429s (or the
+  key is unset) the chain falls through to Claude as before — never hard-fails.
+  Non-429 primary failures skip the backup and fall through immediately (the
+  pre-existing behaviour). Logs the key *slot* used ("primary"/"backup") and why
+  it switched, never a key value. No cooldown/round-robin/shared-pool yet — full
+  rotation is a later phase. Real backup keys live in each agent's gitignored
+  `.env`; `.env.example` files carry a commented placeholder only.
+  - **⚠️ Reach-only, not on the live pipeline path.** The 4 pipeline agents do
+    NOT call `llm_fallback.py` for Gemini — each agent's own `intelligence.py` /
+    `services/llm_router.py` rotates over `GEMINI_API_KEY` + `GEMINI_API_KEY_2..5`
+    against Gemini's **OpenAI-compatible** endpoint
+    (`generativelanguage.googleapis.com/v1beta/openai/`) with the `openai` SDK —
+    it never imports `llm_fallback` or the `google-genai` SDK. So the backup-key
+    retry added here currently rescues only callers of `llm_fallback.llm_call`
+    (none on the pipeline path today). To make the backup key rescue the actual
+    pipeline, `GEMINI_API_KEY_BACKUP` would need adding to each agent's own key
+    list (satellite/hazard/report read `_..._5`; **impact reads only
+    `GEMINI_API_KEY`**). Flagged, not silently rewired — that touches per-agent
+    LLM-content code, out of scope for a transport/e2e task.
+- **E2E harness (`tests/e2e/`).** Single-process run of the compiled graph
+  (`satellite→hazard→impact→report`) for Rawalpindi/flood against live Neon +
+  R2 + CDSE + Gemini + geoBoundaries. `docker-compose.yml` + `schema-test.sql`
+  are the portable off-Neon path (Neon quota was extended, so the run targets
+  Neon directly). `schema-test.sql` is the schema derived from live-Neon
+  introspection (the real spec; `shared/db/schema.sql` stays stale). See
+  `tests/e2e/README.md` for the full schema-mismatch table.
+
 ## File Map (Only What Matters)
 
 **Backend**
