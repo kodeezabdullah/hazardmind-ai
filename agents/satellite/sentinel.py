@@ -612,6 +612,15 @@ def search_imagery(
         # both L1C and L2A for the same tile; mixing them in a mosaic is unsafe
         # (different band naming/scaling), and the extractor targets L1C.
         filters.append("contains(Name,'MSIL1C')")
+    elif satellite_type == SENTINEL_1:
+        # Restrict to GRD (Ground Range Detected) products. The S1 catalogue also
+        # returns RAW (level-0, `..._RAW__0S...`) and SLC products; RAW carries
+        # unfocused echo data with NO VV/VH measurement GeoTIFFs, so
+        # processor._extract_bands finds no bands and the (multi-GB) download is
+        # wasted, then the next candidate — often also RAW — is fully downloaded
+        # and fails identically. Only GRD carries the analysis-ready VV/VH TIFFs
+        # the pipeline needs, so the catalogue query is filtered to it up front.
+        filters.append("contains(Name,'GRD')")
     order_by = "ContentDate/Start desc"
 
     params = {

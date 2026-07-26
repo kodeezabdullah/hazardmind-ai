@@ -716,7 +716,25 @@ def download_imagery(
         band_tokens = _S2_BANDS.get(disaster, _S2_DEFAULT_BANDS)
 
     per_scene_paths = []
+    rejected_non_grd = 0
     for idx, scene in enumerate(scenes):
+        # GUARD (Sentinel-1 only): reject a non-GRD product BEFORE downloading.
+        # RAW (level-0) / SLC products carry no VV/VH measurement GeoTIFFs, so
+        # extraction is guaranteed to fail — but the archive is multi-GB, so a
+        # failed download costs real time/bandwidth. sentinel.search_imagery now
+        # filters the catalogue to GRD, but this is a cheap belt-and-suspenders
+        # check in case a non-GRD scene reaches here via another path.
+        if satellite_type == "sentinel-1":
+            name = (scene.get("Name") or "").upper()
+            if "GRD" not in name:
+                logger.warning(
+                    "Skipping non-GRD Sentinel-1 product %s (no VV/VH bands) "
+                    "without downloading",
+                    scene.get("Name"),
+                )
+                rejected_non_grd += 1
+                continue
+
         # Each scene's bands go in their own subdir so same-named JP2s from
         # different tiles don't clobber each other before mosaicking. Key the
         # subdir on the scene's stable product Id (not a positional index):
@@ -752,7 +770,15 @@ def download_imagery(
             per_scene_paths.append(paths)
 
     if not per_scene_paths:
-        logger.error("No bands extracted for %s", event_id)
+        if rejected_non_grd and rejected_non_grd == len(scenes):
+            logger.error(
+                "No usable Sentinel-1 bands for %s: all %d candidate scene(s) "
+                "were non-GRD (RAW/SLC) products, skipped without download",
+                event_id,
+                rejected_non_grd,
+            )
+        else:
+            logger.error("No bands extracted for %s", event_id)
         return None
 
     if len(per_scene_paths) == 1:
