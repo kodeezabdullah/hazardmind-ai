@@ -27,7 +27,8 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-# Band listener; hf_app.py adds a health server on $PORT for Hugging Face and
-# runs band_agent.py (the report entry point) unchanged in the background.
+# hf_app.py serves a health check on $PORT for Hugging Face. The report
+# pipeline itself runs as a LangGraph node (node.py) driven by the backend
+# orchestrator, not as a standalone process in this container.
 EXPOSE 7860
 CMD ["python", "-u", "hf_app.py"]
