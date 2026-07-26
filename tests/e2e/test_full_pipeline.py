@@ -35,9 +35,13 @@ ENV_SUMMARY = load_all_service_envs()
 import asyncpg  # noqa: E402
 import requests  # noqa: E402
 
-LOCATION = "Rawalpindi"
-DISASTER_TYPE = "flood"
-MAGNITUDE = 0.0
+# Scenario is overridable via env so the same harness can run flood (S1/SAR) or
+# earthquake/landslide (S2/optical) without editing the file.
+import os as _os
+
+LOCATION = _os.getenv("E2E_LOCATION", "Rawalpindi")
+DISASTER_TYPE = _os.getenv("E2E_DISASTER_TYPE", "flood")
+MAGNITUDE = float(_os.getenv("E2E_MAGNITUDE", "0.0"))
 BASELINE_TOTAL_SECONDS = 142.0  # the pre-migration ~142s reference
 
 # ---------------------------------------------------------------------------
@@ -178,8 +182,22 @@ async def run():
     graph = g.compile()
 
     # --- drive it like /analyze ---
-    event_id = str(uuid.uuid4())
+    # Normally a fresh UUID per run (matches router.py). E2E_EVENT_ID lets a
+    # re-run reuse a prior run's event_id so the satellite band cache
+    # (<temp>/hazardmind-satellite/<event_id>/bands) is reused instead of
+    # re-downloading — handy while iterating on downstream stages.
+    event_id = os.getenv("E2E_EVENT_ID") or str(uuid.uuid4())
     print(f"\n=== event_id (generated once) = {event_id} ===\n")
+    # If reusing an event_id, clear any prior child rows so assertions see a
+    # clean write from THIS run (upserts handle most, but satellite DELETEs+INSERTs).
+    if os.getenv("E2E_EVENT_ID"):
+        conn0 = await _db()
+        try:
+            for t in ("satellite_results", "hazard_zones", "impact_data", "final_reports"):
+                await conn0.execute(f"DELETE FROM {t} WHERE event_id=$1", event_id)
+            await conn0.execute("DELETE FROM disaster_events WHERE event_id=$1", event_id)
+        finally:
+            await conn0.close()
     await create_disaster_event(event_id, LOCATION, DISASTER_TYPE, MAGNITUDE)
     await update_event_status(event_id, status="processing", step="satellite")
 

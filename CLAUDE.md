@@ -123,6 +123,18 @@ class PipelineState(TypedDict):
     list (satellite/hazard/report read `_..._5`; **impact reads only
     `GEMINI_API_KEY`**). Flagged, not silently rewired — that touches per-agent
     LLM-content code, out of scope for a transport/e2e task.
+- **Graph loader now survives LAZY sibling imports (`backend/graph.py`).** The
+  first loader fix (purging each agent's bare `sys.modules` entries after loading
+  `node.py`) stopped cross-agent collision but broke intra-agent **call-time**
+  imports: `agents/satellite/processor.py` does `from sentinel import ...` INSIDE
+  a function, and by call time the purge had removed `sentinel` + popped the
+  agent dir from `sys.path` → `ModuleNotFoundError` on the first real satellite
+  run (in production too, not just the test). `_load_node` now **stashes** each
+  agent's bare modules per-agent (out of shared `sys.modules`, so the next
+  agent's load is still clean) and returns a **wrapper** that re-installs that
+  agent's bare modules + dir on `sys.path` around every node call, then restores.
+  Eager and lazy sibling imports both resolve to the right agent; isolation holds.
+  Verified by a full 4-node e2e (9/9).
 - **E2E harness (`tests/e2e/`).** Single-process run of the compiled graph
   (`satellite→hazard→impact→report`) for Rawalpindi/flood against live Neon +
   R2 + CDSE + Gemini + geoBoundaries. `docker-compose.yml` + `schema-test.sql`

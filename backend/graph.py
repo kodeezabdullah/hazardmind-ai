@@ -12,6 +12,7 @@ agent's unqualified sibling imports (`from agent import ...`,
 into another agent's identically-named module.
 """
 
+import functools
 import importlib.util
 import sys
 from pathlib import Path
@@ -30,25 +31,39 @@ from shared.pipeline_state import PipelineState
 AGENTS_DIR = REPO_ROOT / "agents"
 
 
-def _load_node(agent_name: str, func_name: str):
-    """Import agents/<agent_name>/node.py in isolation and return func_name.
+# Per-agent stash of the unqualified sibling modules each agent introduced at
+# load time (keyed by agent_name -> {bare_name: module}). Used to re-install the
+# right agent's bare modules around every node call — see _load_node.
+_AGENT_BARE_MODULES: dict[str, dict] = {}
 
-    Cached in sys.modules under a collision-proof key so repeated calls (e.g.
-    build_pipeline_graph() called more than once) don't re-import.
+
+def _load_node(agent_name: str, func_name: str):
+    """Import agents/<agent_name>/node.py in isolation and return a callable.
 
     node.py (and the modules it imports) reach their siblings with UNQUALIFIED
-    names (`from agent import ...`, `from pipeline import ...`,
-    `from intelligence import ...`). Python caches those under their bare name in
-    sys.modules, so without cleanup the first agent's `agent`/`intelligence`/...
-    would satisfy the NEXT agent's identically-named import and load the wrong
-    code (e.g. hazard/node.py's `from agent import analyze_hazard` resolving to
-    satellite/agent.py). We therefore snapshot sys.modules before the load and
-    drop every bare-named module the load introduced once the node module itself
-    is safely cached under its unique key, leaving the next agent a clean slate.
+    names (`from agent import ...`, `from sentinel import ...`, ...). Python
+    caches those under their bare name in sys.modules, so if two agents are both
+    resident the first agent's `agent`/`sentinel`/... would satisfy the NEXT
+    agent's identically-named import and load the wrong code.
+
+    We can't simply delete the bare modules after load, because the pipeline code
+    imports some siblings LAZILY at call time (e.g.
+    agents/satellite/processor.py does `from sentinel import ...` inside a
+    function). By the time the node runs, a deleted `sentinel` + a popped
+    sys.path entry make that lazy import raise `ModuleNotFoundError`.
+
+    Instead we: (1) load node.py with the agent dir on sys.path, (2) stash the
+    bare-named modules this agent introduced under a per-agent dict and remove
+    them from the shared sys.modules (so they don't collide with the next
+    agent's load), then (3) return a WRAPPER that, on every call, temporarily
+    re-installs this agent's bare modules into sys.modules and prepends its dir
+    to sys.path — so both eager and lazy sibling imports resolve to the correct
+    agent — and restores the previous state afterwards.
     """
     key = f"hazardmind_{agent_name}_node"
+    agent_dir = AGENTS_DIR / agent_name
+
     if key not in sys.modules:
-        agent_dir = AGENTS_DIR / agent_name
         before = set(sys.modules)
         sys.path.insert(0, str(agent_dir))
         try:
@@ -61,10 +76,11 @@ def _load_node(agent_name: str, func_name: str):
             raise
         finally:
             sys.path.remove(str(agent_dir))
-            # Purge unqualified sibling modules this agent introduced (anything
-            # not already present and not our own uniquely-keyed node module or
-            # a package on sys.path). Keeps each agent's `agent`/`intelligence`/
-            # `pipeline`/... from leaking into the next agent's bare imports.
+            # Move the unqualified sibling modules this agent introduced out of
+            # the shared table into this agent's stash (so the NEXT agent's load
+            # sees a clean slate), but KEEP them — they'll be re-installed around
+            # each call so lazy imports resolve.
+            stash: dict = {}
             for name in set(sys.modules) - before:
                 if name == key or name.startswith("hazardmind_"):
                     continue
@@ -73,8 +89,50 @@ def _load_node(agent_name: str, func_name: str):
                 mod = sys.modules.get(name)
                 mod_file = getattr(mod, "__file__", None) or ""
                 if str(agent_dir) in mod_file:
-                    del sys.modules[name]
-    return getattr(sys.modules[key], func_name)
+                    stash[name] = sys.modules.pop(name)
+            _AGENT_BARE_MODULES[agent_name] = stash
+
+    node_fn = getattr(sys.modules[key], func_name)
+    stash = _AGENT_BARE_MODULES.get(agent_name, {})
+    dir_str = str(agent_dir)
+
+    @functools.wraps(node_fn)
+    async def _wrapped(state):
+        # Install this agent's bare sibling modules + dir for the duration of the
+        # call, so both eager and LAZY (`from sentinel import ...` inside a
+        # function) imports resolve to THIS agent's code. Save/restore whatever
+        # was there so concurrent/other agents aren't disturbed.
+        saved = {name: sys.modules.get(name) for name in stash}
+        for name, mod in stash.items():
+            sys.modules[name] = mod
+        added_path = dir_str not in sys.path
+        if added_path:
+            sys.path.insert(0, dir_str)
+        try:
+            return await node_fn(state)
+        finally:
+            if added_path:
+                try:
+                    sys.path.remove(dir_str)
+                except ValueError:
+                    pass
+            # Re-stash any modules the call newly imported lazily, then restore.
+            for name in list(stash) + [
+                n for n in sys.modules
+                if n not in saved
+                and not n.startswith(("hazardmind_", "shared", "langgraph"))
+                and str(agent_dir) in (getattr(sys.modules.get(n), "__file__", None) or "")
+            ]:
+                mod = sys.modules.get(name)
+                if mod is not None and str(agent_dir) in (getattr(mod, "__file__", None) or ""):
+                    stash[name] = mod
+                prev = saved.get(name)
+                if prev is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = prev
+
+    return _wrapped
 
 
 def _route_after(step: str, next_step: str):
