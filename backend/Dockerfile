@@ -28,6 +28,4 @@ RUN chmod +x entrypoint.sh
 ENV PORT=7860
 EXPOSE 7860
 
-# entrypoint.sh writes agent_config.yaml from the Space secrets (keeping the
-# Band api_key out of the repo) and then launches uvicorn on $PORT.
 CMD ["bash", "entrypoint.sh"]

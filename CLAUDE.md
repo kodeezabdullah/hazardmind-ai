@@ -4,7 +4,7 @@
 
 ## What This Project Is
 
-HazardMind AI is an autonomous multi-agent disaster-intelligence platform: given a location and disaster type (flood/earthquake/landslide), it resolves the real administrative boundary, pulls live Sentinel-1/2 imagery, computes grounded hazard indices (NDWI/USGS/DEM slope), assesses population+infrastructure impact from real GeoNames/OSM data, and generates an executive PDF + risk map + GeoJSON, all shown on an interactive 3D-globe frontend. Built by Team GridForce for disaster-response use (NDMA-style dispatch). **Current status:** feature-complete pipeline running live (hazardmindai.online), mid-migration off the Band SDK onto LangChain/LangGraph-native orchestration.
+HazardMind AI is an autonomous multi-agent disaster-intelligence platform: given a location and disaster type (flood/earthquake/landslide), it resolves the real administrative boundary, pulls live Sentinel-1/2 imagery, computes grounded hazard indices (NDWI/USGS/DEM slope), assesses population+infrastructure impact from real GeoNames/OSM data, and generates an executive PDF + risk map + GeoJSON, all shown on an interactive 3D-globe frontend. Built by Team GridForce for disaster-response use (NDMA-style dispatch). **Current status:** Band→LangChain migration complete. All 5 services now run as LangGraph nodes/graph, zero Band dependency. Pipeline running live (hazardmindai.online) on native LangGraph orchestration end to end.
 
 ## Current Architecture (AS-IS)
 
@@ -27,8 +27,8 @@ HazardMind AI is an autonomous multi-agent disaster-intelligence platform: given
 - All deterministic analysis logic: boundary resolution, satellite scene selection/mosaic, NDWI/NDVI/SAR indices, hazard risk math, population/infrastructure/vulnerability tasks, report generation/PDF/map rendering.
 - All DB writes/reads (`db.py`/`services/db.py`/`db_client.py` in each agent) — the schema and write contracts are the interface downstream agents depend on.
 - All R2 uploads (`r2_upload.py`, `storage_client.py`).
-- FastAPI endpoints (`/analyze`, `/status`, `/results`, `/band-log` → will become `/analyze`, `/status`, `/results`; `/band-log` likely renamed/repurposed to stream `PipelineState` history instead of a Band transcript).
-- The frontend (`frontend/`) — it talks to the backend's REST API, not to Band directly; no changes needed beyond a possible `/band-log` → new-endpoint rename.
+- FastAPI endpoints — now `/analyze`, `/status`, `/results`, `/pipeline-log` (was `/band-log`, repurposed to read `disaster_events.pipeline_log` — the persisted errors/anomalies/confidence_scores trail — instead of a Band transcript).
+- The frontend (`frontend/`) — it talks to the backend's REST API, not to Band directly; `lib/bandLog.ts` still targets the old `/band-log` path and needs retargeting to `/pipeline-log` (not done as part of this backend change — frontend is out of scope per the file map below).
 - LLM provider routing (`llm_router.py`, `llm_clients.py`, `intelligence.py` files) — these are LLM *content* generation, unrelated to the transport-layer migration.
 
 **What gets deleted:**
@@ -88,15 +88,17 @@ class PipelineState(TypedDict):
 - [x] `agents/hazard` — converted: `node.py` wraps `analyze_hazard` as a LangGraph node; Band adapter/room/mention machinery stripped from `agent.py`, `_normalise_satellite_payload` adapter and all deterministic hazard math untouched
 - [x] `agents/impact` — converted: `node.py` wraps `run_impact_analysis` as a LangGraph node; Band adapter/room/mention/UUID-recovery machinery stripped from `agent.py`, the no-significant-disaster gate and parallel Task1+Task2 (`asyncio.gather`) untouched
 - [x] `agents/report` — converted: `node.py` wraps `pipeline.run_report_pipeline` as a LangGraph node; `band_agent.py`/`band_contract.py`/`room_drain.py`/`agent_config.yaml`/`verify_setup.py` deleted, `agent.py` (the CLI entry point, not the Band listener) trimmed of its `band_contract`-dependent flags, `hf_app.py` now just serves the health check, strict-mode validation (`_assert_required_report_sections`) and all of `pipeline.py`/`generator.py`/`map_generator.py`/`pdf_generator.py`/`db_client.py` untouched
-- [ ] `backend/orchestrator` — replace with a `StateGraph` build (`satellite → hazard → impact → report`) + `.ainvoke()`/`.astream()` driver; port `cross_validate_and_discuss`'s anomaly logic to run between nodes (conditional edges or a post-node hook), drop the Band-posting side
-- [ ] Delete Band code — see the deletion list above; grep for `band`, `Band`, `THENVOI`, `@mention` across the repo before declaring this done
+- [x] `backend/orchestrator` — replaced with `backend/graph.py`'s `StateGraph` build (`satellite → hazard → impact → report`) + `OrchestratorAgent.start_pipeline()`'s `.ainvoke()` driver. Conditional edges (`_route_after`) halt the graph the moment a node reports `status: "failed"`, replacing `handle_failure`'s early-return.
+  **Known gap, not yet ported:** the old `cross_validate_and_discuss`'s specific anomaly *rules* (GDACS-extent-vs-satellite ratio, low-confidence warning, CRITICAL-risk broadcast, HIGH-risk-but-few-zones discrepancy, multi-disaster detection) were Band-room-discussion logic tied to natural-language messaging between agents — they were **not** reimplemented as a post-node hook. Each node still self-reports into `state["anomalies"]`/`state["confidence_scores"]`, but nothing currently cross-checks e.g. satellite extent against GDACS between stages. Flagged for a follow-up task, not silently dropped.
+- [x] Delete Band code — `backend/band_client.py`, `backend/agent_config.yaml`, `shared/utils/band_client.py`, Band-era `backend/test_*.py` files, `entrypoint.sh`'s agent_config.yaml generation, and `band-sdk` from `backend/requirements.txt` all removed; `backend/db.py`'s dead `insert_satellite_result` (only caller was the Band orchestrator's `_persist_satellite`) also removed. Remaining `band`/`Band`/`THENVOI` hits are docs-only (`CLAUDE.md`/`CODEBASE.md` historical notes) or explanatory comments referencing the old transport by name.
 
 ## File Map (Only What Matters)
 
 **Backend**
 - `backend/main.py` — FastAPI app, lifespan, CORS, `/health`
 - `backend/router.py` — all HTTP routes, owns the orchestrator singleton
-- `backend/orchestrator.py` — pipeline state machine (migration target: becomes the LangGraph driver)
+- `backend/orchestrator.py` — `OrchestratorAgent.start_pipeline()` builds the initial `PipelineState` and drives `backend/graph.py`'s compiled `StateGraph` via `.ainvoke()`
+- `backend/graph.py` — `build_pipeline_graph()`; loads each agent's `node.py` via an isolated `importlib` loader (agent dirs share bare module names like `agent.py`/`intelligence.py`, so a normal import would collide across agents)
 - `backend/db.py` — asyncpg pool + all DB read/write helpers (keep as-is)
 - `backend/models.py` — Pydantic request/response schemas (keep as-is)
 - `backend/cleanup.py` — stuck-event GC (keep the DB half, drop the Band-drain half)

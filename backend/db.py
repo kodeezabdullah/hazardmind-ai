@@ -63,33 +63,21 @@ async def create_disaster_event(
     location: str,
     disaster_type: str,
     magnitude: Optional[float],
-    band_room_id: Optional[str] = None,
 ) -> None:
-    """Insert a new event. Status starts as 'received'.
-
-    band_room_id is the dynamic Band room created for this event (see
-    band_client.create_event_room). It is stored so the transcript can be
-    re-fetched later and so each event maps to its own room. The column is
-    ensured at insert time with ADD COLUMN IF NOT EXISTS, so no separate
-    migration step is required for an existing disaster_events table.
-    """
+    """Insert a new event. Status starts as 'received'."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "ALTER TABLE disaster_events ADD COLUMN IF NOT EXISTS band_room_id TEXT"
-        )
         await conn.execute(
             """
             INSERT INTO disaster_events
                 (event_id, location, disaster_type, magnitude,
-                 status, step, progress, band_room_id)
-            VALUES ($1, $2, $3, $4, 'received', 'received', 0, $5)
+                 status, step, progress)
+            VALUES ($1, $2, $3, $4, 'received', 'received', 0)
             """,
             event_id,
             location,
             disaster_type,
             magnitude,
-            band_room_id,
         )
 
 
@@ -109,71 +97,23 @@ async def update_event_status(event_id: str, status: str, step: str) -> None:
         )
 
 
-async def insert_satellite_result(event_id: str, data: dict) -> None:
-    """Write the satellite agent's result row from its completion payload.
+async def update_pipeline_log(event_id: str, log: dict) -> None:
+    """Persist the LangGraph run's errors/anomalies/confidence_scores trail.
 
-    The satellite agent reports its result over Band; the orchestrator parses
-    the completion signal (a dict with satellite_type / cloud_cover / scene_id /
-    the four artifact URLs / affected_area_km2 / damage_percent / total_zones /
-    bounds / bbox / risk_cities) and persists it here so GET /results can join
-    it. Columns mirror the satellite_results table; jsonb columns are passed as
-    JSON strings. Idempotent per event: an existing row is replaced so a re-run
-    does not accumulate duplicates. Missing fields are written as NULL.
+    Replaces the Band transcript as the record GET /pipeline-log reads back.
+    The column is ensured at write time with ADD COLUMN IF NOT EXISTS, so no
+    separate migration step is required for an existing disaster_events table.
     """
-    data = data or {}
-
-    def _f(key):
-        value = data.get(key)
-        try:
-            return float(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    def _i(key):
-        value = data.get(key)
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    # jsonb columns: pass the raw list/dict. The connection's jsonb codec
-    # (encoder=json.dumps) serializes it — do NOT pre-dump or it double-encodes
-    # and the value comes back as a JSON string instead of an object.
-    def _j(key):
-        return data.get(key)
-
     pool = await get_pool()
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM satellite_results WHERE event_id = $1",
-                event_id,
-            )
-            await conn.execute(
-                """
-                INSERT INTO satellite_results
-                    (event_id, satellite_type, cloud_cover, scene_id,
-                     true_color_url, index_url, classification_url, geojson_url,
-                     affected_area_km2, damage_percent, total_zones,
-                     bounds, bbox, risk_cities)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12, $13, $14)
-                """,
-                event_id,
-                data.get("satellite_type"),
-                _f("cloud_cover"),
-                data.get("scene_id"),
-                data.get("true_color_url"),
-                data.get("index_url"),
-                data.get("classification_url"),
-                data.get("geojson_url"),
-                _f("affected_area_km2"),
-                _f("damage_percent"),
-                _i("total_zones"),
-                _j("bounds"),
-                _j("bbox"),
-                _j("risk_cities"),
-            )
+        await conn.execute(
+            "ALTER TABLE disaster_events ADD COLUMN IF NOT EXISTS pipeline_log JSONB"
+        )
+        await conn.execute(
+            "UPDATE disaster_events SET pipeline_log = $2 WHERE event_id = $1",
+            event_id,
+            log,
+        )
 
 
 async def count_active_events() -> int:
@@ -198,8 +138,31 @@ async def get_event_status(event_id: str) -> Optional[dict]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT event_id, status, step, progress,
-                   band_room_id, created_at, updated_at
+            SELECT event_id, status, step, progress, created_at, updated_at
+            FROM disaster_events
+            WHERE event_id = $1
+            """,
+            event_id,
+        )
+        return dict(row) if row else None
+
+
+async def get_pipeline_log(event_id: str) -> Optional[dict]:
+    """Return the event's status/step + persisted pipeline_log trail, if any.
+
+    Tolerant of a fresh DB where update_pipeline_log() has never run (and thus
+    never added the column) — falls back to an empty trail rather than
+    erroring, since the column is only guaranteed to exist once a pipeline run
+    has completed at least once.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE disaster_events ADD COLUMN IF NOT EXISTS pipeline_log JSONB"
+        )
+        row = await conn.fetchrow(
+            """
+            SELECT event_id, status, step, pipeline_log
             FROM disaster_events
             WHERE event_id = $1
             """,

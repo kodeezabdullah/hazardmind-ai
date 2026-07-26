@@ -14,7 +14,6 @@ class AnalyzeResponse(BaseModel):
     job_id: str
     status: str
     message: str
-    band_room_id: Optional[str] = None
 
 
 class StatusResponse(BaseModel):
@@ -35,6 +34,10 @@ class ResultsResponse(BaseModel):
     report: Optional[dict] = None
 
 
-class BandLogResponse(BaseModel):
+class PipelineLogResponse(BaseModel):
     job_id: str
-    messages: List[dict]
+    status: str
+    step: str
+    errors: List[dict]
+    anomalies: List[dict]
+    confidence_scores: dict

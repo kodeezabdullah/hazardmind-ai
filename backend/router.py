@@ -6,19 +6,19 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from band_client import create_event_room, inbound_store
 from db import (
     count_active_events,
     create_disaster_event,
     get_event_results,
     get_event_status,
+    get_pipeline_log,
     update_event_status,
 )
 from orchestrator import OrchestratorAgent
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
-    BandLogResponse,
+    PipelineLogResponse,
     ResultsResponse,
     StatusResponse,
 )
@@ -46,7 +46,7 @@ async def analyze(request: AnalyzeRequest):
             break  # don't hold the request forever; let it through after the cap
         await asyncio.sleep(5)
 
-    # event_id is generated ONCE here and reused by every agent.
+    # event_id is generated ONCE here and reused by every agent via PipelineState.
     event_id = str(uuid.uuid4())
 
     disaster_data = {
@@ -55,76 +55,33 @@ async def analyze(request: AnalyzeRequest):
         "magnitude": request.magnitude,
     }
 
-    # Per-event Band room.
-    #
-    # DYNAMIC_BAND_ROOMS (default OFF) gates a per-event room. It is OFF because
-    # the orchestrator's Band API key can only populate a room it creates with
-    # *same-owner* agents (the satellite agent auto-joins; it shares the
-    # orchestrator's owner). The hazard/impact/report agents belong to different
-    # Band owner accounts and CANNOT be added by this key — an explicit add is
-    # 403 and @mentioning a non-member is 422 (verified live). So a dynamic room
-    # would never receive those agents and the pipeline would hang. Until all
-    # pipeline agents share one Band owner (or Band exposes an invite flow this
-    # key can drive), /analyze uses the shared static BAND_ROOM_ID that all five
-    # agents were manually invited into. See backend/CLAUDE.md "Dynamic rooms".
-    room_id = os.getenv("BAND_ROOM_ID")
-    if os.getenv("DYNAMIC_BAND_ROOMS", "false").strip().lower() in ("1", "true", "yes"):
-        try:
-            room_id = await create_event_room(
-                event_id, request.location, request.disaster_type
-            )
-        except Exception:  # noqa: BLE001 - dynamic room is best-effort
-            logger.exception(
-                "event_id=%s: room creation failed; using static room", event_id
-            )
-            room_id = os.getenv("BAND_ROOM_ID")
-
     await create_disaster_event(
         event_id=event_id,
         location=request.location,
         disaster_type=request.disaster_type,
         magnitude=request.magnitude,
-        band_room_id=room_id,
     )
 
-    # Hand off to the orchestrator: sets status -> processing/satellite and
-    # mentions the satellite agent in the event's Band room. If the Band post
-    # fails (e.g. the room can't be created and the static room is unavailable),
-    # don't 500 the request — mark the event failed and return cleanly so the
-    # frontend gets a job_id and a clear status instead of an error.
-    try:
-        await orchestrator.start_pipeline(event_id, disaster_data, room_id=room_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("event_id=%s: start_pipeline failed", event_id)
-        try:
-            await update_event_status(event_id, status="failed", step="dispatch")
-        except Exception:  # noqa: BLE001
-            pass
-        return JSONResponse(
-            status_code=200,
-            content={
-                "job_id": event_id,
-                "status": "failed",
-                "message": "Could not dispatch the pipeline to Band; please retry shortly.",
-            },
-        )
-
-    # Watch the pipeline in the background so the request returns immediately.
-    asyncio.create_task(_monitor(event_id, room_id))
+    # Run the graph in the background so the request returns immediately; the
+    # frontend polls /status and /results the same way it always has.
+    asyncio.create_task(_run_pipeline(event_id, disaster_data))
 
     return AnalyzeResponse(
         job_id=event_id,
         status="processing",
-        band_room_id=room_id,
         message="Pipeline started",
     )
 
 
-async def _monitor(event_id: str, room_id: str | None = None) -> None:
+async def _run_pipeline(event_id: str, disaster_data: dict) -> None:
     try:
-        await orchestrator.monitor_progress(event_id, room_id=room_id)
+        await orchestrator.start_pipeline(event_id, disaster_data)
     except Exception:  # noqa: BLE001 - background task must not crash silently
-        logger.exception("monitor_progress failed for event_id=%s", event_id)
+        logger.exception("start_pipeline failed for event_id=%s", event_id)
+        try:
+            await update_event_status(event_id, status="failed", step="failed")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @router.get("/status/{job_id}", response_model=StatusResponse)
@@ -169,22 +126,24 @@ async def get_results(job_id: str):
     )
 
 
-@router.get("/band-log/{job_id}", response_model=BandLogResponse)
-async def get_band_log(job_id: str):
-    event = await get_event_status(job_id)
+@router.get("/pipeline-log/{job_id}", response_model=PipelineLogResponse)
+async def get_pipeline_log_route(job_id: str):
+    """Return the LangGraph run's errors/anomalies/confidence_scores trail.
+
+    Replaces GET /band-log now that there is no Band transcript. Reads the
+    pipeline_log persisted by orchestrator.start_pipeline() at the end of the
+    run rather than a live message store.
+    """
+    event = await get_pipeline_log(job_id)
     if event is None:
         raise HTTPException(status_code=404, detail="job not found")
 
-    # Inbound messages are buffered by the orchestrator's recording adapter;
-    # Band's REST history is empty for this agent.
-    messages = [
-        {
-            "agent": msg.get("agent"),
-            "content": msg.get("content", ""),
-            "timestamp": msg.get("timestamp"),
-            "type": msg.get("type", "text"),
-        }
-        for msg in inbound_store.for_event(job_id)
-    ]
-
-    return BandLogResponse(job_id=job_id, messages=messages)
+    log = event.get("pipeline_log") or {}
+    return PipelineLogResponse(
+        job_id=str(event["event_id"]),
+        status=event["status"],
+        step=event["step"],
+        errors=log.get("errors") or [],
+        anomalies=log.get("anomalies") or [],
+        confidence_scores=log.get("confidence_scores") or {},
+    )
