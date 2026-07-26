@@ -101,11 +101,14 @@ def _claude_client():
     return AsyncAnthropic(api_key=key, base_url=CLAUDE_BASE_URL, max_retries=0)
 
 
-def _gemini_client():
-    """Build a Google GenAI client, or ``None`` if the key/SDK is unavailable."""
-    key = os.getenv("GEMINI_API_KEY")
+def _gemini_client_for(api_key_env: str):
+    """Build a Google GenAI client from the key named by ``api_key_env``.
+
+    Returns ``None`` if the key is unset or the SDK is missing. Never logs the
+    key value.
+    """
+    key = os.getenv(api_key_env)
     if not key:
-        logger.warning("GEMINI_API_KEY not set — Gemini fallback disabled.")
         return None
     try:
         from google import genai
@@ -115,9 +118,42 @@ def _gemini_client():
     return genai.Client(api_key=key)
 
 
+def _gemini_client():
+    """Build a Google GenAI client for the primary key, or ``None``."""
+    client = _gemini_client_for("GEMINI_API_KEY")
+    if client is None and not os.getenv("GEMINI_API_KEY"):
+        logger.warning("GEMINI_API_KEY not set — Gemini fallback disabled.")
+    return client
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """True if ``exc`` looks like a 429 / quota-exceeded from Gemini.
+
+    The Google GenAI SDK surfaces rate/quota limits as a ``ClientError`` whose
+    text carries HTTP 429 and/or ``RESOURCE_EXHAUSTED``; we match on both the
+    status code and the quota wording so a rename of either still trips it.
+    """
+    text = str(exc).lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status == 429:
+        return True
+    return (
+        "429" in text
+        or "resource_exhausted" in text
+        or "quota" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+    )
+
+
 # Built once and reused. Any may be None if its key/SDK is missing.
 featherless_client = _client("FEATHERLESS_API_KEY", FEATHERLESS_BASE_URL)
 gemini_client = _gemini_client()
+# Optional second Gemini key. On a 429/quota-exceeded from the primary slot the
+# SAME request is retried ONCE against this backup before the chain moves on to
+# Claude. Full round-robin / cooldown / shared pool is a later phase — this is a
+# single one-shot rotation. May be None if GEMINI_API_KEY_BACKUP is unset.
+gemini_backup_client = _gemini_client_for("GEMINI_API_KEY_BACKUP")
 claude_client = _claude_client()
 gpt_client = _client("AIML_API_KEY", GPT_BASE_URL)
 
@@ -149,28 +185,62 @@ async def _call_gpt(prompt: str, system: str, max_tokens: int) -> Optional[str]:
         return None
 
 
+async def _gemini_generate(client, slot: str, prompt: str, system: str, max_tokens: int) -> Optional[str]:
+    """One Gemini generate call against ``client`` (the ``slot``: primary/backup).
+
+    Returns text on success, ``None`` on empty content. Re-raises the underlying
+    exception so the caller can decide whether it was a 429 worth rotating on.
+    Never logs the key — only the slot label.
+    """
+    from google.genai import types
+
+    config = types.GenerateContentConfig(max_output_tokens=max_tokens)
+    if system:
+        config.system_instruction = system
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=config,
+    )
+    content = (getattr(response, "text", None) or "").strip()
+    if content:
+        logger.info("[LLM] Served by: %s (Gemini key slot: %s)", GEMINI_MODEL, slot)
+        return content
+    logger.warning("[LLM] %s returned empty content (slot: %s).", GEMINI_MODEL, slot)
+    return None
+
+
 async def _call_gemini(prompt: str, system: str, max_tokens: int) -> Optional[str]:
-    """Call Gemini via the Google GenAI SDK. Returns text, or ``None`` on failure."""
+    """Call Gemini, rotating to the backup key ONCE on a 429/quota error.
+
+    Order: primary slot → (on 429 only) backup slot → give up (return ``None``,
+    letting ``llm_call`` continue down the provider chain). Any non-429 failure
+    on the primary does NOT trigger the backup — it falls straight through, as
+    before. If the backup also 429s, we still return ``None`` (no hard-fail).
+    """
     if gemini_client is None:
         return None
     try:
-        from google.genai import types
-
-        config = types.GenerateContentConfig(max_output_tokens=max_tokens)
-        if system:
-            config.system_instruction = system
-        response = await gemini_client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=config,
-        )
-        content = (getattr(response, "text", None) or "").strip()
-        if content:
-            logger.info("[LLM] Served by: %s", GEMINI_MODEL)
-            return content
-        logger.warning("[LLM] %s returned empty content.", GEMINI_MODEL)
-        return None
-    except Exception as exc:  # noqa: BLE001 — move on to the next link in the chain
+        return await _gemini_generate(gemini_client, "primary", prompt, system, max_tokens)
+    except Exception as exc:  # noqa: BLE001 — decide: rotate on 429, else move on
+        if _is_quota_error(exc) and gemini_backup_client is not None:
+            logger.info(
+                "[LLM] Gemini primary slot hit a 429/quota limit — retrying the "
+                "same request once on the backup key slot."
+            )
+            try:
+                return await _gemini_generate(
+                    gemini_backup_client, "backup", prompt, system, max_tokens
+                )
+            except Exception as backup_exc:  # noqa: BLE001 — still soft-fail to the chain
+                if _is_quota_error(backup_exc):
+                    logger.warning(
+                        "[LLM] Gemini backup key slot ALSO hit a 429/quota limit — "
+                        "falling through to the next provider."
+                    )
+                else:
+                    logger.warning("[LLM] Gemini backup slot failed: %s", backup_exc)
+                return None
         logger.warning("[LLM] Gemini (%s) failed: %s", GEMINI_MODEL, exc)
         return None
 

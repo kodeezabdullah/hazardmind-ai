@@ -2,7 +2,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import close_pool, ping as db_ping
@@ -14,12 +14,24 @@ logger = logging.getLogger("hazardmind")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Connect the orchestrator to the Band room on startup.
+    # Compile the LangGraph pipeline once on startup.
     try:
         await orchestrator.connect()
-    except Exception:  # noqa: BLE001 - API still serves reads if Band is down
-        logger.exception("Orchestrator failed to connect on startup")
+    except Exception:  # noqa: BLE001 - don't block the API from serving reads
+        logger.exception("Orchestrator failed to initialize on startup")
+
+    # Background cleanup: every CLEANUP_INTERVAL_HOURS (default 12), clear
+    # stuck events so they stop holding a concurrency slot. Best-effort; never
+    # blocks startup.
+    import asyncio as _asyncio
+
+    from cleanup import cleanup_loop
+
+    cleanup_task = _asyncio.create_task(cleanup_loop())
+
     yield
+
+    cleanup_task.cancel()
     await close_pool()
 
 
@@ -54,11 +66,11 @@ app.include_router(router)
 @app.get("/health")
 async def health():
     db_ok = await db_ping()
-    band_ok = bool(getattr(orchestrator, "connected", False))
+    graph_ok = getattr(orchestrator, "_graph", None) is not None
     return {
         "status": "ok",
         "service": "hazardmind-backend",
-        "band": "connected" if band_ok else "disconnected",
+        "pipeline": "ready" if graph_ok else "not_initialized",
         "db": "connected" if db_ok else "disconnected",
         "version": app.version,
     }

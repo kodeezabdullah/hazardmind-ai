@@ -118,7 +118,9 @@ async def run_report_pipeline(
             map_output_path=map_output_path,
         )
 
-        report["report"]["map_url"] = _frontend_map_url(event_id)
+        # map_url is set to the public R2 image after upload (below). Default empty
+        # so we never emit a frontend route that may not exist.
+        report["report"]["map_url"] = ""
         paths["map"].parent.mkdir(parents=True, exist_ok=True)
         generate_static_map(report, paths["map"])
         _append_report_log(report, "Static cartography map generated locally", "2026-06-13T18:04:00Z")
@@ -143,6 +145,20 @@ async def run_report_pipeline(
                 report["report"]["pdf_url"] = pdf_url
                 r2_uploaded = True
                 _append_report_log(report, "PDF uploaded to Cloudflare R2", "2026-06-13T18:05:00Z")
+
+            # Upload the risk-map PNG to R2 and point map_url at the public image
+            # (not a frontend route that may not exist).
+            try:
+                if paths["map"].exists():
+                    map_url = upload_file_to_r2(
+                        str(paths["map"]),
+                        f"events/{event_id}/risk_map.png",
+                        "image/png",
+                    )
+                    report["report"]["map_url"] = map_url
+                    _append_report_log(report, "Risk map uploaded to Cloudflare R2", "2026-06-13T18:05:10Z")
+            except Exception as exc:
+                warnings.append(f"R2 map upload failed: {_safe_error_message(exc)}")
 
         total_time_seconds = _elapsed_seconds(started_at)
         report["total_time_seconds"] = total_time_seconds

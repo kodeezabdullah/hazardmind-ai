@@ -1,13 +1,11 @@
 """Hugging Face Space entrypoint for the Report agent.
 
-Starts a tiny health server on $PORT (7860) so the Space stays "running", then
-runs the real agent (band_agent.py) unchanged in a background thread. The agent's
-collaboration logic is NOT modified.
+Starts a tiny health server on $PORT (7860) so the Space stays "running". The
+report pipeline itself now runs as a LangGraph node (see node.py) driven by
+the backend orchestrator, not as a standalone long-lived process here.
 """
 
 import os
-import runpy
-import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -22,11 +20,6 @@ class _Health(BaseHTTPRequestHandler):
         return
 
 
-def _run_agent():
-    runpy.run_path(os.path.join(os.path.dirname(__file__), "band_agent.py"), run_name="__main__")
-
-
 if __name__ == "__main__":
-    threading.Thread(target=_run_agent, daemon=True).start()
     port = int(os.getenv("PORT", "7860"))
     HTTPServer(("0.0.0.0", port), _Health).serve_forever()

@@ -1,0 +1,130 @@
+# =============================================================================
+# TEST ONLY — not a deployment artifact.
+# Phase 1 moves agents to Celery workers with separate images; do NOT merge
+# these into backend/requirements.txt (that file stays lightweight on purpose).
+#
+# This is the UNION of:
+#   backend/requirements.txt
+#   agents/satellite/requirements.txt
+#   agents/hazard/requirements.txt
+#   agents/impact/requirements.txt
+#   agents/report/requirements.txt
+#
+# so all four LangGraph agent nodes + the backend orchestrator can be imported
+# and run in ONE process for an end-to-end test. In production each agent runs
+# in its own venv/container, so these never coexist there.
+#
+# Conflict-resolution notes (documented for reproducibility):
+#   - fastapi:  backend 0.136.3 vs hazard/impact 0.115.0  -> 0.136.3 (highest)
+#   - starlette pinned 1.3.1 to satisfy fastapi 0.136.3
+#   - uvicorn:  backend 0.49.0 vs hazard 0.32.0 vs impact 0.30.6 -> 0.49.0
+#   - report's unpinned anthropic/asyncpg/boto3/jinja2 -> pinned to the versions
+#     already used by the other agents where one exists.
+#
+# EXCLUDED ON PURPOSE (Band transport was removed in the LangGraph migration —
+# these are no longer imported by any node.py / agent.py on the pipeline path;
+# band-sdk/thenvoi are also private/unpublishable pins that would break install):
+#   - band-sdk[langgraph]==1.0.0
+#   - thenvoi-client-rest==0.0.7
+#   - phoenix-channels-python-client==0.2.1
+#   - langchain-openai==1.3.2   (Band adapter only)
+#   - websockets==15.0.1        (Band WS transport only)
+# =============================================================================
+
+# --- Core web / async / config ---
+fastapi==0.136.3
+starlette==1.3.1
+uvicorn[standard]==0.49.0
+anyio==4.13.0
+sniffio==1.3.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+python-dotenv==1.2.2
+click==8.4.1
+colorama==0.4.6
+annotated-types==0.7.0
+annotated-doc==0.0.4
+typing_extensions==4.15.0
+typing-inspection==0.4.2
+
+# --- Pydantic ---
+pydantic==2.13.4
+pydantic_core==2.46.4
+
+# --- LangGraph (transport backbone) ---
+langgraph==1.2.5
+
+# --- Database ---
+asyncpg==0.30.0
+psycopg2-binary==2.9.12
+SQLAlchemy==2.0.50
+greenlet==3.5.1
+uuid==1.30
+
+# --- LLM providers ---
+openai==2.41.1
+anthropic==0.109.1
+jiter==0.15.0
+distro==1.9.0
+# google-genai is imported by shared/utils/llm_fallback.py's Gemini path. NB the
+# pipeline agents reach Gemini via their OWN intelligence.py using the OpenAI SDK
+# against Gemini's OpenAI-compatible endpoint, NOT this SDK — so llm_fallback's
+# Gemini link is effectively dormant on the pipeline path. Pinned here so the
+# import at least resolves in the single-process test.
+google-genai==2.14.0
+
+# --- HTTP / networking ---
+requests==2.34.2
+aiohttp==3.11.11
+aiofiles==23.2.1
+certifi==2026.5.20
+charset-normalizer==3.4.7
+idna==3.18
+urllib3==2.7.0
+
+# --- Geospatial (satellite + hazard + impact) ---
+numpy==2.4.6
+pandas==3.0.3
+geopandas==1.1.3
+shapely==2.1.2
+pyproj==3.7.2
+pyogrio==0.12.1
+rasterio==1.5.0
+affine==2.4.0
+attrs==26.1.0
+cligj==0.7.2
+pycountry==26.2.16
+
+# --- Cloud storage (satellite + report) ---
+boto3==1.43.29
+botocore==1.43.29
+s3transfer==0.18.0
+jmespath==1.1.0
+
+# --- Imaging / reporting (satellite + report) ---
+pillow==12.2.0
+matplotlib==3.11.0
+reportlab==4.5.1
+jinja2==3.1.4
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.63.0
+kiwisolver==1.5.0
+pyparsing==3.3.2
+
+# --- Misc shared transitives (pinned where an agent pinned them) ---
+cffi==2.0.0
+cryptography==49.0.0
+pycparser==3.0
+docstring-parser==0.18.0
+packaging==26.2
+PyYAML==6.0.3
+python-dateutil==2.9.0.post0
+six==1.17.0
+tqdm==4.68.2
+tzdata==2026.2
+
+# --- Test runner ---
+pytest==8.3.4
+pytest-asyncio==0.24.0

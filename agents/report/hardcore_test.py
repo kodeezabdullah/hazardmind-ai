@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -19,7 +18,6 @@ DEFAULT_OUTPUT_DIR = BASE_DIR / "generated" / "hardcore-test"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from band_contract import build_report_completion_message, extract_trailing_json, parse_report_trigger_message
 from db_client import (
     build_final_report_db_values,
     build_structured_report_context,
@@ -75,7 +73,6 @@ async def main() -> int:
     print()
 
     run_environment_safety_check(harness, include_r2=args.include_r2, include_db=args.include_db)
-    run_band_contract_tests(harness)
     fixtures = run_geometry_fixture_tests(harness)
     run_report_geometry_tests(harness, fixtures)
     run_artifact_tests(harness, fixtures, output_dir)
@@ -142,60 +139,6 @@ def run_environment_safety_check(harness: Harness, *, include_r2: bool, include_
     harness.check("environment check prints booleans only", True)
     harness.check("R2 env ready when --include-r2 is used", r2_ready or not include_r2)
     harness.check("DB env ready when --include-db is used", db_ready or not include_db)
-    print()
-
-
-def run_band_contract_tests(harness: Harness) -> None:
-    print("Band Contract")
-    fixture_path = FIXTURE_DIR / "report_trigger_message.txt"
-    harness.check("report trigger fixture exists", fixture_path.exists())
-    message = fixture_path.read_text(encoding="utf-8") if fixture_path.exists() else ""
-
-    try:
-        parsed_payload = parse_report_trigger_message(message)
-    except ValueError as exc:
-        harness.check("parse Band trigger message", False, str(exc))
-        parsed_payload = {}
-    else:
-        harness.check("parse Band trigger message", parsed_payload["to"] == "hazardmind-report")
-        harness.check("Band trigger has event_id", bool(parsed_payload.get("event_id")))
-        harness.check("Band trigger impact data parsed", bool(parsed_payload.get("impact_data")))
-
-    fenced = "Report payload follows.\n```json\n{\"ok\": true, \"nested\": {\"value\": 1}}\n```"
-    harness.check("extract trailing JSON from fenced text", extract_trailing_json(fenced).get("ok") is True)
-    try:
-        extract_trailing_json("No JSON object in this Band message.")
-    except ValueError:
-        harness.check("reject message with no JSON safely", True)
-    else:
-        harness.check("reject message with no JSON safely", False)
-
-    event_id = parsed_payload.get("event_id", "8f4f7c66-7d9c-4df8-8a4f-78c9bfaeaf21")
-    report = build_report_context(_load_fixture("valid_zones.geojson"))
-    report["event_id"] = event_id
-    report["report"]["pdf_url"] = f"https://public-r2.example/events/{event_id}/report.pdf"
-    report["report"]["map_url"] = f"https://hazardmind.vercel.app/map/{event_id}"
-    report["report"]["recommended_response_level"] = "NDMA Level-3"
-    result = {
-        "event_id": event_id,
-        "status": "complete",
-        "pdf_url": report["report"]["pdf_url"],
-        "map_url": report["report"]["map_url"],
-        "summary": report["report"]["summary"],
-        "confidence_level": "HIGH",
-        "recommended_response_level": "NDMA Level-3",
-        "report": report,
-    }
-    completion_message = build_report_completion_message(result)
-    completion_json = extract_trailing_json(completion_message)
-    completion_data = completion_json.get("data", {})
-    harness.check("completion message mentions orchestrator", "@hazardmind-orchestrator" in completion_message)
-    harness.check("completion JSON event_id matches", completion_json.get("event_id") == event_id)
-    harness.check("completion JSON agent matches", completion_json.get("agent") == "hazardmind-report")
-    harness.check("completion JSON status complete", completion_json.get("status") == "complete")
-    harness.check("completion JSON step report", completion_json.get("step") == "report")
-    for key in ("pdf_url", "map_url", "executive_summary", "confidence_level", "recommended_response_level"):
-        harness.check(f"completion JSON data.{key}", bool(completion_data.get(key)))
     print()
 
 
@@ -562,10 +505,18 @@ async def run_map_narrative_tests(harness: Harness) -> None:
 async def run_offline_contract_tests(harness: Harness, output_dir: Path) -> None:
     print("Offline Contract Mode")
     message_path = FIXTURE_DIR / "report_trigger_message.txt"
-    parsed_payload = parse_report_trigger_message(message_path.read_text(encoding="utf-8"))
+    trigger_payload = json.loads(_extract_json_tail(message_path.read_text(encoding="utf-8")))
+    incoming_payload = {
+        "event_id": trigger_payload["event_id"],
+        "from": trigger_payload.get("from", ""),
+        "to": trigger_payload.get("to", ""),
+        "impact_data": trigger_payload.get("data", {}),
+        "data": trigger_payload.get("data", {}),
+        "anomalies": trigger_payload.get("anomalies", []),
+    }
     result = await run_report_pipeline(
-        parsed_payload["event_id"],
-        incoming_payload=parsed_payload,
+        incoming_payload["event_id"],
+        incoming_payload=incoming_payload,
         use_llm=False,
         output_dir=str(output_dir / "offline-contract"),
     )
@@ -576,53 +527,9 @@ async def run_offline_contract_tests(harness: Harness, output_dir: Path) -> None
     harness.check("offline model source for summary", sources.get("executive_summary") == "offline_contract_test")
     harness.check("offline report JSON written", report_json_path.exists())
 
-    response_path = output_dir / "test-band-response.txt"
-    if response_path.exists():
-        response_path.unlink()
-    command = [
-        sys.executable,
-        str(BASE_DIR / "agent.py"),
-        "--band-message-file",
-        str(message_path),
-        "--emit-band-response",
-        "--band-response-output",
-        str(response_path),
-        "--contract-test",
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    harness.check("agent.py --band-message-file --contract-test exits cleanly", completed.returncode == 0, _short_output(completed))
-    harness.check("offline Band response file created", response_path.exists() and response_path.stat().st_size > 0)
-    if response_path.exists():
-        completion_json = extract_trailing_json(response_path.read_text(encoding="utf-8"))
-        data = completion_json.get("data", {})
-        harness.check("offline completion JSON valid", completion_json.get("agent") == "hazardmind-report")
-        harness.check("offline completion JSON has response level", bool(data.get("recommended_response_level")))
-
-    alias_path = output_dir / "test-band-response-alias.txt"
-    if alias_path.exists():
-        alias_path.unlink()
-    alias_command = [
-        sys.executable,
-        str(BASE_DIR / "agent.py"),
-        "--band-message-file",
-        str(message_path),
-        "--band-response-output",
-        str(alias_path),
-        "--no-llm",
-    ]
-    alias_completed = subprocess.run(alias_command, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=60)
-    harness.check("--no-llm remains contract-test alias", alias_completed.returncode == 0, _short_output(alias_completed))
-    harness.check("--no-llm alias writes response file", alias_path.exists() and alias_path.stat().st_size > 0)
-
     blocked = await run_report_pipeline(
-        parsed_payload["event_id"],
-        incoming_payload=parsed_payload,
+        incoming_payload["event_id"],
+        incoming_payload=incoming_payload,
         use_llm=False,
         upload_r2=True,
         write_db=True,
@@ -654,11 +561,14 @@ async def run_strict_production_failure_tests(harness: Harness, output_dir: Path
 
     harness.check("production LLM failure returns failed status", result.get("status") == "failed")
     harness.check("production LLM failure does not return fake report", "report" not in result)
-    completion = build_report_completion_message(result)
-    completion_json = extract_trailing_json(completion)
-    harness.check("failed production result emits failed Band status", completion_json.get("status") == "failed")
-    harness.check("failed production result does not emit complete Band status", completion_json.get("status") != "complete")
+    harness.check("failed production result reports failed status", result.get("status") == "failed")
+    harness.check("failed production result carries an error message", bool(result.get("error")))
     print()
+
+
+def _extract_json_tail(message: str) -> str:
+    start = message.index("{")
+    return message[start:]
 
 
 async def run_full_local_pipeline_test(harness: Harness, output_dir: Path) -> None:
@@ -816,11 +726,6 @@ def _polygon_errors(feature_collection: dict) -> list[str]:
             if not valid:
                 errors.extend(f"features[{index}]: {error}" for error in geometry_errors)
     return errors
-
-
-def _short_output(completed: subprocess.CompletedProcess) -> str:
-    text = (completed.stderr or completed.stdout or "").strip().replace("\n", " ")
-    return text[:180]
 
 
 if __name__ == "__main__":
