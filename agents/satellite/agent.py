@@ -825,6 +825,7 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         if interp_conf is not None:
             tracker.add_evidence("interpretation", interp_conf, weight=0.2)
         confidence = round(tracker.overall_confidence(), 4)
+        confidence_report = tracker.get_report()
         anomalies = (interpretation or {}).get("anomalies") or []
 
         # INTEGRATION POINT 6 — confidence quality gate. Below MIN_CONFIDENCE the
@@ -907,6 +908,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # weighted blend of external checks + the expert interpretation),
             # not the LLM's self-rating alone.
             "confidence": confidence,
+            # Legibility for the confidence number: how much evidence went
+            # into it and whether the low end (if it's low) means "we could
+            # not gather evidence" vs "the evidence itself is unfavourable" —
+            # see ConfidenceTracker.confidence_basis(). Not a recalibration of
+            # the arithmetic, just making the existing heuristic legible.
+            "evidence_count": confidence_report["evidence_count"],
+            "confidence_basis": confidence_report["confidence_basis"],
             # Cross-validation: concerns raised, per-source findings, and the
             # two action flags the caller cares about.
             "concerns": tracker.concerns,
