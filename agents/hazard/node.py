@@ -26,8 +26,9 @@ async def hazard_node(state: PipelineState) -> dict:
     """
     event_id = state["event_id"]
     satellite_result = state.get("satellite_result") or {}
+    disaster_type = state.get("disaster_type") or "flood"
 
-    result = await analyze_hazard(satellite_result, event_id)
+    result = await analyze_hazard(satellite_result, event_id, disaster_type=disaster_type)
 
     if result.get("status") != "complete":
         logger.error("Hazard stage failed for %s: %s", event_id, result)

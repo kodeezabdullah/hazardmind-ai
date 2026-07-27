@@ -174,11 +174,26 @@ async def write_to_db(result: dict) -> None:
         await conn.close()
 
 
-async def analyze_hazard(satellite_payload: dict, event_id: str) -> dict:
+_PRIMARY_RISK_KEY = {
+    "flood": "flood_risk",
+    "earthquake": "earthquake_risk",
+    "landslide": "landslide_risk",
+}
+
+
+async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: str = "flood") -> dict:
     """Run multi-hazard analysis and write hazard_zones. Returns the result payload.
 
     Never raises — failures are reported as a ``status: error`` payload so the
     caller (the LangGraph node) can propagate them into PipelineState.
+
+    ``disaster_type`` is the dispatch's ACTUAL disaster type (from
+    PipelineState, set once by the backend). All three hazard types are still
+    analyzed unconditionally (existing behavior, unchanged) but the result now
+    also surfaces ``primary_hazard_risk`` — an unambiguous field naming the
+    risk level for the disaster actually being assessed, so downstream
+    consumers (impact) don't have to guess via a flood_risk-first fallback
+    chain that silently reads LOW/UNKNOWN on a real non-flood event (H#10).
     """
     satellite_payload = dict(satellite_payload or {})
     satellite_payload["event_id"] = event_id
@@ -205,15 +220,23 @@ async def analyze_hazard(satellite_payload: dict, event_id: str) -> dict:
 
         await write_to_db(raw_result)
 
+        primary_key = _PRIMARY_RISK_KEY.get(str(disaster_type or "").lower(), "flood_risk")
+        primary_hazard_risk = raw_result.get(primary_key, "UNKNOWN")
+
         payload = {
             "agent": "hazardmind-hazard",
             "event_id": event_id,
             "status": "complete",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hazard": {
+                "disaster_type": disaster_type,
                 "flood_risk": raw_result["flood_risk"],
                 "earthquake_risk": raw_result["earthquake_risk"],
                 "landslide_risk": raw_result["landslide_risk"],
+                # The risk level for the ACTUAL disaster this event was
+                # dispatched to assess — additive, does not replace the
+                # per-hazard-type fields above (H#10 fix).
+                "primary_hazard_risk": primary_hazard_risk,
                 "overall_severity": raw_result["overall_severity"],
                 "confidence_scores": raw_result["confidence_scores"],
                 "risk_polygons": {},
