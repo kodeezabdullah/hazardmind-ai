@@ -473,6 +473,22 @@ def calculate_confidence_level(report: dict) -> str:
     # stage's confidence, since the report's reliability can never exceed its
     # least-confident input.
     combined = min(values)
+    weakest = min(values)
+    # H#6 explicit invariant: the combined figure this function derives its
+    # HIGH/MEDIUM/LOW verdict from must never exceed the weakest per-stage
+    # confidence that fed into it. This is a natural consequence of min()
+    # today, but a future refactor that swaps the aggregation method (e.g. to
+    # a weighted average) could silently violate it -- assert it explicitly so
+    # such a refactor trips a loud failure immediately instead of silently
+    # degrading the exact guarantee this function exists to provide (a
+    # near-zero satellite/hazard confidence must never be smoothed away by
+    # higher-confidence stages).
+    assert combined <= weakest, (
+        "calculate_confidence_level: combined confidence "
+        f"({combined}) exceeds the weakest per-stage confidence "
+        f"({weakest}) that fed into it -- the min()-dominant guarantee has "
+        f"been violated. values={values}"
+    )
     if combined >= 0.8:
         return "HIGH"
     if combined >= 0.6:

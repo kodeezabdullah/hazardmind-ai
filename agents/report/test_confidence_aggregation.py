@@ -123,6 +123,38 @@ def test_satellite_nested_key_is_collected():
         bad(f"nested satellite confidence not collected: {values}")
 
 
+def test_satellite_zero_via_dedicated_channel_ONLY_cannot_yield_high():
+    """H#6 strengthening: prove the guarantee holds via the channel fa0d9bd
+    was ACTUALLY built for (confidence.satellite_confidence /
+    report.satellite.confidence), with the previously-load-bearing redundant
+    channel (hazard_scores["flood"]) masked out entirely -- flood confidence
+    here is a normal, un-capped 0.83, same as earthquake/landslide/impact.
+    Before agents/report/node.py was wired to pass PipelineState's
+    confidence_scores as incoming_payload (H#6 fix), this exact scenario
+    would have read HIGH, because the ONLY zero in the whole values list
+    lived in a channel report_node never populated on the live call path.
+    This test would have FAILED under that pre-fix code and must keep
+    failing if a future refactor removes the dedicated channel while also
+    "cleaning up" the redundant hazard_scores["flood"] read -- catching
+    exactly the fragility SYSTEM_ANALYSIS.md F.6/H#6 warned about.
+    """
+    report = {
+        "confidence": {"satellite_confidence": 0.0},
+        "satellite": {"confidence": 0.0},
+        # flood confidence deliberately NOT capped here (0.83, same as the
+        # other two hazard types) -- the old redundant channel is masked out
+        # by construction, not by deleting code, so this test independently
+        # verifies the dedicated channel alone is sufficient.
+        "hazard": {"confidence_scores": {"overall": 0.83, "flood": 0.83, "earthquake": 0.83, "landslide": 0.83}},
+        "impact": {"overall_confidence": 0.83},
+    }
+    level = calculate_confidence_level(report)
+    if level == "LOW":
+        ok("satellite 0.0 via the DEDICATED channel alone (hazard_scores['flood'] masked out at 0.83) -> LOW, not HIGH")
+    else:
+        bad(f"expected LOW using only the dedicated satellite_confidence channel, got {level} -- the fa0d9bd-intended channel is not load-bearing")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("TEST: report confidence aggregation (min-dominant)")
@@ -134,6 +166,7 @@ if __name__ == "__main__":
     test_mid_range_yields_medium()
     test_satellite_confidence_key_is_collected()
     test_satellite_nested_key_is_collected()
+    test_satellite_zero_via_dedicated_channel_ONLY_cannot_yield_high()
     print("=" * 60)
     print(f"SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 60)

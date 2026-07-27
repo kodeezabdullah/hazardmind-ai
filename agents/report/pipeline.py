@@ -305,6 +305,23 @@ def _missing_context_warnings(context: dict) -> list[str]:
 def _merge_incoming_payload_into_context(context: dict, incoming_payload: dict) -> None:
     data = _incoming_data(incoming_payload)
     impact = context.setdefault("impact", {})
+
+    # H#6: make satellite's confidence a genuinely live input to
+    # _collect_confidence_values's satellite_confidence/satellite.confidence
+    # reads on the production call path (report_node now passes
+    # PipelineState["confidence_scores"] through as incoming_payload -- see
+    # node.py). Previously these two keys were dead: report_node called
+    # run_report_pipeline with no incoming_payload at all, so the ONLY
+    # channel satellite confidence had into the final min() was hazard's
+    # flood-specific confidence cap flowing through hazard_scores["flood"] --
+    # real, but load-bearing by redundancy rather than by design. This wires
+    # the intended channel so it is genuinely live, not merely present in a
+    # diff (SYSTEM_ANALYSIS.md B.7-B.9).
+    confidence_scores = incoming_payload.get("confidence_scores")
+    if isinstance(confidence_scores, dict) and confidence_scores.get("satellite") is not None:
+        satellite_confidence = confidence_scores.get("satellite")
+        context.setdefault("confidence", {})["satellite_confidence"] = satellite_confidence
+        context.setdefault("satellite", {})["confidence"] = satellite_confidence
     mappings = {
         "total_affected": "population_affected",
         "high_risk_people": "high_risk_people",

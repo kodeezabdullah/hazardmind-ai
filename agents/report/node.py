@@ -27,12 +27,19 @@ async def report_node(state: PipelineState) -> dict:
     """
     event_id = state["event_id"]
 
+    # H#6: thread PipelineState's confidence_scores through as incoming_payload
+    # so satellite's confidence becomes a genuinely live input to report's
+    # confidence aggregation (agents/report/pipeline.py's
+    # _merge_incoming_payload_into_context), not just a dead read key. This is
+    # additive on top of the existing DB-fetch context — fetch_from_db and
+    # incoming_payload are already designed to compose (see pipeline.py).
     result = await run_report_pipeline(
         event_id=event_id,
         fetch_from_db=True,
         upload_r2=True,
         write_db=True,
         use_llm=True,
+        incoming_payload={"confidence_scores": state.get("confidence_scores") or {}},
     )
 
     if result.get("status") == "failed":
