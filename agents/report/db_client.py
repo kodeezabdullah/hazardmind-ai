@@ -377,8 +377,27 @@ def db_context_to_report_context(db_context: dict) -> dict:
             "geojson_url": latest_satellite.get("geojson_url") or "",
         },
         "analysis": {
-            "index_type": "database_result",
+            # H#5: previously hardcoded "database_result"/0 for every DB-fetched
+            # report (the live path — report_node calls run_report_pipeline
+            # with fetch_from_db=True and no incoming_payload), meaning the
+            # report LLM never saw the real satellite index label at all.
+            # satellite_results has no index_type/mean_value column (confirmed
+            # live 2026-07-28), so derive the calibration-relevant label from
+            # satellite_type — the only column that actually distinguishes
+            # SAR (uncalibrated) from optical (calibrated NDWI/NDVI) here.
+            "index_type": _index_type_label(latest_satellite.get("satellite_type")),
+            # mean_value genuinely is not persisted anywhere the report DB-fetch
+            # path can read (satellite_results has no such column) — 0 stays a
+            # placeholder here, but is now paired with an honest index_type/
+            # index_calibrated label instead of a meaningless one, so a report
+            # prompt/reader can at least tell "no real index value available"
+            # from "index value is 0".
             "mean_value": 0,
+            # H#11: SAR (uncalibrated, no radiometric LUT/speckle filter/terrain
+            # correction) vs NDWI/NDVI (treated as calibrated for this labeling
+            # purpose) — cheapest correct derivation available from what's
+            # actually in the DB row today.
+            "index_calibrated": _index_calibrated(latest_satellite.get("satellite_type")),
             "affected_area_km2": latest_satellite.get("affected_area_km2") or 0,
             "damage_percent": latest_satellite.get("damage_percent") or 0,
             "total_zones": latest_satellite.get("total_zones") or len(hazard_geojson.get("features", [])),
@@ -761,6 +780,35 @@ def _route_geojson_list(value) -> list:
                 routes.extend(_route_geojson_list(route))
         return routes
     return []
+
+
+def _index_type_label(satellite_type: str | None) -> str:
+    """Derive the satellite index label from satellite_type (H#5).
+
+    satellite_results has no index_type column, but satellite_type ("sentinel-1"
+    vs "sentinel-2") is exactly what distinguishes SAR from optical NDWI/NDVI in
+    this codebase — cheap and correct for report-prompt labeling purposes.
+    """
+    sat = str(satellite_type or "").lower()
+    if "sentinel-1" in sat or sat in ("sar", "s1"):
+        return "SAR"
+    if "sentinel-2" in sat or sat in ("optical", "s2"):
+        return "NDWI/NDVI"
+    return "unknown"
+
+
+def _index_calibrated(satellite_type: str | None) -> bool | None:
+    """H#11: SAR is never calibrated in this codebase (no radiometric LUT,
+    speckle filter, or terrain correction — see satellite/ANALYSIS.md's SAR
+    section). NDWI/NDVI (optical) is treated as calibrated for labeling
+    purposes. None if satellite_type itself is unknown/absent.
+    """
+    sat = str(satellite_type or "").lower()
+    if "sentinel-1" in sat or sat in ("sar", "s1"):
+        return False
+    if "sentinel-2" in sat or sat in ("optical", "s2"):
+        return True
+    return None
 
 
 def _overall_severity(event: dict, hazard_zones: list[dict]) -> str:
