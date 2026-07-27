@@ -9,6 +9,116 @@
 > integration instructions. A full rewrite is tracked as a known issue in the
 > root `CLAUDE.md`.
 
+## 2026-07-27 — Correctness/contract fixes (ANALYSIS.md pass)
+
+Fixed the correctness and contract gaps ANALYSIS.md flagged (its science gaps
+#3/#7/#8 and the hazard-agent gaps #4/#5 are separate sessions, not this one).
+
+**DB persist failure now fails the pipeline honestly (agent.py).**
+`_persist_satellite_result` previously caught any INSERT exception and logged
+a warning while the pipeline still returned `status:"complete"` — a Neon
+outage produced a "successful" run with no durable row. It now retries up to
+3 attempts with backoff (1s, 3s) and, if every attempt fails, returns the
+error string to the caller; `_run_pipeline_sync` treats a non-`None` return as
+a hard failure (`status:"error"`), never `"complete"`. The failure also rides
+in `structured["pipeline_log_entry"]` before the error payload is built.
+
+**`_polygon_area_km2` no longer degrades to mislabeled degrees² (processor.py).**
+Its `except Exception: return geom.area` fallback silently returned a
+degrees²-magnitude number under the `affected_area_km2` field name — off by
+~4 orders of magnitude at mid-latitudes, indistinguishable from a real value.
+The reprojection failure now propagates (no `try/except` at all); a missing
+number is safe, a wrong number with a correct-looking label is not. Swept the
+rest of the agent for the same fallback shape (an `except` returning a
+plausible-but-wrong-unit value under an unchanged field name) — no second
+instance found; every other geometric fallback in this codebase either
+re-raises, returns `None`/a neutral sentinel with logging, or only ever uses
+raw-degree `.area` as a ratio (where the unit cancels), never as a labelled
+measurement.
+
+**Confidence basis is now legible, not just a bare float
+(confidence_tracker.py, agent.py).** `overall_confidence()` could not be told
+apart between "no evidence was gathered" and "evidence contradicts the
+result" — both read as near-zero. Added `ConfidenceTracker.confidence_basis()`
+returning `"insufficient_evidence"` / `"evidence_contradicts"` /
+`"evidence_supports"`, and `get_report()` (already existed, was never called)
+is now called and its `evidence_count`/`confidence_basis` ride into
+`structured`. The underlying weighted-average-minus-penalty arithmetic is
+**unchanged** — this is a legibility fix, not a recalibration; a real
+calibration pass needs accuracy data this repo doesn't have yet.
+
+**`total_zones`/`scene_id` now actually populate the columns the INSERT
+already named (agent.py, processor.py).** `total_zones` was computed (used in
+two LLM calls) but never added to `structured` — every `satellite_results`
+row persisted it as NULL. `scene_id` is now the comma-joined product Id(s) of
+the scene(s) actually accepted into the merged mosaic (threaded through
+`process_satellite_imagery`'s return). `damage_percent` was named in the
+INSERT but has **no producer anywhere in the codebase** (satellite, hazard, or
+elsewhere) — removed from the INSERT rather than persisting a value that will
+be permanently NULL forever; the column itself stays in the DB schema
+(nullable) so `agents/report/db_client.py`'s existing `.get("damage_percent")
+or 0` read is unaffected.
+
+**Degraded R2 uploads are now explicit (r2_upload.py, agent.py).**
+`upload_all_results` returns a `failed_artifacts` list (which artifact keys
+came back `None`) alongside the URLs; `structured` now carries
+`artifacts_incomplete: bool` + `failed_artifacts: list[str]` (merged +
+per-city, the latter prefixed `cities/<slug>/<artifact>`), so a downstream
+consumer no longer has to null-check every URL individually to discover the
+run degraded.
+
+**Per-city artifact rendering is now a feature flag, not hardcoded off
+(agent.py).** `ENABLE_PER_CITY_ARTIFACTS` (env var, default `false`) now
+gates `city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None` at
+the one call site — previously `city_boundaries=None` was unconditional, so
+the fully-implemented `_render_per_city` path (and its
+`MIN_VALID_PIXEL_PERCENT` skip-check) was permanently unreachable in
+production with no way to turn it on. Still disabled by default: re-clipping
+a multi-tile mosaic once per city multiplies peak RSS on top of the 100%
+valid-pixel coverage requirement, which already peaked ~9.6 GB at just 2
+mosaicked tiles on a live run (see the 2026-07-26 e2e section below). Flip it
+on once satellite memory sizing/headroom work lands — it is a considered,
+reversible tradeoff, not dead code. `select_mosaic_scenes` (sentinel.py) and
+its `COVERAGE_MOSAIC_THRESHOLD`/`MOSAIC_MAX_SCENES` constants (both copies,
+sentinel.py + processor.py) **were** genuinely dead — confirmed zero callers
+outside their own definitions and no test references — and were deleted; they
+were the greedy-set-cover mosaic strategy from Step 10, superseded by the
+tiered-temporal-coherence design (BUG 3) which does its own simpler
+best-first-within-tier acceptance instead.
+
+**Tier-window revisit analysis (design review, no code change).** ANALYSIS.md
+flagged that the coverage tiers' day windows (0/±3/±7/±14) aren't derived from
+either satellite's actual revisit cycle. Checked with a live CDSE query
+(OData, `$expand=Attributes`, last 90 days) against two Pakistani AOIs:
+
+- **Sentinel-2**: combined-constellation revisit is ~5 days; the existing
+  tiers are a reasonable match, no finding here.
+- **Sentinel-1**: measured the actual same-relative-orbit gap over Rawalpindi
+  (orbits 100/107/173) and Karachi (orbits 42/78/115) — **overwhelmingly
+  11 days**, with occasional 6-day and one rare 12-day gap. Note this is
+  **not** the newer Sentinel-1C/1D 6-day constellation repeat cycle that took
+  effect after Sentinel-1A's 2026-06-29 retirement — that faster cadence is
+  concentrated over Europe per ESA/ASF acquisition planning, not applied
+  globally, so Pakistan is still effectively on single-satellite ~11-12 day
+  cadence in practice. This confirms the live tier-1-3-exactly-0% finding
+  below (BUG 3's own verification): tiers 2 (±3d) and 3 (±7d) are structurally
+  unable to find a second same-relative-orbit S1 pass over this AOI class,
+  since 7 < 11 regardless of window tuning.
+  **Left unchanged.** The cost of a near-no-op tier is cheap — zero downloads
+  attempted, `build_coverage_tiers` just skips an empty group
+  (`if not in_window: continue`) — and any widening would touch validated,
+  live-e2e-tested tier behavior (the 2026-07-26 88ad6095 run) for an unproven
+  benefit. This measurement is also the direct input needed for a future S1
+  bi-temporal change-detection feature (see the NDVI single-scene-threshold
+  gap noted for earthquake/landslide analysis) — a pre-event reference scene
+  must share the post-event scene's relative orbit, so ~11 days is the
+  realistic minimum useful baseline gap for that AOI.
+
+See `agents/satellite/ANALYSIS.md` for the full pre-fix audit these six items
+were drawn from (§10, the prioritized gap list).
+
+---
+
 ## 2026-07-26 — Coverage/CRS correctness pass (100% valid-pixel AOI coverage)
 
 Fixed the satellite agent's coverage and correctness bugs (Band/LangGraph

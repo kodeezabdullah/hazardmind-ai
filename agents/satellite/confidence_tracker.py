@@ -143,11 +143,35 @@ class ConfidenceTracker:
         """The subset of concerns at CRITICAL severity."""
         return [c for c in self.concerns if c["severity"] == "CRITICAL"]
 
+    def confidence_basis(self) -> str:
+        """Why the confidence number is what it is — legibility, not calibration.
+
+        ``overall_confidence()`` alone cannot tell "we gathered no evidence"
+        from "the evidence contradicts the result" — both read as near-zero to
+        a caller that only sees the float. This makes that distinction
+        explicit without changing the arithmetic:
+
+        * ``"insufficient_evidence"`` — no evidence was ever gathered (every
+          reachable source was unreachable/skipped). The pipeline could not
+          say anything, favourable or not.
+        * ``"evidence_contradicts"`` — evidence was gathered, but the score is
+          still low: at least one CRITICAL concern fired, or the weighted
+          evidence average was dragged below the verification threshold.
+        * ``"evidence_supports"`` — evidence was gathered and the result reads
+          as reliable.
+        """
+        if not self.evidence:
+            return "insufficient_evidence"
+        if self.should_alert_team() or self.needs_verification():
+            return "evidence_contradicts"
+        return "evidence_supports"
+
     def get_report(self) -> dict[str, Any]:
         """A compact, JSON-serialisable snapshot of the current state."""
         return {
             "overall": round(self.overall_confidence(), 4),
             "evidence_count": len(self.evidence),
+            "confidence_basis": self.confidence_basis(),
             "concerns": self.concerns,
             "needs_verification": self.needs_verification(),
             "should_alert": self.should_alert_team(),

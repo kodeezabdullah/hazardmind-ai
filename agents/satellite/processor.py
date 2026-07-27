@@ -60,12 +60,6 @@ DOWNLOAD_URL = (
 # the system temp dir keeps intermediate artifacts out of the repo.
 TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
 
-# A single scene covering less than this percentage of the AOI triggers a
-# multi-tile mosaic of the top-ranked scenes (FIX 2). Raised 60 -> 85 so
-# scattered multi-city AOIs (best single tile still misses cities) mosaic.
-COVERAGE_MOSAIC_THRESHOLD = 85.0
-# How many top-scored scenes to mosaic when one scene is not enough.
-MOSAIC_MAX_SCENES = 3
 # After clipping, a result with fewer than this percentage of valid (non-nodata)
 # pixels inside the risk polygon is rejected and the next scene is tried
 # (FIX 3).
@@ -1620,22 +1614,24 @@ def export_png(
 # Step 7G: vectorize the classification into GeoJSON zones
 # --------------------------------------------------------------------------- #
 def _polygon_area_km2(geom, crs) -> float:
-    """Approximate a WGS84/geographic polygon's area in km^2.
+    """Compute a WGS84/geographic polygon's area in km^2.
 
     Reprojects to a world equal-area projection (EPSG:6933) for the measure.
+    This must never silently degrade to a degrees^2 value mislabeled as km^2
+    (off by ~4 orders of magnitude at mid-latitudes, and indistinguishable
+    from a real value downstream) — if the equal-area reprojection fails, that
+    is a hard failure: it propagates so the pipeline returns status:"failed"
+    instead of shipping a wrong-but-plausible-looking area.
     """
-    try:
-        from pyproj import Transformer
+    from pyproj import Transformer
 
-        transformer = Transformer.from_crs(
-            crs if crs else "EPSG:4326", "EPSG:6933", always_xy=True
-        )
-        projected = shapely_transform(
-            lambda x, y, z=None: transformer.transform(x, y), geom
-        )
-        return projected.area / 1e6
-    except Exception:  # noqa: BLE001 - area is best-effort
-        return geom.area  # degrees^2 fallback; only used for relative size
+    transformer = Transformer.from_crs(
+        crs if crs else "EPSG:4326", "EPSG:6933", always_xy=True
+    )
+    projected = shapely_transform(
+        lambda x, y, z=None: transformer.transform(x, y), geom
+    )
+    return projected.area / 1e6
 
 
 # Hazard class value -> severity label (class 1 lowest, 3 highest).
@@ -2347,6 +2343,10 @@ def process_satellite_imagery(
                 return None
 
             bytes_after = _bytes_downloaded_total()
+            # Scene id(s) actually accepted into this result — comma-joined
+            # since a mosaic can accept more than one acquisition, but
+            # satellite_results.scene_id is a single text column.
+            scene_ids = [s.get("Id") or s.get("Name") for s in accepted if s.get("Id") or s.get("Name")]
             merged_result.update({
                 "valid_percent": round(cov["interior_coverage_percent"], 2),
                 "coverage_percent": cov["interior_coverage_percent"],
@@ -2357,6 +2357,7 @@ def process_satellite_imagery(
                 "orbit_direction": orbit_dir,
                 "coverage_gaps": [],
                 "bytes_downloaded": bytes_after - bytes_before,
+                "scene_id": ",".join(scene_ids) if scene_ids else None,
                 "processing_level": (
                     "L2A" if satellite_type == "sentinel-2" else None
                 ),

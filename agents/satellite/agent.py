@@ -68,69 +68,101 @@ logger = logging.getLogger(__name__)
 _completed_event_ids: set[str] = set()
 
 
-def _persist_satellite_result(event_id: str, structured: dict) -> None:
-    """Write the satellite result straight to the DB.
+# Persist retry policy: a transient Neon outage must not be reported as a
+# successful "complete" run with no durable row (the pipeline's success claim
+# has to match what actually landed in the DB, not what merely computed
+# successfully in memory).
+PERSIST_MAX_ATTEMPTS = 3
+PERSIST_RETRY_BACKOFF_SECONDS = (1, 3)  # delay before attempt 2, before attempt 3
+
+
+def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
+    """Write the satellite result straight to the DB, retrying on failure.
 
     The DB is the durable record downstream nodes/agents read from GET
     /results. Columns mirror satellite_results; jsonb columns are passed as
     JSON strings. Idempotent per event: an existing row is replaced.
+
+    Retries up to PERSIST_MAX_ATTEMPTS times with backoff. Returns None on
+    success, or an error string describing the final failure — the caller
+    must treat a non-None return as a hard pipeline failure (status:"failed"),
+    never as "complete", since a "complete" status with no durable row is
+    silently indistinguishable from a real success to any DB-reading consumer.
     """
+    import time
+
     db_url = os.getenv("NEON_DATABASE_URL")
     if not db_url:
-        return
-    try:
-        import asyncpg
+        return "NEON_DATABASE_URL is not configured"
 
-        def _f(k):
-            v = structured.get(k)
-            try:
-                return float(v) if v is not None else None
-            except (TypeError, ValueError):
-                return None
+    def _f(k):
+        v = structured.get(k)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
-        def _i(k):
-            v = structured.get(k)
-            try:
-                return int(v) if v is not None else None
-            except (TypeError, ValueError):
-                return None
+    def _i(k):
+        v = structured.get(k)
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
-        async def _write():
-            conn = await asyncpg.connect(db_url)
-            try:
-                async with conn.transaction():
-                    await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
-                    await conn.execute(
-                        """
-                        INSERT INTO satellite_results
-                            (event_id, satellite_type, cloud_cover, scene_id,
-                             true_color_url, index_url, classification_url, geojson_url,
-                             affected_area_km2, damage_percent, total_zones,
-                             bounds, bbox, risk_cities)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-                        """,
-                        event_id,
-                        structured.get("satellite_type"),
-                        _f("cloud_cover"),
-                        structured.get("scene_id"),
-                        structured.get("true_color_url"),
-                        structured.get("index_url"),
-                        structured.get("classification_url"),
-                        structured.get("geojson_url"),
-                        _f("affected_area_km2"),
-                        _f("damage_percent"),
-                        _i("total_zones"),
-                        json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
-                        json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
-                        json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
-                    )
-            finally:
-                await conn.close()
+    import asyncpg
 
-        asyncio.run(_write())
-        logger.info("Persisted satellite_results row for event %s", event_id)
-    except Exception as exc:  # noqa: BLE001 - DB write is best-effort
-        logger.warning("Could not persist satellite_results for %s: %s", event_id, exc)
+    async def _write():
+        conn = await asyncpg.connect(db_url)
+        try:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
+                await conn.execute(
+                    """
+                    INSERT INTO satellite_results
+                        (event_id, satellite_type, cloud_cover, scene_id,
+                         true_color_url, index_url, classification_url, geojson_url,
+                         affected_area_km2, total_zones,
+                         bounds, bbox, risk_cities)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                    """,
+                    event_id,
+                    structured.get("satellite_type"),
+                    _f("cloud_cover"),
+                    structured.get("scene_id"),
+                    structured.get("true_color_url"),
+                    structured.get("index_url"),
+                    structured.get("classification_url"),
+                    structured.get("geojson_url"),
+                    _f("affected_area_km2"),
+                    _i("total_zones"),
+                    json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
+                    json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
+                    json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
+                )
+        finally:
+            await conn.close()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, PERSIST_MAX_ATTEMPTS + 1):
+        try:
+            asyncio.run(_write())
+            logger.info(
+                "Persisted satellite_results row for event %s (attempt %d/%d)",
+                event_id, attempt, PERSIST_MAX_ATTEMPTS,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - retried below; final failure surfaces to caller
+            last_exc = exc
+            logger.warning(
+                "Persist attempt %d/%d failed for %s: %s",
+                attempt, PERSIST_MAX_ATTEMPTS, event_id, exc,
+            )
+            if attempt < PERSIST_MAX_ATTEMPTS:
+                time.sleep(PERSIST_RETRY_BACKOFF_SECONDS[attempt - 1])
+
+    error_message = f"DB persist failed after {PERSIST_MAX_ATTEMPTS} attempts: {last_exc}"
+    logger.error("Could not persist satellite_results for %s: %s", event_id, error_message)
+    return error_message
 
 
 # LLM intelligence layer (Featherless chain + Opus last resort). Shared across
@@ -149,6 +181,17 @@ MAX_STEP_ATTEMPTS = 3
 # Below this overall confidence we treat the result as low-quality and ask the
 # intelligence layer how to improve (integration point 6, quality gate).
 MIN_CONFIDENCE = 0.6
+
+# Per-city artifact rendering (individual PNG/GeoJSON layers per risk city,
+# re-clipped from the already-accepted mosaic) is fully implemented
+# (processor._render_per_city) but disabled by default: re-clipping a
+# multi-tile mosaic once per city multiplies peak RSS on top of the 100%
+# valid-pixel coverage requirement, which already peaked ~9.6 GB at just 2
+# mosaicked tiles on a live run (see CLAUDE.md's Step 13 FIX 5 / 2026-07-26
+# memory notes). Flip via ENABLE_PER_CITY_ARTIFACTS=true once satellite
+# memory sizing/headroom work lands; until then this is a deliberate,
+# documented tradeoff, not dead code.
+ENABLE_PER_CITY_ARTIFACTS = os.getenv("ENABLE_PER_CITY_ARTIFACTS", "false").strip().lower() == "true"
 
 
 # --------------------------------------------------------------------------- #
@@ -594,12 +637,12 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # deep inside the pipeline can refresh it as the run proceeds.
             selection, scenes, bbox, merged, event_id, token_manager, disaster_type,
             city_geoms=city_geoms,
-            # Per-city artifacts are intentionally disabled: re-clipping the full
-            # mosaic to each city is very expensive on a large multi-tile AOI
-            # (the merged whole-area clip already gives the frontend and hazard
-            # agent everything they need). `city_geoms` is still passed so the
-            # mosaic set-cover spreads scenes across the scattered cities.
-            city_boundaries=None,
+            # Per-city artifacts are disabled by default (ENABLE_PER_CITY_ARTIFACTS,
+            # see its definition above) — re-clipping the full mosaic to each city
+            # is expensive on a large multi-tile AOI. `city_geoms` is always passed
+            # regardless, so the mosaic set-cover still spreads scenes across the
+            # scattered cities either way.
+            city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None,
             # Tiers 3/4 lower confidence + append an anomaly through this tracker.
             tracker=tracker,
         )
@@ -671,6 +714,10 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                 "geojson": result["geojson"],
             },
         )
+        # A missing artifact is not fatal (the run may still be useful without
+        # one PNG), but the degraded state must be explicit rather than
+        # something every downstream consumer has to null-check for.
+        failed_artifacts = list(urls.get("failed_artifacts") or [])
 
         # (h.2) Per-city artifacts (multi-city AOIs). Each city's PNGs + GeoJSON
         # were rendered from the same mosaic and namespaced under
@@ -704,6 +751,8 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                     "geojson_url": city_urls["geojson_url"],
                 }
             )
+            for artifact in city_urls.get("failed_artifacts") or []:
+                failed_artifacts.append(f"cities/{slug}/{artifact}")
         if cities_payload:
             logger.info(
                 "Uploaded %d per-city artifact set(s) for %s",
@@ -792,6 +841,7 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         if interp_conf is not None:
             tracker.add_evidence("interpretation", interp_conf, weight=0.2)
         confidence = round(tracker.overall_confidence(), 4)
+        confidence_report = tracker.get_report()
         anomalies = (interpretation or {}).get("anomalies") or []
 
         # INTEGRATION POINT 6 — confidence quality gate. Below MIN_CONFIDENCE the
@@ -835,6 +885,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "mean_index": result["mean_index"],
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
+            # The satellite_results INSERT names these columns; total_zones was
+            # already computed above (used in the LLM calls) but previously
+            # dropped before reaching structured, and scene_id is the accepted
+            # scene(s)' product id(s) from process_satellite_imagery. Both
+            # persisted every row as NULL before this fix.
+            "total_zones": total_zones,
+            "scene_id": result.get("scene_id"),
             # BUG 5 — explicit calibration contract so the hazard agent can
             # branch on a real field instead of inferring from satellite_type.
             # SAR is 10*log10(raw GRD DN): uncalibrated, no speckle filter, no
@@ -862,6 +919,11 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "classification_url": urls["classification_url"],
             "geojson_url": urls["geojson_url"],
             "image_url": urls["classification_url"] or urls["true_color_url"],
+            # A degraded R2 upload (missing PNG/GeoJSON) is not fatal, but must
+            # be explicit rather than something every downstream consumer has
+            # to discover by null-checking each artifact URL individually.
+            "artifacts_incomplete": bool(failed_artifacts),
+            "failed_artifacts": failed_artifacts,
             "cached": False,
             # Per-city artifacts + summaries (multi-city AOIs). Each entry has
             # its own PNGs/GeoJSON URLs and bounds, so downstream consumers and
@@ -874,6 +936,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # weighted blend of external checks + the expert interpretation),
             # not the LLM's self-rating alone.
             "confidence": confidence,
+            # Legibility for the confidence number: how much evidence went
+            # into it and whether the low end (if it's low) means "we could
+            # not gather evidence" vs "the evidence itself is unfavourable" —
+            # see ConfidenceTracker.confidence_basis(). Not a recalibration of
+            # the arithmetic, just making the existing heuristic legible.
+            "evidence_count": confidence_report["evidence_count"],
+            "confidence_basis": confidence_report["confidence_basis"],
             # Cross-validation: concerns raised, per-source findings, and the
             # two action flags the caller cares about.
             "concerns": tracker.concerns,
@@ -909,8 +978,21 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             logger.info("Generated natural hand-off summary (%d chars)", len(band_message))
 
         # Persist the authoritative result to the DB — the durable record
-        # downstream nodes/agents and GET /results read from.
-        _persist_satellite_result(event_id, structured)
+        # downstream nodes/agents and GET /results read from. The pipeline may
+        # not report "complete" for work that was not durably recorded: a
+        # transient Neon outage here must surface as a hard failure, not a
+        # silently-swallowed warning behind an otherwise-successful result.
+        persist_error = _persist_satellite_result(event_id, structured)
+        if persist_error is not None:
+            structured["pipeline_log_entry"] = {
+                "stage": "satellite",
+                "error": persist_error,
+                "event_id": event_id,
+            }
+            return _error(
+                event_id,
+                f"Satellite analysis completed but could not be durably recorded: {persist_error}",
+            )
 
         _completed_event_ids.add(event_id)
         return json.dumps(structured)

@@ -228,9 +228,12 @@ def upload_all_results(event_id: str, files_dict: dict) -> dict:
             "geojson": <GeoJSON dict OR path to a .geojson file>,
         }
 
-    Returns the public URLs (None for any item that could not be uploaded):
+    Returns the public URLs (None for any item that could not be uploaded),
+    plus which artifacts (if any) failed so a degraded-but-"complete" upload
+    is explicit rather than something the caller has to null-check to notice:
         {
             "true_color_url", "index_url", "classification_url", "geojson_url",
+            "failed_artifacts": [...],  # e.g. ["true_color", "geojson"]
         }
     """
     result = {
@@ -238,15 +241,18 @@ def upload_all_results(event_id: str, files_dict: dict) -> dict:
         "index_url": None,
         "classification_url": None,
         "geojson_url": None,
+        "failed_artifacts": [],
     }
 
     bucket = os.getenv("CLOUDFLARE_R2_BUCKET")
     if not bucket:
         logger.error("CLOUDFLARE_R2_BUCKET not set; cannot upload results")
+        result["failed_artifacts"] = ["true_color", "index_map", "classification", "geojson"]
         return result
 
     client = get_r2_client()
     if client is None:
+        result["failed_artifacts"] = ["true_color", "index_map", "classification", "geojson"]
         return result
 
     def key_for(name: str) -> str:
@@ -256,14 +262,22 @@ def upload_all_results(event_id: str, files_dict: dict) -> dict:
         client, bucket, files_dict.get("true_color"),
         key_for("true_color"), "image/png",
     )
+    if result["true_color_url"] is None:
+        result["failed_artifacts"].append("true_color")
+
     result["index_url"] = _put_file(
         client, bucket, files_dict.get("index_map"),
         key_for("index_map"), "image/png",
     )
+    if result["index_url"] is None:
+        result["failed_artifacts"].append("index_map")
+
     result["classification_url"] = _put_file(
         client, bucket, files_dict.get("classification"),
         key_for("classification"), "image/png",
     )
+    if result["classification_url"] is None:
+        result["failed_artifacts"].append("classification")
 
     geojson = files_dict.get("geojson")
     if isinstance(geojson, dict):
@@ -275,6 +289,8 @@ def upload_all_results(event_id: str, files_dict: dict) -> dict:
         result["geojson_url"] = _put_file(
             client, bucket, geojson, key_for("geojson"), "application/geo+json"
         )
+    if result["geojson_url"] is None:
+        result["failed_artifacts"].append("geojson")
 
     logger.info("Uploaded result set for %s: %s", event_id, result)
     return result

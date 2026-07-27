@@ -44,12 +44,6 @@ CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 # fall back to SAR (Sentinel-1).
 CLOUD_COVER_THRESHOLD = 30.0
 
-# A single scene whose footprint covers less than this percentage of the AOI is
-# not enough on its own; the processor mosaics the top-ranked scenes instead.
-# Raised 60 -> 85 so scattered multi-city AOIs (where the best single tile still
-# leaves cities uncovered) reliably trigger the mosaic path.
-COVERAGE_MOSAIC_THRESHOLD = 85.0
-
 SENTINEL_1 = "sentinel-1"
 SENTINEL_2 = "sentinel-2"
 
@@ -792,92 +786,6 @@ def build_coverage_tiers(ranked, satellite_type: str):
         else:
             groups.append((tier, None, in_window))
     return groups
-
-
-def select_mosaic_scenes(ranked, city_geoms, max_scenes: int):
-    """Greedily pick scenes that maximise combined city coverage (set-cover).
-
-    The naive top-`max_scenes`-by-score set tends to bunch around the single
-    best-covered city, leaving other scattered cities uncovered (the Mindanao
-    trap: 3 highest-overlap tiles all clustered on one city). This instead does
-    a greedy weighted set-cover over the *individual* city polygons:
-
-    1. Start with the cities that no chosen scene covers yet.
-    2. Repeatedly pick the scene that newly covers the most still-uncovered
-       cities (ties broken by the scene's coverage score, so less-cloudy /
-       higher-overlap wins), until every city is covered or `max_scenes` is hit.
-    3. If the cap is reached with cities still uncovered, or all cities are
-       covered with budget to spare, top up from the remaining ranked scenes
-       (best score first) so the mosaic still fills nodata gaps.
-
-    Args:
-        ranked: scenes sorted best-first, each annotated with `_score`
-            (from `search_imagery(..., return_ranked=True)`).
-        city_geoms: list of shapely geometries, one per risk city (WGS84).
-        max_scenes: maximum number of scenes to return.
-
-    Returns the chosen scene dicts (a subset of `ranked`), best-first within the
-    final set. Falls back to `ranked[:max_scenes]` when no city geometries are
-    given.
-    """
-    if max_scenes <= 0:
-        return []
-    if not city_geoms:
-        return list(ranked[:max_scenes])
-
-    remaining = [g for g in city_geoms if g is not None]
-    chosen = []
-    pool = list(ranked)
-
-    # Greedy set-cover: each round, take the scene covering the most cities not
-    # yet covered. Ties -> higher score (already the pool's sort order).
-    while remaining and pool and len(chosen) < max_scenes:
-        best_scene = None
-        best_new = 0
-        best_score = -1.0
-        for scene in pool:
-            newly = [g for g in remaining if _scene_covers_geom(scene, g)]
-            score = scene.get("_score", 0.0) or 0.0
-            if len(newly) > best_new or (
-                len(newly) == best_new and len(newly) > 0 and score > best_score
-            ):
-                best_scene, best_new, best_score = scene, len(newly), score
-        if best_scene is None or best_new == 0:
-            break  # no remaining scene covers any still-uncovered city
-        chosen.append(best_scene)
-        pool.remove(best_scene)
-        remaining = [
-            g for g in remaining if not _scene_covers_geom(best_scene, g)
-        ]
-
-    # Top up with the best remaining scenes (fills nodata gaps / unreached
-    # cities) until we hit the cap. Prefer scenes whose MGRS tile is not already
-    # in the set so a spare slot adds new geography rather than a duplicate
-    # tile; fall back to any remaining scene if every tile is already present.
-    chosen_tiles = {_scene_tile_id(s) for s in chosen}
-    for prefer_new_tile in (True, False):
-        for scene in pool:
-            if len(chosen) >= max_scenes:
-                break
-            if scene in chosen:
-                continue
-            tid = _scene_tile_id(scene)
-            if prefer_new_tile and tid is not None and tid in chosen_tiles:
-                continue
-            chosen.append(scene)
-            chosen_tiles.add(tid)
-        if len(chosen) >= max_scenes:
-            break
-
-    uncovered = len(remaining)
-    logger.info(
-        "Mosaic set-cover: chose %d scene(s) for %d cities (%d city(ies) "
-        "still uncovered after selection)",
-        len(chosen),
-        len([g for g in city_geoms if g is not None]),
-        uncovered,
-    )
-    return chosen
 
 
 def search_imagery(
