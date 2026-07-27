@@ -404,9 +404,13 @@ def calculate_confidence_level(report: dict) -> str:
     values = _collect_confidence_values(report)
     if not values:
         return "UNKNOWN"
-    if any(value < 0.6 for value in values):
-        return "LOW"
-    combined = sum(values) / len(values)
+    # Min-dominant, not a flat average: a flat mean lets one high-confidence
+    # stage mask a near-zero one (observed live 2026-07-26 — satellite
+    # confidence 0.0 still produced a HIGH report because the average of
+    # hazard 0.83 + impact 0.83 swamped it). The overall figure is the WEAKEST
+    # stage's confidence, since the report's reliability can never exceed its
+    # least-confident input.
+    combined = min(values)
     if combined >= 0.8:
         return "HIGH"
     if combined >= 0.6:
@@ -486,6 +490,16 @@ def _agent_log_payload(report: dict, total_time_seconds: int) -> list:
 def _collect_confidence_values(report: dict) -> list[float]:
     values: list[float] = []
     confidence = report.get("confidence", {}) if isinstance(report.get("confidence"), dict) else {}
+    # Satellite confidence — included whenever a caller supplies it (e.g. an
+    # incoming_payload carrying PipelineState["confidence_scores"]["satellite"]).
+    # NOTE: the DB-fetch path (satellite_results has no confidence column, see
+    # root CLAUDE.md's Database section) cannot populate this key today; the
+    # only channel satellite confidence currently has into this calculation is
+    # indirectly, via hazard's flood confidence being capped by it upstream in
+    # analyzer.run_parallel_analysis. This key is read for when a direct value
+    # becomes available so it isn't silently dropped once it does.
+    _append_confidence(values, confidence.get("satellite_confidence"))
+    _append_confidence(values, report.get("satellite", {}).get("confidence"))
     for key in ("hazard_overall_confidence", "impact_overall_confidence", "combined_confidence"):
         _append_confidence(values, confidence.get(key))
     _append_confidence(values, report.get("impact", {}).get("overall_confidence"))

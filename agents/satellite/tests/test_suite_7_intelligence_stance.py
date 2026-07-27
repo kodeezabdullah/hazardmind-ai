@@ -92,7 +92,8 @@ def test_1_normal():
         opinion={"reliable": True, "confidence": 0.9, "concerns": [], "alert_team": False,
                  "recommendation": "looks solid"},
     )
-    res = {"affected_area_km2": 100.0, "cloud_cover": 8, "mean_ndwi": 0.4,
+    res = {"affected_area_km2": 100.0, "cloud_cover": 8, "index_type": "NDWI",
+           "index_calibrated": True, "mean_index": 0.4,
            "water_percent": 30, "coverage_percent": 95}
     findings = v.validate_all(res, "flood", {"lat": 34.0, "lon": 71.5}, trk)
 
@@ -121,7 +122,8 @@ def test_2_gdacs_discrepancy():
         gdacs={"alert": "RED", "area": 120.0, "distance_km": 5.0},
         opinion=None,
     )
-    res = {"affected_area_km2": 500.0, "cloud_cover": 10, "mean_ndwi": 0.4,
+    res = {"affected_area_km2": 500.0, "cloud_cover": 10, "index_type": "NDWI",
+           "index_calibrated": True, "mean_index": 0.4,
            "water_percent": 30, "coverage_percent": 90}
     findings = v.validate_all(res, "flood", {"lat": 34.0, "lon": 71.5}, trk)
 

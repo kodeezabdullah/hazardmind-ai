@@ -722,15 +722,27 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # Featherless expert), feeding evidence + concerns into the confidence
         # tracker. The bbox centroid drives the geographic feed lookups. Never
         # raises — a failing feed is skipped.
+        # BUG (2026-07-27) — this dict used to hardcode "mean_ndwi": mean_index
+        # regardless of what index was actually computed, so a SAR run's raw
+        # dB value got read as an NDWI ratio by the physics check below. The
+        # label must come from the same field the pipeline just computed
+        # (result["index_type"]), never set independently of it — see the
+        # assertion right after this dict.
         validation_input = {
             "affected_area_km2": result.get("affected_area_km2"),
             "cloud_cover": selection.get("cloud_cover"),
-            "mean_ndwi": result.get("mean_index"),
+            "index_type": result["index_type"],
+            "index_calibrated": result.get("index_calibrated"),
+            "index_units": result.get("index_units"),
             "mean_index": result.get("mean_index"),
             "water_percent": result.get("water_percent"),
             "coverage_percent": result.get("valid_percent"),
             "valid_percent": result.get("valid_percent"),
         }
+        assert validation_input["index_type"] == result["index_type"], (
+            f"validation_input index_type {validation_input['index_type']!r} "
+            f"diverges from computed index_type {result['index_type']!r}"
+        )
         validations = cross_validator.validate_all(
             validation_input, disaster_type, bbox, tracker
         )
