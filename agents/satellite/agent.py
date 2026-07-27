@@ -68,69 +68,102 @@ logger = logging.getLogger(__name__)
 _completed_event_ids: set[str] = set()
 
 
-def _persist_satellite_result(event_id: str, structured: dict) -> None:
-    """Write the satellite result straight to the DB.
+# Persist retry policy: a transient Neon outage must not be reported as a
+# successful "complete" run with no durable row (the pipeline's success claim
+# has to match what actually landed in the DB, not what merely computed
+# successfully in memory).
+PERSIST_MAX_ATTEMPTS = 3
+PERSIST_RETRY_BACKOFF_SECONDS = (1, 3)  # delay before attempt 2, before attempt 3
+
+
+def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
+    """Write the satellite result straight to the DB, retrying on failure.
 
     The DB is the durable record downstream nodes/agents read from GET
     /results. Columns mirror satellite_results; jsonb columns are passed as
     JSON strings. Idempotent per event: an existing row is replaced.
+
+    Retries up to PERSIST_MAX_ATTEMPTS times with backoff. Returns None on
+    success, or an error string describing the final failure — the caller
+    must treat a non-None return as a hard pipeline failure (status:"failed"),
+    never as "complete", since a "complete" status with no durable row is
+    silently indistinguishable from a real success to any DB-reading consumer.
     """
+    import time
+
     db_url = os.getenv("NEON_DATABASE_URL")
     if not db_url:
-        return
-    try:
-        import asyncpg
+        return "NEON_DATABASE_URL is not configured"
 
-        def _f(k):
-            v = structured.get(k)
-            try:
-                return float(v) if v is not None else None
-            except (TypeError, ValueError):
-                return None
+    def _f(k):
+        v = structured.get(k)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
-        def _i(k):
-            v = structured.get(k)
-            try:
-                return int(v) if v is not None else None
-            except (TypeError, ValueError):
-                return None
+    def _i(k):
+        v = structured.get(k)
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
-        async def _write():
-            conn = await asyncpg.connect(db_url)
-            try:
-                async with conn.transaction():
-                    await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
-                    await conn.execute(
-                        """
-                        INSERT INTO satellite_results
-                            (event_id, satellite_type, cloud_cover, scene_id,
-                             true_color_url, index_url, classification_url, geojson_url,
-                             affected_area_km2, damage_percent, total_zones,
-                             bounds, bbox, risk_cities)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-                        """,
-                        event_id,
-                        structured.get("satellite_type"),
-                        _f("cloud_cover"),
-                        structured.get("scene_id"),
-                        structured.get("true_color_url"),
-                        structured.get("index_url"),
-                        structured.get("classification_url"),
-                        structured.get("geojson_url"),
-                        _f("affected_area_km2"),
-                        _f("damage_percent"),
-                        _i("total_zones"),
-                        json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
-                        json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
-                        json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
-                    )
-            finally:
-                await conn.close()
+    import asyncpg
 
-        asyncio.run(_write())
-        logger.info("Persisted satellite_results row for event %s", event_id)
-    except Exception as exc:  # noqa: BLE001 - DB write is best-effort
-        logger.warning("Could not persist satellite_results for %s: %s", event_id, exc)
+    async def _write():
+        conn = await asyncpg.connect(db_url)
+        try:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
+                await conn.execute(
+                    """
+                    INSERT INTO satellite_results
+                        (event_id, satellite_type, cloud_cover, scene_id,
+                         true_color_url, index_url, classification_url, geojson_url,
+                         affected_area_km2, damage_percent, total_zones,
+                         bounds, bbox, risk_cities)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                    """,
+                    event_id,
+                    structured.get("satellite_type"),
+                    _f("cloud_cover"),
+                    structured.get("scene_id"),
+                    structured.get("true_color_url"),
+                    structured.get("index_url"),
+                    structured.get("classification_url"),
+                    structured.get("geojson_url"),
+                    _f("affected_area_km2"),
+                    _f("damage_percent"),
+                    _i("total_zones"),
+                    json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
+                    json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
+                    json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
+                )
+        finally:
+            await conn.close()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, PERSIST_MAX_ATTEMPTS + 1):
+        try:
+            asyncio.run(_write())
+            logger.info(
+                "Persisted satellite_results row for event %s (attempt %d/%d)",
+                event_id, attempt, PERSIST_MAX_ATTEMPTS,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - retried below; final failure surfaces to caller
+            last_exc = exc
+            logger.warning(
+                "Persist attempt %d/%d failed for %s: %s",
+                attempt, PERSIST_MAX_ATTEMPTS, event_id, exc,
+            )
+            if attempt < PERSIST_MAX_ATTEMPTS:
+                time.sleep(PERSIST_RETRY_BACKOFF_SECONDS[attempt - 1])
+
+    error_message = f"DB persist failed after {PERSIST_MAX_ATTEMPTS} attempts: {last_exc}"
+    logger.error("Could not persist satellite_results for %s: %s", event_id, error_message)
+    return error_message
 
 
 # LLM intelligence layer (Featherless chain + Opus last resort). Shared across
@@ -909,8 +942,21 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             logger.info("Generated natural hand-off summary (%d chars)", len(band_message))
 
         # Persist the authoritative result to the DB — the durable record
-        # downstream nodes/agents and GET /results read from.
-        _persist_satellite_result(event_id, structured)
+        # downstream nodes/agents and GET /results read from. The pipeline may
+        # not report "complete" for work that was not durably recorded: a
+        # transient Neon outage here must surface as a hard failure, not a
+        # silently-swallowed warning behind an otherwise-successful result.
+        persist_error = _persist_satellite_result(event_id, structured)
+        if persist_error is not None:
+            structured["pipeline_log_entry"] = {
+                "stage": "satellite",
+                "error": persist_error,
+                "event_id": event_id,
+            }
+            return _error(
+                event_id,
+                f"Satellite analysis completed but could not be durably recorded: {persist_error}",
+            )
 
         _completed_event_ids.add(event_id)
         return json.dumps(structured)
