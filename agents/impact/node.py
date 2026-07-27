@@ -26,11 +26,19 @@ async def impact_node(state: PipelineState) -> dict:
     rather than raising, so the graph can decide how to proceed.
     """
     event_id = state["event_id"]
+    disaster_type = state.get("disaster_type") or "flood"
     hazard_result = state.get("hazard_result") or {}
     hazard = hazard_result.get("hazard") or {}
 
+    # Prefer hazard's explicit primary_hazard_risk (keyed by the REAL
+    # disaster_type being assessed) over the old flood_risk-first fallback
+    # chain, which silently read LOW/UNKNOWN on a genuine earthquake/landslide
+    # event and masked a real HIGH/CRITICAL overall_severity (H#10). The old
+    # chain is kept as a fallback for hazard results that predate this field
+    # (e.g. cached/replayed payloads).
     risk_level = (
-        hazard.get("flood_risk")
+        hazard.get("primary_hazard_risk")
+        or hazard.get("flood_risk")
         or hazard.get("overall_severity")
         or hazard.get("risk_level")
         or "UNKNOWN"
@@ -57,6 +65,10 @@ async def impact_node(state: PipelineState) -> dict:
         flood_depth_estimate=float(hazard.get("flood_depth_estimate", 0.0) or 0.0),
         overall_confidence=overall_conf,
         risk_cities=risk_cities,
+        disaster_type=disaster_type,
+        flood_risk=str(hazard.get("flood_risk") or "UNKNOWN").upper(),
+        earthquake_risk=str(hazard.get("earthquake_risk") or "UNKNOWN").upper(),
+        landslide_risk=str(hazard.get("landslide_risk") or "UNKNOWN").upper(),
     )
     result = json.loads(raw)
 
