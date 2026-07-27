@@ -703,6 +703,10 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                 "geojson": result["geojson"],
             },
         )
+        # A missing artifact is not fatal (the run may still be useful without
+        # one PNG), but the degraded state must be explicit rather than
+        # something every downstream consumer has to null-check for.
+        failed_artifacts = list(urls.get("failed_artifacts") or [])
 
         # (h.2) Per-city artifacts (multi-city AOIs). Each city's PNGs + GeoJSON
         # were rendered from the same mosaic and namespaced under
@@ -736,6 +740,8 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                     "geojson_url": city_urls["geojson_url"],
                 }
             )
+            for artifact in city_urls.get("failed_artifacts") or []:
+                failed_artifacts.append(f"cities/{slug}/{artifact}")
         if cities_payload:
             logger.info(
                 "Uploaded %d per-city artifact set(s) for %s",
@@ -902,6 +908,11 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "classification_url": urls["classification_url"],
             "geojson_url": urls["geojson_url"],
             "image_url": urls["classification_url"] or urls["true_color_url"],
+            # A degraded R2 upload (missing PNG/GeoJSON) is not fatal, but must
+            # be explicit rather than something every downstream consumer has
+            # to discover by null-checking each artifact URL individually.
+            "artifacts_incomplete": bool(failed_artifacts),
+            "failed_artifacts": failed_artifacts,
             "cached": False,
             # Per-city artifacts + summaries (multi-city AOIs). Each entry has
             # its own PNGs/GeoJSON URLs and bounds, so downstream consumers and
