@@ -60,12 +60,6 @@ DOWNLOAD_URL = (
 # the system temp dir keeps intermediate artifacts out of the repo.
 TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hazardmind-satellite")
 
-# A single scene covering less than this percentage of the AOI triggers a
-# multi-tile mosaic of the top-ranked scenes (FIX 2). Raised 60 -> 85 so
-# scattered multi-city AOIs (best single tile still misses cities) mosaic.
-COVERAGE_MOSAIC_THRESHOLD = 85.0
-# How many top-scored scenes to mosaic when one scene is not enough.
-MOSAIC_MAX_SCENES = 3
 # After clipping, a result with fewer than this percentage of valid (non-nodata)
 # pixels inside the risk polygon is rejected and the next scene is tried
 # (FIX 3).

@@ -182,6 +182,17 @@ MAX_STEP_ATTEMPTS = 3
 # intelligence layer how to improve (integration point 6, quality gate).
 MIN_CONFIDENCE = 0.6
 
+# Per-city artifact rendering (individual PNG/GeoJSON layers per risk city,
+# re-clipped from the already-accepted mosaic) is fully implemented
+# (processor._render_per_city) but disabled by default: re-clipping a
+# multi-tile mosaic once per city multiplies peak RSS on top of the 100%
+# valid-pixel coverage requirement, which already peaked ~9.6 GB at just 2
+# mosaicked tiles on a live run (see CLAUDE.md's Step 13 FIX 5 / 2026-07-26
+# memory notes). Flip via ENABLE_PER_CITY_ARTIFACTS=true once satellite
+# memory sizing/headroom work lands; until then this is a deliberate,
+# documented tradeoff, not dead code.
+ENABLE_PER_CITY_ARTIFACTS = os.getenv("ENABLE_PER_CITY_ARTIFACTS", "false").strip().lower() == "true"
+
 
 # --------------------------------------------------------------------------- #
 # Risk-city detection
@@ -626,12 +637,12 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # deep inside the pipeline can refresh it as the run proceeds.
             selection, scenes, bbox, merged, event_id, token_manager, disaster_type,
             city_geoms=city_geoms,
-            # Per-city artifacts are intentionally disabled: re-clipping the full
-            # mosaic to each city is very expensive on a large multi-tile AOI
-            # (the merged whole-area clip already gives the frontend and hazard
-            # agent everything they need). `city_geoms` is still passed so the
-            # mosaic set-cover spreads scenes across the scattered cities.
-            city_boundaries=None,
+            # Per-city artifacts are disabled by default (ENABLE_PER_CITY_ARTIFACTS,
+            # see its definition above) — re-clipping the full mosaic to each city
+            # is expensive on a large multi-tile AOI. `city_geoms` is always passed
+            # regardless, so the mosaic set-cover still spreads scenes across the
+            # scattered cities either way.
+            city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None,
             # Tiers 3/4 lower confidence + append an anomaly through this tracker.
             tracker=tracker,
         )
