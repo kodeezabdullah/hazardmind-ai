@@ -339,6 +339,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     mean_value = analysis.get("mean_value", 0.0)
     risk_cities = boundaries.get("risk_cities", [])
     satellite_type = satellite_data.get("satellite", {}).get("type", "sentinel-2")
+    satellite_confidence = _to_float(analysis.get("confidence")) if analysis.get("confidence") is not None else None
 
     if not bbox or len(bbox) < 4:
         return {
@@ -400,6 +401,18 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         else {"risk": "UNKNOWN", "confidence": 0.0, "reasoning": "task failed"}
     )
 
+    # FLOOD ONLY: flood risk is derived directly from the satellite index, so a
+    # flood conclusion cannot be more confident than the satellite data it rests
+    # on — cap it at the satellite's own confidence. Earthquake and landslide
+    # self-source from USGS/DEM and are intentionally NOT capped (they are
+    # independent of satellite confidence per root_cause.md).
+    confidence_cap_applied = False
+    if satellite_confidence is not None and flood.get("confidence") is not None:
+        flood_confidence = _to_float(flood.get("confidence"))
+        if satellite_confidence < flood_confidence:
+            flood = {**flood, "confidence": satellite_confidence}
+            confidence_cap_applied = True
+
     severity_map = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNKNOWN": 1}
     reverse_map = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}
     # Overall severity follows the highest KNOWN risk. UNKNOWN maps to 1 (it does
@@ -435,6 +448,8 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
             "earthquake": quake.get("confidence", 0.0),
             "landslide": landslide.get("confidence", 0.0),
         },
+        "satellite_confidence": satellite_confidence,
+        "confidence_cap_applied": confidence_cap_applied,
         "risk_polygons": {},
         "raw": {"gdacs": gdacs_data, "usgs": usgs_data, "slope": slope_data},
     }

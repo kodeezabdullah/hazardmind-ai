@@ -369,30 +369,52 @@ class CrossValidator:
             else:
                 tracker.add_evidence("cloud_check", 0.95, weight=0.2)
 
-        # 4. Index-value validation (physics sanity check).
+        # 4. Index-value validation (physics sanity check). NDWI thresholds are
+        # only meaningful for a calibrated, bounded ratio (index_type == NDWI).
+        # An uncalibrated SAR dB value (index_calibrated == False) must never be
+        # run through NDWI thresholds — it is not the same physical quantity and
+        # a positive/negative dB reading has no NDWI interpretation. Only run
+        # this check when the satellite result explicitly says it computed NDWI.
         if (disaster_type or "").lower() == "flood":
-            ndwi = _coerce_float(satellite_result.get("mean_ndwi", satellite_result.get("mean_index")))
-            water_pct = _coerce_float(satellite_result.get("water_percent")) or 0.0
-            gdacs_red = bool(gdacs and gdacs.get("alert") == "RED")
-            if ndwi is not None:
-                if ndwi < 0 and gdacs_red:
-                    tracker.add_concern(
-                        "NDWI negative but GDACS RED alert — cloud interference likely",
-                        "CRITICAL",
-                    )
-                    validations.append(
-                        {
-                            "source": "INDEX",
-                            "status": "CONTRADICTION",
-                            "detail": "NDWI shows no water yet GDACS is RED",
-                        }
-                    )
-                elif ndwi > 0.3 and water_pct > 20:
-                    tracker.add_evidence("index_validation", 0.95, weight=0.3)
-                elif ndwi > 0.1:
-                    tracker.add_evidence("index_validation", 0.75, weight=0.3)
-                else:
-                    tracker.add_evidence("index_validation", 0.4, weight=0.3)
+            index_type = satellite_result.get("index_type")
+            index_calibrated = satellite_result.get("index_calibrated")
+            if index_type == "NDWI" and index_calibrated is not False:
+                ndwi = _coerce_float(satellite_result.get("mean_index"))
+                water_pct = _coerce_float(satellite_result.get("water_percent")) or 0.0
+                gdacs_red = bool(gdacs and gdacs.get("alert") == "RED")
+                if ndwi is not None:
+                    if ndwi < 0 and gdacs_red:
+                        tracker.add_concern(
+                            "NDWI negative but GDACS RED alert — cloud interference likely",
+                            "CRITICAL",
+                        )
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "CONTRADICTION",
+                                "detail": "NDWI shows no water yet GDACS is RED",
+                            }
+                        )
+                    elif ndwi > 0.3 and water_pct > 20:
+                        tracker.add_evidence("index_validation", 0.95, weight=0.3)
+                    elif ndwi > 0.1:
+                        tracker.add_evidence("index_validation", 0.75, weight=0.3)
+                    else:
+                        tracker.add_evidence("index_validation", 0.4, weight=0.3)
+            elif index_type == "SAR" or index_calibrated is False:
+                # Uncalibrated SAR backscatter cannot be threshold-compared —
+                # explicitly skip evidence/concern generation rather than
+                # silently falling through to the NDWI branch above.
+                validations.append(
+                    {
+                        "source": "INDEX",
+                        "status": "SKIPPED",
+                        "detail": (
+                            "Uncalibrated SAR index — not threshold-comparable "
+                            "as NDWI, no evidence added"
+                        ),
+                    }
+                )
 
         # 5. Coverage validation.
         coverage = _coerce_float(
@@ -511,7 +533,15 @@ if __name__ == "__main__":
 
     v = _StubValidator()
     trk = ConfidenceTracker()
-    res = {"affected_area_km2": 500.0, "cloud_cover": 10, "mean_ndwi": 0.4, "water_percent": 30, "valid_percent": 95}
+    res = {
+        "affected_area_km2": 500.0,
+        "cloud_cover": 10,
+        "index_type": "NDWI",
+        "index_calibrated": True,
+        "mean_index": 0.4,
+        "water_percent": 30,
+        "valid_percent": 95,
+    }
     findings = v.validate_all(res, "flood", {"lat": 34.0, "lon": 71.5}, trk)
     print(json.dumps(findings, indent=2))
     print("confidence:", round(trk.overall_confidence(), 3))
