@@ -48,6 +48,8 @@ async def hazard_node(state: PipelineState) -> dict:
 
     errors = list(state.get("errors") or [])
     anomalies = list(state.get("anomalies") or [])
+    for msg in (result.get("hazard") or {}).get("anomalies") or []:
+        anomalies.append({"stage": "hazard", "message": msg})
     if result.get("status") == "insufficient_data":
         # A plumbing failure (e.g. invalid bbox), not a real disaster verdict
         # (H#3). Do NOT halt the graph — impact's own no-significant-disaster

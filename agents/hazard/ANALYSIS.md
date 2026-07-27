@@ -263,32 +263,50 @@ Confirmed real and necessary: satellite emits a flat payload (`bbox`,
 empty `bbox` and hit the invalid-bbox path (hardcoded HIGH severity) on
 *every* run — this adapter is load-bearing, not decorative.
 
-**Fields carried through but silently unused downstream in this hop:**
-`index_type`, `index_calibrated`, `index_units`, `needs_verification` (all
-mapped into `analysis.*` by the adapter at agent.py:88-91) — none of these
-four are read anywhere in `analyzer.py`'s `run_parallel_analysis`. The
-adapter faithfully carries satellite's honest calibration labels one hop
-further than they're used; the flood LLM prompt (analyzer.py:180-185)
-reconstructs its own label from `satellite_type` rather than reading
-`index_calibrated`/`index_units` directly — functionally equivalent today
-(since `satellite_type` and `index_calibrated` are always consistent per
-satellite's current implementation) but a second, redundant source of truth
-for the same fact.
+**GATE B correction (2026-07-28, superseding this section's original
+claim):** this document previously stated that `index_calibrated`/
+`index_units` WERE carried through by the adapter (mapped into `analysis.*`
+at agent.py:88-91, alongside `index_type`/`needs_verification`) but simply
+unused downstream. That was **wrong** — confirmed by direct read of
+`agents/hazard/agent.py`'s `_normalise_satellite_payload` prior to this
+session's fix: the pre-fix `analysis{}` dict only carried `index_type`,
+`confidence`, `needs_verification` — `index_calibrated`/`index_units` were
+never in the returned dict at all.
+`agents/satellite/ANALYSIS.md`'s corresponding claim (that these fields were
+NOT carried) was the correct side of this disagreement.
+
+Fixed as part of H#4: `_normalise_satellite_payload` now carries
+`index_calibrated`, `index_units`, `confidence_basis`, and `evidence_count`
+into `analysis{}`, and `analyzer.py`'s deterministic flood fallback (§6.2
+below) reads `index_calibrated` to decide whether the raw index can be
+threshold-compared at all, rather than reconstructing an equivalent
+inference from `satellite_type` alone (which was correct today only because
+`satellite_type` and `index_calibrated` happen to always agree in the
+current implementation — a coincidence, not a guarantee).
 
 ### 6.2 The confirmed label/content mismatch — SAR-as-NDWI, hazard-side instance
 
-`analyze_flood`'s deterministic **fallback** (analyzer.py:211-227, reached
-only when the LLM call returns nothing) reads `mean_value` — which is
-SAR-dB (unbounded, e.g. `-12` or `23.6`) on an S1 run, or NDWI ratio
-(bounded [-1,1]) on an S2 run — and applies the SAME flat NDWI-scale
-threshold (`flood_index > 0.5`/`> 0.3`) regardless of which. Confirmed via
-direct read: no `satellite_type` branch exists in this fallback block, even
-though the LLM-facing prompt one function up (same file) correctly branches
-on it. **This is the exact defect class satellite's own ANALYSIS.md documents
-for `mean_index`** (a field whose numeric meaning silently depends on
-`satellite_type`) — here it recurs one hop downstream, in the one code path
-(the LLM-failure fallback) where the correct branching logic was not carried
-over.
+**FIXED 2026-07-28 (SYSTEM_ANALYSIS.md H#4).** `analyze_flood`'s
+deterministic **fallback** (analyzer.py:211-227, reached only when the LLM
+call returns nothing) read `mean_value` — which is SAR-dB (unbounded, e.g.
+`-12` or `23.6`) on an S1 run, or NDWI ratio (bounded [-1,1]) on an S2 run —
+and applied the SAME flat NDWI-scale threshold (`flood_index > 0.5`/`> 0.3`)
+regardless of which. Confirmed via direct read: no `satellite_type` branch
+existed in this fallback block, even though the LLM-facing prompt one
+function up (same file) correctly branches on it. This was the exact defect
+class satellite's own ANALYSIS.md documents for `mean_index` (a field whose
+numeric meaning silently depends on `satellite_type`) recurring one hop
+downstream. As this document's Section 8 already correctly noted, this
+codebase's SAR index is uncalibrated raw-DN log and is **positive**, so the
+old threshold produced a **false CRITICAL**, not a false LOW — confirmed
+live (`mean_value = 23.6485` on the 2026-07-26 S1 e2e run).
+
+Fixed: the fallback now reads `index_calibrated` (carried through
+`_normalise_satellite_payload` per §6.1's correction above) and, for
+uncalibrated SAR, bases the flood decision on `affected_area_km2` alone
+(never the raw index), with confidence capped at 0.4 and an explicit
+`"sar_index_excluded_uncalibrated"` anomaly recorded. The NDWI/calibrated
+path (S2) is unchanged.
 
 ### 6.3 Fields produced but not read by any downstream consumer (confirmed by grep)
 

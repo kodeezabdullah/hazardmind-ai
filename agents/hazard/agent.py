@@ -86,7 +86,21 @@ def _normalise_satellite_payload(payload: dict, event_id: str) -> dict:
             "mean_value": mean_value,
             "water_percent": water_percent,
             "index_type": p.get("index_type"),
+            # GATE B (2026-07-28): confirmed by direct read that this adapter
+            # did NOT previously carry index_calibrated/index_units into the
+            # normalized payload — satellite's ANALYSIS.md was right, hazard's
+            # ANALYSIS.md's claim that it did was wrong. Added here so the
+            # deterministic flood fallback (analyzer.py) can branch on real
+            # calibration status instead of inferring it from satellite_type
+            # (H#4 / SYSTEM_ANALYSIS.md C, H#4).
+            "index_calibrated": p.get("index_calibrated"),
+            "index_units": p.get("index_units"),
             "confidence": p.get("confidence"),
+            # confidence_basis/evidence_count: satellite computes these (see
+            # its ANALYSIS.md) but nothing downstream previously saw them —
+            # small additive carry-through, not otherwise used yet.
+            "confidence_basis": p.get("confidence_basis"),
+            "evidence_count": p.get("evidence_count"),
             "needs_verification": p.get("needs_verification"),
         },
         "artifacts": {
@@ -269,6 +283,7 @@ async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: 
                 "confidence_scores": raw_result["confidence_scores"],
                 "risk_polygons": {},
                 "risk_polygons_url": "",
+                "anomalies": raw_result.get("anomalies") or [],
             },
             "error": None,
         }

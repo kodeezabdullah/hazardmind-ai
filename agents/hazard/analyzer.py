@@ -176,6 +176,7 @@ async def analyze_flood(
     mean_value,
     gdacs_data,
     satellite_type="sentinel-2",
+    index_calibrated=None,
 ) -> dict:
     if satellite_type == "sentinel-1":
         index_label = "SAR backscatter ratio (VV-VH)"
@@ -209,6 +210,55 @@ async def analyze_flood(
         }
 
     area = _to_float(affected_area_km2)
+
+    # DETERMINISTIC FALLBACK (LLM call failed). GATE B / H#4: satellite's SAR
+    # index is 10*log10(raw uncalibrated GRD DN) -- always POSITIVE in this
+    # codebase (no radiometric LUT), unlike real calibrated sigma0 backscatter
+    # (virtually always negative dB). Applying the NDWI-scale threshold
+    # (`> 0.5`/`> 0.3`) unconditionally to that value is trivially satisfied by
+    # ANY positive SAR reading, mechanically producing a FALSE-CRITICAL verdict
+    # on every S1 run that reaches this fallback, regardless of actual ground
+    # conditions -- not a false-negative (see satellite/ANALYSIS.md, corrected
+    # 2026-07-28 to match this).
+    #
+    # is_uncalibrated_sar: prefer the explicit index_calibrated flag carried
+    # through by _normalise_satellite_payload (Gate B); if that field is
+    # itself absent (e.g. an older/incomplete payload), fall back to inferring
+    # from satellite_type, which is strictly worse but still correct for the
+    # common S1-vs-S2 case and was the previous (bug-free-on-this-axis, just
+    # unit-blind) behavior.
+    is_uncalibrated_sar = (
+        index_calibrated is False
+        if index_calibrated is not None
+        else satellite_type == "sentinel-1"
+    )
+
+    if is_uncalibrated_sar:
+        # The raw index has no physical interpretation here -- do NOT invent
+        # NDWI-style thresholds on it. Base the decision on affected_area_km2
+        # alone, and cap confidence at 0.4 since we are deliberately excluding
+        # a data source we cannot interpret.
+        if area > 200:
+            risk, confidence = "CRITICAL", 0.4
+        elif area > 100:
+            risk, confidence = "HIGH", 0.4
+        elif area > 25:
+            risk, confidence = "MEDIUM", 0.4
+        else:
+            risk, confidence = "LOW", 0.4
+        return {
+            "risk": risk,
+            "confidence": confidence,
+            "reasoning": (
+                "Fallback flood risk based on affected_area_km2 only. The SAR "
+                "index was excluded as uninterpretable (uncalibrated raw "
+                "backscatter, no radiometric LUT/speckle filter/terrain "
+                "correction) -- NDWI-scale thresholds cannot be applied to it."
+            ),
+            "affected_zones": [],
+            "anomaly": "sar_index_excluded_uncalibrated",
+        }
+
     flood_index = _to_float(mean_value)
     if area > 200 or flood_index > 0.5:
         risk, confidence = "CRITICAL", 0.7
@@ -340,6 +390,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     risk_cities = boundaries.get("risk_cities", [])
     satellite_type = satellite_data.get("satellite", {}).get("type", "sentinel-2")
     satellite_confidence = _to_float(analysis.get("confidence")) if analysis.get("confidence") is not None else None
+    index_calibrated = analysis.get("index_calibrated")
 
     if not bbox or len(bbox) < 4:
         # A plumbing failure (no valid bbox handed off from satellite) is NOT
@@ -390,7 +441,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     )
 
     analysis_results = await asyncio.gather(
-        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type),
+        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type, index_calibrated),
         analyze_earthquake(bbox, usgs_data),
         analyze_landslide(bbox, gdacs_data, slope_data),
         return_exceptions=True,
@@ -462,6 +513,9 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         "confidence_cap_applied": confidence_cap_applied,
         "risk_polygons": {},
         "raw": {"gdacs": gdacs_data, "usgs": usgs_data, "slope": slope_data},
+        # H#4: surfaced only when the deterministic flood fallback excluded an
+        # uncalibrated SAR index rather than misapplying NDWI thresholds to it.
+        "anomalies": [flood["anomaly"]] if flood.get("anomaly") else [],
     }
 
 
