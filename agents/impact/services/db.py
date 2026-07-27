@@ -27,9 +27,22 @@ CREATE TABLE IF NOT EXISTS impact_data (
     vulnerability_score      TEXT,
     evacuation_routes        JSONB,
     estimated_evacuation_time TEXT,
+    overall_confidence       DOUBLE PRECISION,
     created_at               TIMESTAMPTZ DEFAULT NOW(),
     updated_at               TIMESTAMPTZ DEFAULT NOW()
 );
+"""
+
+# overall_confidence: confirmed present on live Neon (added out-of-band, no
+# migration file in this repo recorded it) via a direct information_schema
+# query on 2026-07-28 — this DDL now matches reality. Report's
+# agents/report/db_client.py:_fetch_impact_data SELECTs this column; prior to
+# this fix nothing in this file wrote it, so every row's overall_confidence
+# was silently NULL forever (the SELECT succeeded — this was a silent data
+# loss, not the schema-mismatch hard-failure the column's absence would have
+# caused). See SYSTEM_ANALYSIS.md Section B.6/H#2.
+ALTER_DDL = """
+ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS overall_confidence DOUBLE PRECISION;
 """
 
 
@@ -38,6 +51,7 @@ async def write_impact_data(
     pop: dict,
     infra: dict,
     vuln: dict,
+    overall_confidence: float | None = None,
 ) -> None:
     """Write consolidated impact results to the impact_data table."""
     dsn = os.environ.get("NEON_DATABASE_URL", "")
@@ -48,6 +62,7 @@ async def write_impact_data(
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute(DDL)
+        await conn.execute(ALTER_DDL)
 
         pop_count = int(pop.get("population_affected", 0) or 0)
         evac_time = (
@@ -69,8 +84,9 @@ async def write_impact_data(
                 vulnerability_score,
                 evacuation_routes,
                 estimated_evacuation_time,
+                overall_confidence,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
             ON CONFLICT (event_id) DO UPDATE SET
                 total_affected           = EXCLUDED.total_affected,
                 high_risk_people         = EXCLUDED.high_risk_people,
@@ -82,6 +98,7 @@ async def write_impact_data(
                 vulnerability_score      = EXCLUDED.vulnerability_score,
                 evacuation_routes        = EXCLUDED.evacuation_routes,
                 estimated_evacuation_time = EXCLUDED.estimated_evacuation_time,
+                overall_confidence       = EXCLUDED.overall_confidence,
                 updated_at               = NOW()
             """,
             event_id,
@@ -95,6 +112,7 @@ async def write_impact_data(
             str(vuln.get("vulnerability_score", 0)),
             json.dumps(vuln.get("priority_zones", [])),
             evac_time,
+            float(overall_confidence) if overall_confidence is not None else None,
         )
         logger.info("[db] impact_data upserted for event_id=%s", event_id)
 

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 
 
 LATEST_FINAL_REPORT_COLUMNS = (
@@ -225,31 +227,72 @@ async def _fetch_hazard_zones(conn, event_id: str) -> list[dict]:
 
 
 async def _fetch_impact_data(conn, event_id: str) -> dict:
-    row = await conn.fetchrow(
-        """
-        SELECT
-            id,
+    # overall_confidence: confirmed present on live Neon (2026-07-28 schema
+    # check), but this SELECT still degrades gracefully if a future/other
+    # environment's impact_data predates that column, rather than hard-failing
+    # the whole report stage on a schema drift (H#2 / SYSTEM_ANALYSIS.md B.6).
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                event_id,
+                total_affected,
+                high_risk_people,
+                medium_risk_people,
+                hospitals_at_risk,
+                schools_at_risk,
+                roads_blocked,
+                bridges_at_risk,
+                vulnerability_score,
+                evacuation_routes,
+                estimated_evacuation_time,
+                overall_confidence,
+                created_at
+            FROM impact_data
+            WHERE event_id = $1::uuid
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
             event_id,
-            total_affected,
-            high_risk_people,
-            medium_risk_people,
-            hospitals_at_risk,
-            schools_at_risk,
-            roads_blocked,
-            bridges_at_risk,
-            vulnerability_score,
-            evacuation_routes,
-            estimated_evacuation_time,
-            overall_confidence,
-            created_at
-        FROM impact_data
-        WHERE event_id = $1::uuid
-        ORDER BY created_at DESC
-        LIMIT 1;
-        """,
-        event_id,
-    )
-    return _row_to_dict(row)
+        )
+        return _row_to_dict(row)
+    except Exception as exc:
+        if not _schema_mismatch(exc):
+            raise
+        logger.warning(
+            "[db_client] impact_data.overall_confidence (or another expected "
+            "column) is missing on this Neon instance — degrading with "
+            "overall_confidence=None instead of failing the report stage: %s",
+            _safe_db_error(exc),
+        )
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                event_id,
+                total_affected,
+                high_risk_people,
+                medium_risk_people,
+                hospitals_at_risk,
+                schools_at_risk,
+                roads_blocked,
+                bridges_at_risk,
+                vulnerability_score,
+                evacuation_routes,
+                estimated_evacuation_time,
+                created_at
+            FROM impact_data
+            WHERE event_id = $1::uuid
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
+            event_id,
+        )
+        result = _row_to_dict(row)
+        if result is not None:
+            result["overall_confidence"] = None
+        return result
 
 
 def build_structured_report_context(

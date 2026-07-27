@@ -88,6 +88,7 @@ async def _emit_no_impact(
                 {"population_affected": 0, "high_risk_people": 0, "medium_risk_people": 0},
                 {"hospitals_at_risk": 0, "schools_at_risk": 0, "roads_blocked_km": 0, "bridges_at_risk": 0},
                 {"vulnerability_score": "0", "priority_zones": [], "estimated_evacuation_time": "N/A"},
+                overall_confidence=overall_confidence,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[agent] no-impact DB write failed (non-fatal): %s", exc)
@@ -178,7 +179,7 @@ async def run_impact_analysis(
     # ── DB write (non-fatal) ─────────────────────────────────────────────────
     if os.environ.get("NEON_DATABASE_URL"):
         try:
-            await write_impact_data(event_id, pop, infra, vuln)
+            await write_impact_data(event_id, pop, infra, vuln, overall_confidence=overall_confidence)
             logger.info("[agent] DB write complete for event_id=%s", event_id)
         except Exception as exc:
             logger.error("[agent] DB write failed (non-fatal): %s", exc)
