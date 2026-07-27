@@ -23,7 +23,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from confidence_tracker import ConfidenceTracker  # noqa: E402
 from cross_validator import CrossValidator  # noqa: E402
-from stance_engine import StanceEngine  # noqa: E402
+# NOTE: Test 4 (StanceEngine) was removed — stance_engine.py was deleted as dead
+# code (BUG 6). It was Band-room push-back logic (natural-language disagreement
+# sent to an orchestrator over a chat room); post-Band the graph drives nodes
+# directly, so there is no orchestrator conversation to push back into.
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -172,67 +175,13 @@ def test_3_low_confidence():
 # --------------------------------------------------------------------------- #
 # Test 4 — stance disagreement (use SAR at 15% cloud)
 # --------------------------------------------------------------------------- #
-def test_4_stance_disagreement():
-    print("\nTest 4: Stance disagreement (orchestrator: 'use SAR' at 15% cloud)")
-    # Canned expert reply: disagree, high self-confidence, will comply if insisted.
-    stub = _StubIntel(
-        {
-            "agree": False,
-            "confidence_in_own_position": 0.85,
-            "reasoning": "Cloud cover is only 15% — Sentinel-2 optical is reliable and "
-            "gives spectral detail SAR cannot.",
-            "recommendation": "Stay on Sentinel-2 optical.",
-            "response_to_orchestrator": "I'd hold off on SAR here — the sky is clear.",
-            "will_comply_if_insisted": True,
-        }
-    )
-    eng = StanceEngine(intelligence=stub)
-    trk = ConfidenceTracker()
-    trk.add_evidence("cloud_check", 0.95, weight=0.2)
-    stance = eng.evaluate_orchestrator_instruction(
-        "switch to Sentinel-1 SAR", {"cloud_cover": 15, "satellite_type": "sentinel-2"}, trk
-    )
-
-    if stance.get("agree") is False:
-        ok("T7.4", "agent pushed back (agree=False)")
-    else:
-        bad("T7.4", f"agent did not push back: {stance}")
-    if (stance.get("reasoning") or "").strip():
-        ok("T7.4", "stance carries reasoning")
-    else:
-        bad("T7.4", "no reasoning in stance")
-
-    msg = eng.form_band_message(stance, "@hazardmind-orchestrator")
-    if msg.startswith("@hazardmind-orchestrator"):
-        ok("T7.4", "Band message addressed to orchestrator")
-    else:
-        bad("T7.4", f"message not addressed correctly: {msg[:40]!r}")
-    if "85%" in msg and "evidence suggests" in msg:
-        ok("T7.4", "message states confidence + evidence")
-    else:
-        bad("T7.4", f"message missing confidence/evidence: {msg!r}")
-    if "insist" in msg.lower():
-        ok("T7.4", "message signals it will comply if insisted")
-    else:
-        bad("T7.4", "message omits the will-comply-if-insisted note")
-
-    # Fallback: when the LLM is unavailable, default to comply (not insubordinate).
-    eng_down = StanceEngine(intelligence=_StubIntel(None))
-    fb = eng_down.evaluate_orchestrator_instruction("use SAR", {}, trk)
-    if fb.get("agree") and fb.get("will_comply_if_insisted"):
-        ok("T7.4", "LLM-down fallback defaults to comply")
-    else:
-        bad("T7.4", f"fallback not safe: {fb}")
-
-
 if __name__ == "__main__":
     print("=" * 60)
-    print("TEST SUITE 7: Confidence / Cross-validation / Stance")
+    print("TEST SUITE 7: Confidence / Cross-validation")
     print("=" * 60)
     test_1_normal()
     test_2_gdacs_discrepancy()
     test_3_low_confidence()
-    test_4_stance_disagreement()
     print("\n" + "=" * 60)
     print(f"SUITE 7 SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)} WARN={len(WARN)}")
     if FAIL:

@@ -94,6 +94,38 @@ class PipelineState(TypedDict):
 
 ## Single-Process / E2E Hardening (post-migration)
 
+- **CDSE access-token expiry mid-run — production defect, not test-only
+  (`agents/satellite/sentinel.py` / `processor.py` / `agent.py`).** A live
+  Rawalpindi/flood e2e run (2026-07-26, ~51 min wall time) authenticated to
+  Copernicus **exactly once** and every download issued after ~10 minutes
+  in came back `401 Unauthorized` — CDSE Keycloak access tokens live ~10 min,
+  and `authenticate_copernicus()` was called once at pipeline start with the
+  resulting bare string threaded unchanged through every downstream call
+  (`select_satellite` → `process_satellite_imagery` → `download_imagery` →
+  `_download_bands_via_nodes`/`_download_product_zip` →
+  `_stream_to_file_with_retry`). Any run longer than ~10 minutes — which a
+  multi-tile, 100%-coverage mosaic search routinely is — hits this in
+  production, not just in the e2e harness.
+  Fixed with `sentinel.TokenManager`: captures `access_token` +
+  `refresh_token` + `expires_in` from the Keycloak response, and `.get()`
+  proactively refreshes (via the `refresh_token` grant, falling back to a
+  full password re-auth if the refresh itself fails) whenever the cached
+  token is within 90s of expiring — never reactively on a 401. Thread-safe
+  (`threading.Lock`) so concurrent in-flight band downloads collapse onto one
+  refresh instead of racing. `agent.py`'s `_authenticate_with_recovery` now
+  returns the `TokenManager` itself (not a token string); `processor.py`'s
+  `_resolve_token()` accepts either a manager (`.get()`) or a legacy plain
+  string (existing tests / the module's own `__main__` smoke test), so
+  `download_imagery`/`_download_bands_via_nodes` pull a **fresh** token
+  per-file/per-band rather than reusing one snapshot across a run that can
+  span many minutes. Logs every refresh and every fallback-to-password-grant.
+  Unit-verified offline (mocked Keycloak): cache hit, proactive refresh on
+  simulated expiry, fallback to password grant when refresh itself fails,
+  and 10 concurrent `.get()` calls collapsing to exactly one HTTP request.
+  **Not yet verified against live CDSE across a real multi-minute run** — the
+  one available live e2e attempt failed on this exact bug before the fix
+  existed; a follow-up live run is needed to confirm the fix holds under
+  real Keycloak round-trip latency, not just mocks.
 - **Per-agent `.env` loading fixed for single-process runs.** `satellite`,
   `hazard` and `impact` entry modules previously called bare `load_dotenv()`
   (cwd-relative — fine one-container-per-agent, wrong when the whole graph runs
@@ -142,6 +174,42 @@ class PipelineState(TypedDict):
   Neon directly). `schema-test.sql` is the schema derived from live-Neon
   introspection (the real spec; `shared/db/schema.sql` stays stale). See
   `tests/e2e/README.md` for the full schema-mismatch table.
+- **First fully-green live e2e (2026-07-26, event `88ad6095-51c5-4c66-95c0-7baf59dd1cab`,
+  Rawalpindi/flood, S1/SAR path, cleaned up post-verification): 9/9 assertions
+  passed, total 3244.1s.** This is the run that verified BUG 1 (GCP→UTM warp)
+  and the CDSE token-refresh fix (`TokenManager`) both hold under a real
+  multi-tier, multi-scene S1 search — not just unit/mock coverage. Three
+  findings from this run to carry forward:
+  - **The 142s baseline is retired for S1 — it predates a working S1 path
+    entirely** (BUG 1 made every prior S1 run collapse to ~0% coverage almost
+    instantly, which is fast but not a real success). **3244s is the new S1
+    baseline.** A Sentinel-2/optical run (clear sky, <30% cloud) will be much
+    faster — S2 has the per-band Nodes download shortcut (below) and a single
+    100 km tile usually covers a city-scale AOI in tier 1, so don't use the S1
+    number to judge S2 runtime or vice versa.
+  - **Sentinel-1 has no per-band Nodes download path — every candidate scene is
+    a full 1.2–1.7 GB `.SAFE` archive fetch.** `_download_bands_via_nodes`
+    (`agents/satellite/processor.py`) explicitly returns `None` for any
+    `satellite_type != "sentinel-2"` (its Nodes-tree mapping only knows the S2
+    L1C IMG_DATA layout), so every S1 candidate falls through to
+    `_download_product_zip` (the whole-archive path). The 2026-07-26 run
+    downloaded 4 full archives (5,490.7 MB total) across its 4 coverage tiers.
+    **Optimisation candidate**, not yet built: an S1-GRD-aware Nodes mapping
+    (the `measurement/*.tiff` VV/VH paths) would let S1 reuse the same
+    per-band/per-file cache and outage-grace machinery S2 already has, instead
+    of re-downloading a full archive per candidate scene.
+  - **Peak RSS 9,611.3 MB (~9.6 GB) at the clip stage with only 2 tiles
+    mosaicked** (`agent.py`'s per-stage `[MEM]` log). RSS climbed roughly
+    linearly with tile count across the run's tiers (single-tile clip stages
+    peaked ~5.1–5.6 GB; 2-tile mosaic-and-clip stages peaked 7.3–9.6 GB) — a
+    full-resolution S1 GRD scene is large (28,000×21,000+ px) and every
+    `_open_georeferenced`/`WarpedVRT` + `rasterio.merge` pass holds full arrays
+    in memory before the windowed clip trims them down. **Use this as the K8s
+    satellite-pod memory sizing input**: provision for peak RSS scaling with
+    the number of tiles a coverage search may need to mosaic (worst case,
+    tier 4's cap on candidates × ~2.5 GB/tile), not just a flat per-pod number.
+    A 3+ tile Mindanao-style scattered-city mosaic (see `agents/satellite/CLAUDE.md`
+    Step 8/10) would need proportionally more headroom.
 
 ## File Map (Only What Matters)
 
@@ -240,7 +308,18 @@ class PipelineState(TypedDict):
 - **`agents/hazard/agent.py`'s `_normalise_satellite_payload` flat→nested adapter** — real and necessary, port it into the satellite→hazard graph edge, don't drop it.
 - **Hazard agent's `risk_polygons` is always `{}`** — unimplemented despite docs claiming PostGIS polygon generation. Not migration-blocking; flag if scope expands.
 - **`GEONAMES_USERNAME` default inconsistency** between `.env.example` and README — fix when touching impact's env docs.
-- Stale `CLAUDE.md` files in `agents/hazard/` and `agents/report/` describe the wrong Band adapter and (for report) the wrong map tech (claims MapLibre; it's Pillow) — **delete or rewrite these once Band is gone**, they'll be doubly wrong.
+- Stale `CLAUDE.md` files in `agents/hazard/` and `agents/report/` describe the wrong Band adapter and (for report) the wrong map tech (claims MapLibre; it's Pillow) — **delete or rewrite these once Band is gone**, they'll be doubly wrong. (`agents/satellite/CLAUDE.md` is equally stale — a 2026-07-26 dated section was added at its top flagging this; the rest of that file is history, not current instructions.)
+- **Satellite Sentinel-2 NDWI/NDVI thresholds need science-phase revalidation.** The 2026-07-26 coverage-correctness pass switched S2 from L1C (top-of-atmosphere) to L2A (surface reflectance) so real SCL cloud masking is available for the 100%-coverage requirement. `NDWI_WATER_THRESHOLD`/`NDVI_DAMAGE_THRESHOLD`/the 0.5 "severe" cutoff were tuned against L1C and were **not** retuned (out of scope for a correctness-only pass) — index values shift under L2A. See `agents/satellite/CLAUDE.md`'s 2026-07-26 section and `agents/satellite/processor.py`'s `_S2_BANDS` comment.
+- **`affected_area_km2 = 0` on the S1/SAR flood path does NOT mean "no flood" — it means "flood cannot be determined from this index."** The live e2e (2026-07-26, event `88ad6095…`) produced `mean_index = 23.6485` on the SAR path and it is tempting to read that as "consistent with baseline dry-ground backscatter" — **that reading is not defensible.** Per BUG 5 (`agents/satellite/CLAUDE.md`), the SAR index is `10*log10(raw GRD DN)`: no radiometric calibration LUT, no speckle filter, no terrain correction. A positive dB-scale number merely confirms the value is uncalibrated raw-DN-space (real calibrated sigma0 backscatter is virtually always negative dB) — it supports **no** physical interpretation of ground conditions at all, wet or dry. Any consumer (human, report LLM, cross-validator) reading a S1 `affected_area_km2 = 0` or a "low"/"dry" verdict off the raw `mean_index` must be corrected: on this path the pipeline currently cannot produce a trustworthy flood answer in either direction. This is a real gap, not a benign result — flag it in the report/PDF as "flood status indeterminate (uncalibrated SAR)", not as "no flood detected".
+- **Confidence silently drops at the satellite→hazard boundary, then compounds at hazard→report (found 2026-07-26, not yet fixed).** Satellite's `ConfidenceTracker.overall_confidence()` (a real, weighted assessment — SAR uncalibrated + cloud + temporal-dispersion concerns) is correctly written to `structured["confidence"]` and `PipelineState["confidence_scores"]["satellite"]`, and `agents/hazard/agent.py`'s `_normalise_satellite_payload` (line ~89) does carry it into the normalized payload's `confidence` key. But `agents/hazard/analyzer.py`'s `run_parallel_analysis` (line ~333) **never reads that key** — it extracts only `affected_area_km2`/`mean_value`/`bbox`/`risk_cities`/`satellite_type` from the satellite payload. Hazard's own `confidence_scores` (flood LLM self-rating + earthquake/landslide deterministic) are entirely self-generated, disconnected from how uncertain satellite was about its own input. Impact (`agents/impact/node.py`) then inherits hazard's number, and `agents/report/db_client.py`'s `_collect_confidence_values` averages only hazard's + impact's confidences — satellite is **never in the input set**. Net effect observed live: satellite confidence 0.0, but hazard/impact both landed at 0.83 and the final PDF's `confidence_level` came out **HIGH** — the system asserting confidence it does not have, the same failure class as the invalid-bbox→hardcoded-HIGH-severity bug (`root_cause.md`). Diagnosed only, not fixed — the fix would need `run_parallel_analysis` to fold `satellite_data.get("confidence")` into its own `confidence_scores` (or into `_collect_confidence_values` directly) before any of Steps 6/7's other changes.
+- **Uncalibrated-SAR-as-NDWI unit confusion is systemic, not a single call site (found 2026-07-26, not yet fixed).** Every prompt/deterministic-check surveyed that consumes `mean_index`/`mean_value`/`water_percent`:
+  - `agents/satellite/agent.py`'s `validation_input` dict (line ~728, feeds `cross_validator.validate_all`) — **hardcodes `"mean_ndwi": result.get("mean_index")` unconditionally**, even when `result["index_type"] == "SAR"`, and includes no `index_type`/`index_calibrated`/`satellite_type` key at all. `cross_validator.py`'s index-physics check (line ~374) then unconditionally applies NDWI thresholds (`ndwi > 0.3`/`> 0.1`) to whatever it's handed whenever `disaster_type == "flood"` — on the 2026-07-26 run this fed the raw SAR value `23.6485` through `elif ndwi > 0.1: add_evidence(0.75, weight=0.3)`, adding false confidence-boosting "evidence" from a value that was never an NDWI ratio. This is the exact defect class as `analyze_flood`'s already-documented SAR-into-NDWI-threshold bug (`root_cause.md` §4.3), but in the **deterministic** cross-validator, not an LLM, and one call site earlier (the mislabeling happens at the `validation_input` construction, before the value even reaches `cross_validator.py`).
+  - `agents/satellite/intelligence.py`'s `interpret_results` prompt (line ~497) — **states `index_type`** ("Index type: {index_type} (NDWI/NDVI/SAR)") but never states `index_calibrated` or any calibration caveat.
+  - `agents/report/intelligence.py`'s `_compact_context` (line ~445, feeds every report-stage LLM prompt) — **states `index_type`** but never `index_calibrated`.
+  - `agents/hazard/analyzer.py`'s `analyze_flood` prompt (line ~181) — the one call site that's actually correct: branches `index_label`/`index_context` on `satellite_type` so the LLM sees "SAR backscatter ratio (VV-VH)... Negative values mean flooding" vs "NDWI flood index... Above 0.3 indicate flooding," not a mislabeled ratio. Its **deterministic fallback** (used only when the LLM call fails) still applies flat `flood_index > 0.5`/`0.3` NDWI-scale thresholds regardless of `satellite_type` — latent, not hit on the 2026-07-26 run since the LLM call succeeded.
+  - `agents/report/generator.py`'s `deterministic_detailed_report` template (line ~685) — states `index_type` in the rendered text but never calibration status; only reached on the report LLM-fallback path.
+  Net: **every prompt/check surveyed states `index_type` where it states anything at all, but NONE state `index_calibrated`**, and one (satellite's own `validation_input`) actively mislabels a SAR value as NDWI before any downstream code gets a chance to branch correctly. Diagnosed only, not fixed.
+- **S1 coverage tiers 1–3 exactly-0.000%, not a bug — confirmed via live CDSE attribute lookup (2026-07-26).** On the 88ad6095 run, tiers 1–3 (same-relative-orbit required) kept retrying two adjacent DESCENDING/orbit-107 frames 25s apart (same physical strip — stacking them can't add new extent, so 0% is real, not a masking artifact). Tier 4 (the only tier that relaxes same-orbit) found the ASCENDING/orbit-100 pair a full day earlier that actually reached the AOI. **This is `COVERAGE_TIERS`'s same-orbit-first, then any-orbit design working as documented in `sentinel.py`** (`BUG 3`), not a filter bug — no valid tier-1-eligible pair was ever excluded. Worth a design discussion (should orbit ever be relaxed before the date window widens that far?) but not a defect to fix.
 
 ## Enterprise Gaps (Post-Migration Priority)
 

@@ -38,9 +38,14 @@ from boundary import (
 from confidence_tracker import ConfidenceTracker
 from cross_validator import CrossValidator
 from intelligence import SatelliteIntelligence
-from processor import cleanup_event_temp, process_satellite_imagery
+from processor import (
+    cleanup_event_temp,
+    memory_report as _processor_memory_report,
+    process_satellite_imagery,
+)
 from r2_upload import check_demo_cache, upload_all_results
 from sentinel import (
+    TokenManager,
     authenticate_copernicus,
     backfill_uncovered_cities,
     search_imagery,
@@ -238,6 +243,25 @@ def _error(event_id: str, message: str) -> str:
     )
 
 
+def _coverage_failure(event_id: str, message: str, detail: dict) -> str:
+    """Honest insufficient-coverage failure with geometric gap detail (BUG 3).
+
+    Unlike a generic error, this carries WHERE coverage is missing (disjoint
+    gap regions with area + bbox) and WHY (nodata vs cloud), so downstream can
+    tell "more tiles would fix it" from "the sky was covered that week". The
+    pipeline never analyses a partial AOI, so no risk level is emitted.
+    """
+    logger.error("Insufficient-coverage failure for %s: %s", event_id, message)
+    payload = {
+        "event_id": event_id,
+        "status": "error",
+        "reason": "insufficient_coverage",
+        "error": message,
+    }
+    payload.update(detail or {})
+    return json.dumps(payload)
+
+
 def _clarification(event_id: str, profile: dict) -> str:
     """Build a clarification-request payload for an ambiguous disaster message.
 
@@ -288,19 +312,24 @@ def _recover(anomaly_type: str, context: dict, attempt: int) -> Optional[dict]:
     return strategy
 
 
-def _authenticate_with_recovery(event_id: str, location: str) -> Optional[str]:
+def _authenticate_with_recovery(event_id: str, location: str) -> Optional[TokenManager]:
     """Authenticate to CDSE, retrying up to MAX_STEP_ATTEMPTS with LLM recovery.
 
     On each failure, asks the intelligence layer for a recovery strategy
     (anomaly ``copernicus_auth_failed``) and respects its delay hint before the
-    next attempt (integration point 3). Returns the token or ``None``.
+    next attempt (integration point 3). Returns a `TokenManager` (not a bare
+    token string) or ``None``: a satellite run can take tens of minutes
+    (multi-tile mosaic + large downloads), well past CDSE's ~10 min
+    access-token lifetime, so every downstream consumer must be able to pull a
+    freshly-refreshed token rather than reuse one string captured here.
     """
     import time
 
     for attempt in range(1, MAX_STEP_ATTEMPTS + 1):
-        token = authenticate_copernicus()
+        manager = TokenManager()
+        token = manager.get()
         if token is not None:
-            return token
+            return manager
 
         strategy = _recover(
             "copernicus_auth_failed",
@@ -497,13 +526,15 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
 
         # (d) Copernicus authentication (needed by select_satellite's cloud
         # peek). INTEGRATION POINT 3 — retry with LLM-guided recovery on
-        # failure (anomaly copernicus_auth_failed, max 3 attempts).
-        token = _authenticate_with_recovery(event_id, location)
-        if token is None:
+        # failure (anomaly copernicus_auth_failed, max 3 attempts). Returns a
+        # TokenManager, not a bare string, so later long-running downloads can
+        # pull a refreshed token instead of reusing this moment's snapshot.
+        token_manager = _authenticate_with_recovery(event_id, location)
+        if token_manager is None:
             return _error(event_id, "Copernicus authentication failed (after recovery)")
 
         # (e) Smart, cloud-aware Sentinel selection.
-        selection = select_satellite(disaster_type, bbox=bbox, token=token)
+        selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
         satellite_type = selection["satellite_type"]
 
         # INTEGRATION POINT 2 — devise the satellite strategy with full LLM
@@ -559,7 +590,9 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                 continue
 
         result = process_satellite_imagery(
-            selection, scenes, bbox, merged, event_id, token, disaster_type,
+            # Pass the TokenManager itself (not .get()'s snapshot) so downloads
+            # deep inside the pipeline can refresh it as the run proceeds.
+            selection, scenes, bbox, merged, event_id, token_manager, disaster_type,
             city_geoms=city_geoms,
             # Per-city artifacts are intentionally disabled: re-clipping the full
             # mosaic to each city is very expensive on a large multi-tile AOI
@@ -567,19 +600,30 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # agent everything they need). `city_geoms` is still passed so the
             # mosaic set-cover spreads scenes across the scattered cities.
             city_boundaries=None,
+            # Tiers 3/4 lower confidence + append an anomaly through this tracker.
+            tracker=tracker,
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")
-        if result.get("status") == "coverage_insufficient":
-            # INTEGRATION POINT 3 — let the LLM weigh in (it may recommend
-            # Landsat). We surface the anomaly + its advice in the error so the
-            # caller sees an actionable next step, not a bare failure.
+        if result.get("status") == "failed" and (
+            result.get("reason") == "insufficient_coverage"
+        ):
+            # HARD REQUIREMENT: 100% valid-pixel AOI coverage. No tier reached it,
+            # so we FAIL HONESTLY rather than analyse a partial AOI and report a
+            # risk level for it (BUG 3). Surface the gap geometry so downstream
+            # can see WHERE coverage is missing and whether more tiles would help
+            # (nodata) or the sky was covered that week (cloud).
+            gaps = result.get("gaps") or []
+            gap_cause = result.get("gap_cause") or {}
+            # INTEGRATION POINT 3 — let the LLM weigh in (may recommend Landsat).
             recovery = _recover(
                 "coverage_insufficient",
                 {
                     "event_id": event_id,
-                    "best_valid_percent": result.get("best_valid_percent"),
-                    "min_required_percent": result.get("min_required_percent"),
+                    "best_coverage_percent": result.get("coverage_percent"),
+                    "uncovered_area_km2": result.get("uncovered_area_km2"),
+                    "uncovered_regions": result.get("uncovered_regions"),
+                    "gap_cause": gap_cause,
                     "disaster_type": disaster_type,
                     "location": location,
                 },
@@ -588,11 +632,33 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             note = ""
             if recovery and recovery.get("alert_human"):
                 note = f" | {recovery.get('alert_message', '')}"
-            return _error(
+            logger.error(
+                "[%s] INSUFFICIENT COVERAGE: best %.3f%% interior; %d gap(s), "
+                "%.3f km^2 uncovered (nodata=%s px, cloud=%s px)",
                 event_id,
-                "coverage_insufficient: no scene covers enough of the risk "
-                f"area (best {result.get('best_valid_percent')}% valid pixels, "
-                f"need >= {result.get('min_required_percent')}%)" + note,
+                result.get("coverage_percent", 0.0),
+                result.get("uncovered_regions", 0),
+                result.get("uncovered_area_km2", 0.0),
+                gap_cause.get("nodata"),
+                gap_cause.get("cloud"),
+            )
+            return _coverage_failure(
+                event_id,
+                "insufficient_coverage: could not cover 100% of the AOI with "
+                f"valid pixels (best {result.get('coverage_percent')}%; "
+                f"{result.get('uncovered_regions')} uncovered region(s), "
+                f"{result.get('uncovered_area_km2')} km^2)" + note,
+                {
+                    "coverage_percent": result.get("coverage_percent"),
+                    "full_aoi_coverage_percent": result.get(
+                        "full_aoi_coverage_percent"
+                    ),
+                    "uncovered_regions": result.get("uncovered_regions"),
+                    "uncovered_area_km2": result.get("uncovered_area_km2"),
+                    "gaps": gaps,
+                    "gap_cause": gap_cause,
+                    "bytes_downloaded": result.get("bytes_downloaded"),
+                },
             )
 
         # (h) Upload all artifacts to Cloudflare R2 (merged AOI).
@@ -757,6 +823,22 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "mean_index": result["mean_index"],
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
+            # BUG 5 — explicit calibration contract so the hazard agent can
+            # branch on a real field instead of inferring from satellite_type.
+            # SAR is 10*log10(raw GRD DN): uncalibrated, no speckle filter, no
+            # terrain correction — it must NOT be threshold-compared. NDWI is a
+            # bounded, calibrated ratio.
+            "index_calibrated": result.get("index_calibrated"),
+            "index_units": result.get("index_units"),
+            # BUG 3 — coverage provenance so hazard/report see how the 100% AOI
+            # coverage was achieved (which tier, temporal spread, tile count).
+            "coverage_percent": result.get("coverage_percent"),
+            "full_aoi_coverage_percent": result.get("full_aoi_coverage_percent"),
+            "coverage_tier": result.get("coverage_tier"),
+            "temporal_spread_days": result.get("temporal_spread_days"),
+            "acquisition_count": result.get("acquisition_count"),
+            "processing_level": result.get("processing_level"),
+            "bytes_downloaded": result.get("bytes_downloaded"),
             "bbox": list(bbox),
             # Geographic extent of the PNG layers, for map overlay. Shapes
             # for Leaflet (bounds_leaflet) and MapLibre (bounds_corners).
@@ -822,3 +904,25 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         return json.dumps(structured)
     except Exception as exc:  # noqa: BLE001 - report any failure to the caller.
         return _error(event_id, f"Unexpected error: {exc}")
+    finally:
+        # BUG 7 — guarantee temp cleanup on EVERY exit path (success already
+        # cleaned above and kept the .zip cache; here we catch the failure and
+        # exception paths, which previously left the multi-GB working tree on
+        # disk). cleanup_event_temp is safe to call when the dir is already gone.
+        try:
+            asyncio.run(cleanup_event_temp(event_id))
+        except Exception as _cleanup_exc:  # noqa: BLE001 - never mask the result
+            logger.warning(
+                "[Cleanup] finally-path cleanup failed for %s: %s",
+                event_id, _cleanup_exc,
+            )
+        try:
+            mr = _processor_memory_report()
+            if mr:
+                logger.info(
+                    "[MEM] peak stage=%s peak=%.1f MB; per-stage=%s",
+                    mr.get("peak_stage"), mr.get("peak_mb"),
+                    mr.get("per_stage"),
+                )
+        except Exception:  # noqa: BLE001
+            pass

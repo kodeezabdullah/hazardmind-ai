@@ -95,6 +95,10 @@ affine==2.4.0
 attrs==26.1.0
 cligj==0.7.2
 pycountry==26.2.16
+# scipy: mask erosion + connected-component gap labelling (satellite coverage
+# correctness pass, 2026-07-26). psutil: per-stage RSS instrumentation.
+scipy==1.16.2
+psutil==7.1.0
 
 # --- Cloud storage (satellite + report) ---
 boto3==1.43.29

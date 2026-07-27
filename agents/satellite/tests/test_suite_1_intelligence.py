@@ -237,19 +237,8 @@ def t1_8(interp):
         bad("T1.8", f"{wc} words (>=200)")
 
 
-def t1_9():
-    print("\nT1.9 decide_landsat_fallback (no_sentinel_scenes, earthquake, 3 days)")
-    r = intel.decide_landsat_fallback("no_sentinel_scenes", "earthquake", "Peshawar, Pakistan", 3)
-    if not r:
-        return bad("T1.9", "returned None")
-    if "use_landsat" in r and isinstance(r.get("use_landsat"), bool):
-        ok("T1.9", f"use_landsat={r.get('use_landsat')} (yes/no)")
-    else:
-        bad("T1.9", f"use_landsat missing/not bool: {r.get('use_landsat')}")
-    if (r.get("reason") or "").strip():
-        ok("T1.9", "reasoning present")
-    else:
-        bad("T1.9", "no reasoning")
+# T1.9 removed: decide_landsat_fallback was deleted as dead code (BUG 6) — the
+# pipeline has no Landsat ingestion path, so nothing consumed its decision.
 
 
 if __name__ == "__main__":
@@ -265,7 +254,6 @@ if __name__ == "__main__":
     t1_6()
     interp = t1_7()
     t1_8(interp)
-    t1_9()
     dur = time.time() - start
     print("\n" + "=" * 60)
     print(f"SUITE 1 SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)} WARN={len(WARN)} in {dur:.1f}s")

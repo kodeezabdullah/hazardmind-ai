@@ -575,39 +575,13 @@ Do NOT return JSON — return a natural text message."""
     # ------------------------------------------------------------------ #
     # METHOD 6: decide whether Landsat is worth trying
     # ------------------------------------------------------------------ #
-    def decide_landsat_fallback(
-        self,
-        sentinel_failure_reason: str,
-        disaster_type: str,
-        location: str,
-        days_since_disaster: Any,
-    ) -> Optional[dict]:
-        """Decide whether Landsat 8/9 is a worthwhile fallback.
-
-        Model: google/gemma-4-31B-it. Returns the parsed decision dict or
-        ``None``.
-        """
-        prompt = f"""\
-Sentinel satellite data is unavailable.
-Reason: {sentinel_failure_reason}
-Disaster type: {disaster_type}
-Location: {location}
-Days since disaster: {days_since_disaster}
-
-Should we use Landsat 8/9 as fallback?
-Note: Landsat = 30m resolution, 16-day revisit, always available.
-
-Return ONLY valid JSON:
-{{
-  "use_landsat": true/false,
-  "reason": "why or why not",
-  "expected_quality": "LOW/MEDIUM/HIGH",
-  "bands_to_use": ["B3", "B5"],
-  "confidence": 0.0-1.0
-}}"""
-        return self._complete_json(
-            prompt, primary_model="google/gemma-4-31B-it"
-        )
+# NOTE: `decide_landsat_fallback` was removed (BUG 6, dead code). It returned an
+# LLM opinion on whether to use Landsat 8/9 as a fallback, but the pipeline has
+# NO Landsat ingestion path (CDSE/Sentinel only), so nothing could ever act on
+# its answer and no caller invoked it. Wiring a real Landsat path is a new
+# feature, out of scope for this correctness pass; keeping a decision method for
+# a capability that doesn't exist is misleading, so it was deleted rather than
+# left dormant.
 
 
 # --------------------------------------------------------------------------- #
