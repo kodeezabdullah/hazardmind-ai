@@ -215,7 +215,35 @@ async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: 
                 "agent": "hazardmind-hazard",
                 "event_id": event_id,
                 "status": "error",
-                "error": "quality check failed",
+                "error": f"quality check failed: {qc.get('checks')}",
+            }
+
+        # insufficient_data (H#3): a plumbing failure (e.g. invalid bbox from
+        # satellite), not a completed analysis. Surface it distinctly so the
+        # graph node can propagate the real error into PipelineState["errors"]
+        # and record an anomaly, instead of silently presenting a fabricated
+        # HIGH severity as if it were a real verdict. Still write the honest
+        # UNKNOWN/0.0-confidence rows to hazard_zones so the DB reflects
+        # "assessed, could not determine" rather than having no row at all.
+        if raw_result.get("status") == "insufficient_data":
+            await write_to_db(raw_result)
+            return {
+                "agent": "hazardmind-hazard",
+                "event_id": event_id,
+                "status": "insufficient_data",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "hazard": {
+                    "disaster_type": disaster_type,
+                    "flood_risk": raw_result["flood_risk"],
+                    "earthquake_risk": raw_result["earthquake_risk"],
+                    "landslide_risk": raw_result["landslide_risk"],
+                    "primary_hazard_risk": "UNKNOWN",
+                    "overall_severity": raw_result["overall_severity"],
+                    "confidence_scores": raw_result["confidence_scores"],
+                    "risk_polygons": {},
+                    "risk_polygons_url": "",
+                },
+                "error": raw_result.get("error") or "insufficient data for hazard analysis",
             }
 
         await write_to_db(raw_result)

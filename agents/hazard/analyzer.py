@@ -342,12 +342,22 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     satellite_confidence = _to_float(analysis.get("confidence")) if analysis.get("confidence") is not None else None
 
     if not bbox or len(bbox) < 4:
+        # A plumbing failure (no valid bbox handed off from satellite) is NOT
+        # a disaster signal. Previously this returned overall_severity="HIGH"
+        # in the same dict as an honest "error" string -- a fake HIGH that
+        # passed quality_check unflagged (a valid enum value) and could flow
+        # straight into an NDMA response-level escalation with zero real
+        # disaster behind it (SYSTEM_ANALYSIS.md H#3 / Section E.1). Use an
+        # explicit UNKNOWN severity + insufficient_data status instead, so a
+        # plumbing failure can never masquerade as a real HIGH-severity
+        # verdict downstream.
         return {
             "event_id": event_id,
             "flood_risk": "UNKNOWN",
             "earthquake_risk": "UNKNOWN",
             "landslide_risk": "UNKNOWN",
-            "overall_severity": "HIGH",
+            "overall_severity": "UNKNOWN",
+            "status": "insufficient_data",
             "confidence_scores": {
                 "flood": 0.0,
                 "earthquake": 0.0,
