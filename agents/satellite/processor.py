@@ -1620,22 +1620,24 @@ def export_png(
 # Step 7G: vectorize the classification into GeoJSON zones
 # --------------------------------------------------------------------------- #
 def _polygon_area_km2(geom, crs) -> float:
-    """Approximate a WGS84/geographic polygon's area in km^2.
+    """Compute a WGS84/geographic polygon's area in km^2.
 
     Reprojects to a world equal-area projection (EPSG:6933) for the measure.
+    This must never silently degrade to a degrees^2 value mislabeled as km^2
+    (off by ~4 orders of magnitude at mid-latitudes, and indistinguishable
+    from a real value downstream) — if the equal-area reprojection fails, that
+    is a hard failure: it propagates so the pipeline returns status:"failed"
+    instead of shipping a wrong-but-plausible-looking area.
     """
-    try:
-        from pyproj import Transformer
+    from pyproj import Transformer
 
-        transformer = Transformer.from_crs(
-            crs if crs else "EPSG:4326", "EPSG:6933", always_xy=True
-        )
-        projected = shapely_transform(
-            lambda x, y, z=None: transformer.transform(x, y), geom
-        )
-        return projected.area / 1e6
-    except Exception:  # noqa: BLE001 - area is best-effort
-        return geom.area  # degrees^2 fallback; only used for relative size
+    transformer = Transformer.from_crs(
+        crs if crs else "EPSG:4326", "EPSG:6933", always_xy=True
+    )
+    projected = shapely_transform(
+        lambda x, y, z=None: transformer.transform(x, y), geom
+    )
+    return projected.area / 1e6
 
 
 # Hazard class value -> severity label (class 1 lowest, 3 highest).
