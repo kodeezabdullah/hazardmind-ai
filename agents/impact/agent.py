@@ -275,7 +275,14 @@ async def run_impact_analysis(
             "roads_blocked": round(float(infra.get("roads_blocked_km", 0) or 0), 1),
             "bridges_at_risk": int(infra.get("bridges_at_risk", 0) or 0),
             "vulnerability_score": str(vuln_score),
-            "evacuation_routes": vuln.get("priority_zones", []),
+            # H#12: was fed priority_zones (named-place data) under a
+            # route-data field name — the LLM's real evacuation_routes output
+            # was computed then silently discarded. Now persists the field
+            # that actually matches the name, mirroring the DB write fix in
+            # services/db.py. priority_zones itself isn't currently exposed
+            # under its own key here — out of scope for this contained fix
+            # (would need a new field + a reader added, not a rename).
+            "evacuation_routes": vuln.get("evacuation_routes", []),
             "estimated_evacuation_time": (
                 infra.get("estimated_evacuation_time")
                 or vuln.get("estimated_evacuation_time", "4-6 hours")

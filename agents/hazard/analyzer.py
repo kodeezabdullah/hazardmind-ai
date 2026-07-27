@@ -285,30 +285,32 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     ]
     max_mag = max((_to_float(mag) for mag in magnitudes), default=0.0)
     eq_count = usgs_data.get("count", 0)
-    prompt = (
-        f"Earthquake risk assessment from OBSERVED data only.\n"
-        f"Recent earthquakes in area (USGS, last 7 days): count={eq_count}, "
-        f"max magnitude={max_mag}.\n"
-        f"BBox: {bbox}.\n"
-        f"Rules: base risk ONLY on the observed count/magnitude above. "
-        f"If count is 0 and max magnitude is 0, there is NO recent seismic "
-        f"activity, so risk is LOW. Do NOT raise the risk from general regional "
-        f"seismicity or geographic assumptions — only real recent events count.\n"
-        f"Return JSON only."
-    )
-    system = (
-        "You are a seismic risk analyst who reports ONLY what the observed data "
-        "supports. Absence of recent earthquakes means LOW risk — never invent "
-        "elevated risk from a region's general reputation. Return only JSON with "
-        "keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning "
-        "(string), liquefaction_probability (0.0-1.0)."
-    )
 
     # DETERMINISTIC risk from observed seismicity. We intentionally do NOT ask an
     # LLM here: earthquake risk is a direct function of recent magnitude/count,
     # and LLMs repeatedly inflated it from a region's general reputation (e.g.
     # "Pakistan is seismically active" -> HIGH) even when USGS shows zero recent
     # events — fabricating a disaster on a no-event feed. The data decides.
+    #
+    # (Hazard #6, SYSTEM_ANALYSIS.md: a prompt/system pair was previously built
+    # here on every call and never used, since this function is fully
+    # deterministic. Removed as dead code — the LLM prompt an earlier design
+    # would have used is preserved below for reference/future reactivation:
+    #
+    #   prompt: "Earthquake risk assessment from OBSERVED data only.
+    #     Recent earthquakes in area (USGS, last 7 days): count={eq_count},
+    #     max magnitude={max_mag}. BBox: {bbox}. Rules: base risk ONLY on the
+    #     observed count/magnitude above. If count is 0 and max magnitude is 0,
+    #     there is NO recent seismic activity, so risk is LOW. Do NOT raise the
+    #     risk from general regional seismicity or geographic assumptions —
+    #     only real recent events count. Return JSON only."
+    #   system: "You are a seismic risk analyst who reports ONLY what the
+    #     observed data supports. Absence of recent earthquakes means LOW
+    #     risk — never invent elevated risk from a region's general
+    #     reputation. Return only JSON with keys: risk
+    #     (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning
+    #     (string), liquefaction_probability (0.0-1.0)."
+    # )
     if max_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
     elif max_mag >= 5.5:
@@ -333,23 +335,6 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
 
 async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     slope_estimate = slope_data.get("slope_estimate", 15.0)
-    prompt = (
-        f"Landslide risk assessment from OBSERVED data only.\n"
-        f"Mean terrain slope (real DEM): {slope_estimate} degrees.\n"
-        f"GDACS landslide events in area: {gdacs_data.get('count', 0)}.\n"
-        f"BBox: {bbox}.\n"
-        f"Rules: base risk ONLY on the slope and events above. Flat terrain "
-        f"(slope < 10 degrees) with no events is LOW risk. Do NOT raise risk "
-        f"from general regional assumptions — only the measured slope/events "
-        f"count.\nReturn JSON only."
-    )
-    system = (
-        "You are a landslide risk analyst who reports ONLY what the observed "
-        "slope/events support. Flat terrain with no events means LOW risk — "
-        "never invent elevated risk from a region's reputation. Return only JSON "
-        "with keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), "
-        "reasoning (string), high_risk_zones (list)."
-    )
 
     # DETERMINISTIC risk from the real DEM slope. No LLM: LLMs inflated landslide
     # risk from a region's reputation even on flat terrain. We also do NOT use the
@@ -357,6 +342,24 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     # is unreliable; e.g. it returned 93 events for Rawalpindi, all at coordinates
     # in China/Mongolia), so a raw count would falsely raise the risk. The real
     # measured slope is the trustworthy signal.
+    #
+    # (Hazard #6, SYSTEM_ANALYSIS.md: a prompt/system pair was previously built
+    # here on every call and never used, since this function is fully
+    # deterministic. Removed as dead code — preserved below for reference:
+    #
+    #   prompt: "Landslide risk assessment from OBSERVED data only. Mean
+    #     terrain slope (real DEM): {slope_estimate} degrees. GDACS landslide
+    #     events in area: {gdacs_data.get('count', 0)}. BBox: {bbox}. Rules:
+    #     base risk ONLY on the slope and events above. Flat terrain (slope <
+    #     10 degrees) with no events is LOW risk. Do NOT raise risk from
+    #     general regional assumptions — only the measured slope/events
+    #     count. Return JSON only."
+    #   system: "You are a landslide risk analyst who reports ONLY what the
+    #     observed slope/events support. Flat terrain with no events means
+    #     LOW risk — never invent elevated risk from a region's reputation.
+    #     Return only JSON with keys: risk (CRITICAL/HIGH/MEDIUM/LOW),
+    #     confidence (0.0-1.0), reasoning (string), high_risk_zones (list)."
+    # )
     slope = _to_float(slope_estimate)
     if slope > 45:
         risk, confidence = "CRITICAL", 0.8
