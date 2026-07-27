@@ -384,6 +384,29 @@ async def quality_check(result: dict) -> dict:
     confidence_scores = _extract_confidence_scores(result)
     event_id = result.get("event_id")
 
+    # overall_severity is allowed to be UNKNOWN ONLY when the result explicitly
+    # says it couldn't determine anything (status: insufficient_data — e.g. the
+    # invalid-bbox fallback, H#3). A normal completed analysis must still land
+    # on a real CRITICAL/HIGH/MEDIUM/LOW severity.
+    is_insufficient_data = result.get("status") == "insufficient_data"
+    allowed_severities = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+    if is_insufficient_data:
+        allowed_severities = allowed_severities | {"UNKNOWN"}
+
+    all_risks_unknown = all(
+        risks[key] == "UNKNOWN"
+        for key in ("flood_risk", "earthquake_risk", "landslide_risk")
+    )
+    # Internal-consistency guard: if every individual risk is UNKNOWN (nothing
+    # could be assessed), overall_severity claiming anything other than
+    # UNKNOWN is self-contradictory and must not pass — this is exactly the
+    # shape of the H#3 defect (all-UNKNOWN risks paired with a fabricated
+    # non-UNKNOWN severity) and must be caught here even if some future
+    # code path reintroduces it without going through the bbox fallback.
+    severity_internally_consistent = not (
+        all_risks_unknown and risks["overall_severity"] != "UNKNOWN"
+    )
+
     checks = {
         "flood_risk": risks["flood_risk"]
         in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
@@ -391,8 +414,8 @@ async def quality_check(result: dict) -> dict:
         in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
         "landslide_risk": risks["landslide_risk"]
         in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"},
-        "overall_severity": risks["overall_severity"]
-        in {"CRITICAL", "HIGH", "MEDIUM", "LOW"},
+        "overall_severity": risks["overall_severity"] in allowed_severities,
+        "severity_internally_consistent": severity_internally_consistent,
         "confidence_scores": all(
             key in confidence_scores for key in ("flood", "earthquake", "landslide")
         ),

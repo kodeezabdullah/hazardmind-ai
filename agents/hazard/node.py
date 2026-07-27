@@ -26,10 +26,11 @@ async def hazard_node(state: PipelineState) -> dict:
     """
     event_id = state["event_id"]
     satellite_result = state.get("satellite_result") or {}
+    disaster_type = state.get("disaster_type") or "flood"
 
-    result = await analyze_hazard(satellite_result, event_id)
+    result = await analyze_hazard(satellite_result, event_id, disaster_type=disaster_type)
 
-    if result.get("status") != "complete":
+    if result.get("status") == "error":
         logger.error("Hazard stage failed for %s: %s", event_id, result)
         return {
             "hazard_result": result,
@@ -45,10 +46,34 @@ async def hazard_node(state: PipelineState) -> dict:
         avg = sum(hazard_confidences.values()) / len(hazard_confidences)
         confidence_scores["hazard"] = avg
 
+    errors = list(state.get("errors") or [])
+    anomalies = list(state.get("anomalies") or [])
+    for msg in (result.get("hazard") or {}).get("anomalies") or []:
+        anomalies.append({"stage": "hazard", "message": msg})
+    if result.get("status") == "insufficient_data":
+        # A plumbing failure (e.g. invalid bbox), not a real disaster verdict
+        # (H#3). Do NOT halt the graph — impact's own no-significant-disaster
+        # gate already treats UNKNOWN risk honestly (reports zero impact
+        # rather than inventing numbers), so the pipeline can safely continue.
+        # The failure itself must still be visible in pipeline_log, not
+        # silently swallowed at this boundary.
+        logger.warning("Hazard stage got insufficient data for %s: %s", event_id, result.get("error"))
+        errors.append({"stage": "hazard", "error": result.get("error") or "insufficient_data"})
+        anomalies.append({
+            "stage": "hazard",
+            "message": (
+                "Hazard analysis could not be completed (insufficient_data) — "
+                f"{result.get('error') or 'no further detail'}. overall_severity "
+                "is UNKNOWN, not a real disaster verdict."
+            ),
+        })
+
     return {
         "hazard_result": result,
         "status": "impact",
         "current_step": "hazard",
         "progress": 50,
         "confidence_scores": confidence_scores,
+        "errors": errors,
+        "anomalies": anomalies,
     }

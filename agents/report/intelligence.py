@@ -443,6 +443,10 @@ def _compact_context(context: dict) -> dict:
         "satellite": context.get("satellite"),
         "analysis": {
             "index_type": context.get("analysis", {}).get("index_type"),
+            # H#11: carry the calibration caveat alongside the index label so a
+            # prompt/reader can tell a SAR mean_value is not physically
+            # interpretable, instead of stating index_type with no caveat.
+            "index_calibrated": context.get("analysis", {}).get("index_calibrated"),
             "mean_value": context.get("analysis", {}).get("mean_value"),
             "affected_area_km2": context.get("analysis", {}).get("affected_area_km2"),
             "damage_percent": context.get("analysis", {}).get("damage_percent"),

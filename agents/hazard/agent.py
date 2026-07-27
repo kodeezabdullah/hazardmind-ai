@@ -86,7 +86,21 @@ def _normalise_satellite_payload(payload: dict, event_id: str) -> dict:
             "mean_value": mean_value,
             "water_percent": water_percent,
             "index_type": p.get("index_type"),
+            # GATE B (2026-07-28): confirmed by direct read that this adapter
+            # did NOT previously carry index_calibrated/index_units into the
+            # normalized payload — satellite's ANALYSIS.md was right, hazard's
+            # ANALYSIS.md's claim that it did was wrong. Added here so the
+            # deterministic flood fallback (analyzer.py) can branch on real
+            # calibration status instead of inferring it from satellite_type
+            # (H#4 / SYSTEM_ANALYSIS.md C, H#4).
+            "index_calibrated": p.get("index_calibrated"),
+            "index_units": p.get("index_units"),
             "confidence": p.get("confidence"),
+            # confidence_basis/evidence_count: satellite computes these (see
+            # its ANALYSIS.md) but nothing downstream previously saw them —
+            # small additive carry-through, not otherwise used yet.
+            "confidence_basis": p.get("confidence_basis"),
+            "evidence_count": p.get("evidence_count"),
             "needs_verification": p.get("needs_verification"),
         },
         "artifacts": {
@@ -174,11 +188,26 @@ async def write_to_db(result: dict) -> None:
         await conn.close()
 
 
-async def analyze_hazard(satellite_payload: dict, event_id: str) -> dict:
+_PRIMARY_RISK_KEY = {
+    "flood": "flood_risk",
+    "earthquake": "earthquake_risk",
+    "landslide": "landslide_risk",
+}
+
+
+async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: str = "flood") -> dict:
     """Run multi-hazard analysis and write hazard_zones. Returns the result payload.
 
     Never raises — failures are reported as a ``status: error`` payload so the
     caller (the LangGraph node) can propagate them into PipelineState.
+
+    ``disaster_type`` is the dispatch's ACTUAL disaster type (from
+    PipelineState, set once by the backend). All three hazard types are still
+    analyzed unconditionally (existing behavior, unchanged) but the result now
+    also surfaces ``primary_hazard_risk`` — an unambiguous field naming the
+    risk level for the disaster actually being assessed, so downstream
+    consumers (impact) don't have to guess via a flood_risk-first fallback
+    chain that silently reads LOW/UNKNOWN on a real non-flood event (H#10).
     """
     satellite_payload = dict(satellite_payload or {})
     satellite_payload["event_id"] = event_id
@@ -200,10 +229,41 @@ async def analyze_hazard(satellite_payload: dict, event_id: str) -> dict:
                 "agent": "hazardmind-hazard",
                 "event_id": event_id,
                 "status": "error",
-                "error": "quality check failed",
+                "error": f"quality check failed: {qc.get('checks')}",
+            }
+
+        # insufficient_data (H#3): a plumbing failure (e.g. invalid bbox from
+        # satellite), not a completed analysis. Surface it distinctly so the
+        # graph node can propagate the real error into PipelineState["errors"]
+        # and record an anomaly, instead of silently presenting a fabricated
+        # HIGH severity as if it were a real verdict. Still write the honest
+        # UNKNOWN/0.0-confidence rows to hazard_zones so the DB reflects
+        # "assessed, could not determine" rather than having no row at all.
+        if raw_result.get("status") == "insufficient_data":
+            await write_to_db(raw_result)
+            return {
+                "agent": "hazardmind-hazard",
+                "event_id": event_id,
+                "status": "insufficient_data",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "hazard": {
+                    "disaster_type": disaster_type,
+                    "flood_risk": raw_result["flood_risk"],
+                    "earthquake_risk": raw_result["earthquake_risk"],
+                    "landslide_risk": raw_result["landslide_risk"],
+                    "primary_hazard_risk": "UNKNOWN",
+                    "overall_severity": raw_result["overall_severity"],
+                    "confidence_scores": raw_result["confidence_scores"],
+                    "risk_polygons": {},
+                    "risk_polygons_url": "",
+                },
+                "error": raw_result.get("error") or "insufficient data for hazard analysis",
             }
 
         await write_to_db(raw_result)
+
+        primary_key = _PRIMARY_RISK_KEY.get(str(disaster_type or "").lower(), "flood_risk")
+        primary_hazard_risk = raw_result.get(primary_key, "UNKNOWN")
 
         payload = {
             "agent": "hazardmind-hazard",
@@ -211,13 +271,19 @@ async def analyze_hazard(satellite_payload: dict, event_id: str) -> dict:
             "status": "complete",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "hazard": {
+                "disaster_type": disaster_type,
                 "flood_risk": raw_result["flood_risk"],
                 "earthquake_risk": raw_result["earthquake_risk"],
                 "landslide_risk": raw_result["landslide_risk"],
+                # The risk level for the ACTUAL disaster this event was
+                # dispatched to assess — additive, does not replace the
+                # per-hazard-type fields above (H#10 fix).
+                "primary_hazard_risk": primary_hazard_risk,
                 "overall_severity": raw_result["overall_severity"],
                 "confidence_scores": raw_result["confidence_scores"],
                 "risk_polygons": {},
                 "risk_polygons_url": "",
+                "anomalies": raw_result.get("anomalies") or [],
             },
             "error": None,
         }

@@ -106,10 +106,26 @@ async def _fetch_overpass(bbox: list) -> dict | None:
     return None
 
 
+_DISASTER_LABELS = {
+    "flood": "flood",
+    "earthquake": "earthquake",
+    "landslide": "landslide",
+}
+
+
 def _build_prompt(city: str, area: float, hazard_data: dict, osm: dict | None) -> str:
-    severity    = hazard_data.get("severity", "moderate")
-    risk        = hazard_data.get("flood_risk", "UNKNOWN")
-    bbox        = hazard_data.get("bbox", [])
+    severity = hazard_data.get("severity", "moderate")
+    disaster_type = str(hazard_data.get("disaster_type") or "flood").lower()
+    disaster_label = _DISASTER_LABELS.get(disaster_type, disaster_type)
+    # Read the risk level for the ACTUAL disaster type, not always flood_risk
+    # (H#1 Part B — mirrors vulnerability.py's existing correct branching).
+    risk_key = {
+        "flood": "flood_risk",
+        "earthquake": "earthquake_risk",
+        "landslide": "landslide_risk",
+    }.get(disaster_type, "flood_risk")
+    risk = hazard_data.get(risk_key, "UNKNOWN")
+    bbox = hazard_data.get("bbox", [])
     osm_quality = "real_osm" if osm else "llm_estimate"
 
     if osm:
@@ -121,8 +137,8 @@ def _build_prompt(city: str, area: float, hazard_data: dict, osm: dict | None) -
         )
         instructions = (
             "Base hospitals_at_risk and schools_at_risk on the real OSM counts above.\n"
-            "Determine which fraction is in the actual flood zone given the severity.\n"
-            "Estimate roads_blocked_km from road segment count and flood extent."
+            f"Determine which fraction is in the actual {disaster_label} zone given the severity.\n"
+            f"Estimate roads_blocked_km from road segment count and {disaster_label} extent."
         )
     else:
         real_data = "OSM data unavailable — estimate from your geographic knowledge of the city."
@@ -130,7 +146,7 @@ def _build_prompt(city: str, area: float, hazard_data: dict, osm: dict | None) -
 
     return f"""You are a senior UN infrastructure analyst.
 
-Disaster: {severity} flood in {city}
+Disaster: {severity} {disaster_label} in {city}
 Affected area: {area:.0f} sq km  (bbox: {bbox})
 Risk level: {risk}
 

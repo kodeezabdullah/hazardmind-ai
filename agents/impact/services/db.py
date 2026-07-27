@@ -23,13 +23,39 @@ CREATE TABLE IF NOT EXISTS impact_data (
     hospitals_at_risk        INTEGER,
     schools_at_risk          INTEGER,
     roads_blocked            INTEGER,
+    roads_blocked_km         DOUBLE PRECISION,
     bridges_at_risk          INTEGER,
     vulnerability_score      TEXT,
     evacuation_routes        JSONB,
     estimated_evacuation_time TEXT,
+    overall_confidence       DOUBLE PRECISION,
     created_at               TIMESTAMPTZ DEFAULT NOW(),
     updated_at               TIMESTAMPTZ DEFAULT NOW()
 );
+"""
+
+# overall_confidence: confirmed present on live Neon (added out-of-band, no
+# migration file in this repo recorded it) via a direct information_schema
+# query on 2026-07-28 — this DDL now matches reality. Report's
+# agents/report/db_client.py:_fetch_impact_data SELECTs this column; prior to
+# this fix nothing in this file wrote it, so every row's overall_confidence
+# was silently NULL forever (the SELECT succeeded — this was a silent data
+# loss, not the schema-mismatch hard-failure the column's absence would have
+# caused). See SYSTEM_ANALYSIS.md Section B.6/H#2.
+#
+# roads_blocked_km: H#14 — roads_blocked stores kilometres under a
+# count-sounding name with no unit suffix, AND the DB previously rounded to
+# nearest integer while the in-memory payload rounded to 1 decimal (agent.py),
+# so the same run could show two different values depending on which surface
+# you read. Per root CLAUDE.md's DB-contract rule (never break write
+# contracts without updating every reader in the same change), this ADDS a
+# correctly-named, correctly-typed column rather than renaming roads_blocked
+# in place — roads_blocked is kept, still populated (deprecated, not
+# removed), so no existing reader breaks. New readers should prefer
+# roads_blocked_km.
+ALTER_DDL = """
+ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS overall_confidence DOUBLE PRECISION;
+ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS roads_blocked_km DOUBLE PRECISION;
 """
 
 
@@ -38,6 +64,7 @@ async def write_impact_data(
     pop: dict,
     infra: dict,
     vuln: dict,
+    overall_confidence: float | None = None,
 ) -> None:
     """Write consolidated impact results to the impact_data table."""
     dsn = os.environ.get("NEON_DATABASE_URL", "")
@@ -48,12 +75,15 @@ async def write_impact_data(
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute(DDL)
+        await conn.execute(ALTER_DDL)
 
         pop_count = int(pop.get("population_affected", 0) or 0)
         evac_time = (
             infra.get("estimated_evacuation_time")
             or vuln.get("estimated_evacuation_time", "unknown")
         )
+
+        roads_blocked_km = round(float(infra.get("roads_blocked_km", 0) or 0), 1)
 
         await conn.execute(
             """
@@ -65,12 +95,14 @@ async def write_impact_data(
                 hospitals_at_risk,
                 schools_at_risk,
                 roads_blocked,
+                roads_blocked_km,
                 bridges_at_risk,
                 vulnerability_score,
                 evacuation_routes,
                 estimated_evacuation_time,
+                overall_confidence,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
             ON CONFLICT (event_id) DO UPDATE SET
                 total_affected           = EXCLUDED.total_affected,
                 high_risk_people         = EXCLUDED.high_risk_people,
@@ -78,10 +110,12 @@ async def write_impact_data(
                 hospitals_at_risk        = EXCLUDED.hospitals_at_risk,
                 schools_at_risk          = EXCLUDED.schools_at_risk,
                 roads_blocked            = EXCLUDED.roads_blocked,
+                roads_blocked_km         = EXCLUDED.roads_blocked_km,
                 bridges_at_risk          = EXCLUDED.bridges_at_risk,
                 vulnerability_score      = EXCLUDED.vulnerability_score,
                 evacuation_routes        = EXCLUDED.evacuation_routes,
                 estimated_evacuation_time = EXCLUDED.estimated_evacuation_time,
+                overall_confidence       = EXCLUDED.overall_confidence,
                 updated_at               = NOW()
             """,
             event_id,
@@ -90,11 +124,25 @@ async def write_impact_data(
             int(pop.get("medium_risk_people", int(pop_count * 0.5)) or int(pop_count * 0.5)),
             int(infra.get("hospitals_at_risk", 0) or 0),
             int(infra.get("schools_at_risk", 0) or 0),
-            int(round(float(infra.get("roads_blocked_km", 0) or 0))),
+            # roads_blocked (legacy, INTEGER, deprecated but still populated
+            # for back-compat with existing readers) now rounds the SAME
+            # underlying value as roads_blocked_km/the in-memory payload
+            # (round-then-int, not a separate round(0-decimals) call) so the
+            # two no longer silently disagree within one run (H#14).
+            int(roads_blocked_km),
+            roads_blocked_km,
             int(infra.get("bridges_at_risk", 0) or 0),
             str(vuln.get("vulnerability_score", 0)),
-            json.dumps(vuln.get("priority_zones", [])),
+            # H#14/H#12: this column is named evacuation_routes and report's
+            # reader (_evacuation_routes/db_client.py) expects real route data
+            # (name/distance_km/status/geojson) -- it was previously fed
+            # priority_zones (named place data: name/lat/lon/priority/reason),
+            # a genuine content/label mismatch. vulnerability.py's LLM output
+            # already computes both fields; this now persists the one that
+            # actually matches the column name and the reader's expectations.
+            json.dumps(vuln.get("evacuation_routes", [])),
             evac_time,
+            float(overall_confidence) if overall_confidence is not None else None,
         )
         logger.info("[db] impact_data upserted for event_id=%s", event_id)
 

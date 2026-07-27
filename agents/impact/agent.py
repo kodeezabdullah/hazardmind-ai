@@ -32,6 +32,45 @@ from tasks.population import run_population_task
 from tasks.vulnerability import run_vulnerability_task
 
 
+_VALID_DISASTER_TYPES = {"flood", "earthquake", "landslide"}
+
+
+def _assert_disaster_type_consistent(hazard_data: dict) -> None:
+    """Fail loudly if the disaster type fed to impact's prompt builders is
+    missing/unrecognized, or if the corresponding hazard risk field was never
+    populated (i.e. still the sentinel default). This is the guard against the
+    H#1 defect class recurring silently: population.py/infrastructure.py build
+    their prompts directly off ``hazard_data["disaster_type"]`` — if that key
+    is ever wrong or absent again, every downstream LLM call would reason
+    about a false disaster premise with no assertion catching it. This runs
+    BEFORE any task/prompt code touches hazard_data.
+    """
+    disaster_type = hazard_data.get("disaster_type")
+    if disaster_type not in _VALID_DISASTER_TYPES:
+        raise AssertionError(
+            f"[impact] disaster_type consistency check failed: hazard_data "
+            f"carries disaster_type={disaster_type!r}, expected one of "
+            f"{sorted(_VALID_DISASTER_TYPES)}. Refusing to build prompts under "
+            f"an unknown/false disaster premise (see SYSTEM_ANALYSIS.md H#1)."
+        )
+    risk_key = {
+        "flood": "flood_risk",
+        "earthquake": "earthquake_risk",
+        "landslide": "landslide_risk",
+    }[disaster_type]
+    if not hazard_data.get(risk_key):
+        raise AssertionError(
+            f"[impact] disaster_type consistency check failed: disaster_type="
+            f"{disaster_type!r} but hazard_data[{risk_key!r}] is empty — the "
+            f"primary hazard's own risk level was never populated for the "
+            f"disaster this event was actually dispatched to assess."
+        )
+    logger.info(
+        "[agent] disaster_type consistency check passed — disaster_type=%s %s=%s",
+        disaster_type, risk_key, hazard_data.get(risk_key),
+    )
+
+
 def _no_significant_disaster(risk_level: str, overall_confidence: float) -> bool:
     """True when the hazard verdict means there is no real disaster to assess.
 
@@ -88,6 +127,7 @@ async def _emit_no_impact(
                 {"population_affected": 0, "high_risk_people": 0, "medium_risk_people": 0},
                 {"hospitals_at_risk": 0, "schools_at_risk": 0, "roads_blocked_km": 0, "bridges_at_risk": 0},
                 {"vulnerability_score": "0", "priority_zones": [], "estimated_evacuation_time": "N/A"},
+                overall_confidence=overall_confidence,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[agent] no-impact DB write failed (non-fatal): %s", exc)
@@ -104,22 +144,35 @@ async def run_impact_analysis(
     flood_depth_estimate: float,
     overall_confidence: float,
     risk_cities: list,
+    disaster_type: str = "flood",
+    flood_risk: str = "UNKNOWN",
+    earthquake_risk: str = "UNKNOWN",
+    landslide_risk: str = "UNKNOWN",
 ) -> str:
     """Run the full impact assessment pipeline for a disaster event.
 
     Args:
         event_id: Unique event identifier from the backend — never generate your own.
         bounds: Bounding box with keys west, south, east, north.
-        risk_level: Overall risk level (LOW/MEDIUM/HIGH/CRITICAL).
+        risk_level: The PRIMARY risk level for this event's actual disaster_type
+            (hazard's primary_hazard_risk, or an equivalent fallback — see
+            node.py). Used for the no-significant-disaster gate.
         severity: Disaster severity descriptor.
         hazard_zones_geojson: GeoJSON of affected hazard zones.
         flood_depth_estimate: Estimated flood depth in metres.
         overall_confidence: Confidence score 0-1 from hazard agent.
         risk_cities: List of city names in the affected area.
+        disaster_type: The event's REAL disaster type ("flood"/"earthquake"/
+            "landslide") from PipelineState — drives which risk level the
+            no-significant-disaster gate reads and what the LLM prompts are
+            told the disaster actually is (H#1).
+        flood_risk / earthquake_risk / landslide_risk: hazard's real, per-type
+            risk levels (no longer hardcoded to LOW for the non-primary types
+            — H#1 Part A).
     """
     logger.info(
-        "[agent] run_impact_analysis — event_id=%s risk_level=%s cities=%s",
-        event_id, risk_level, risk_cities,
+        "[agent] run_impact_analysis — event_id=%s disaster_type=%s risk_level=%s cities=%s",
+        event_id, disaster_type, risk_level, risk_cities,
     )
 
     bbox = [
@@ -133,13 +186,15 @@ async def run_impact_analysis(
         "event_id": event_id,
         "bbox": bbox,
         "risk_cities": risk_cities,
-        "flood_risk": risk_level,
-        "earthquake_risk": "LOW",
-        "landslide_risk": "LOW",
+        "disaster_type": str(disaster_type or "flood").lower(),
+        "flood_risk": flood_risk,
+        "earthquake_risk": earthquake_risk,
+        "landslide_risk": landslide_risk,
         "severity": severity,
         "flood_depth_estimate": flood_depth_estimate,
         "hazard_zones_geojson": hazard_zones_geojson,
     }
+    _assert_disaster_type_consistent(hazard_data)
 
     # ── DECISION GATE (Solution 4): no-significant-disaster verdict ───────────
     # This is a NEUTRAL verification pipeline. If the hazard stage found no real
@@ -178,7 +233,7 @@ async def run_impact_analysis(
     # ── DB write (non-fatal) ─────────────────────────────────────────────────
     if os.environ.get("NEON_DATABASE_URL"):
         try:
-            await write_impact_data(event_id, pop, infra, vuln)
+            await write_impact_data(event_id, pop, infra, vuln, overall_confidence=overall_confidence)
             logger.info("[agent] DB write complete for event_id=%s", event_id)
         except Exception as exc:
             logger.error("[agent] DB write failed (non-fatal): %s", exc)
@@ -220,7 +275,14 @@ async def run_impact_analysis(
             "roads_blocked": round(float(infra.get("roads_blocked_km", 0) or 0), 1),
             "bridges_at_risk": int(infra.get("bridges_at_risk", 0) or 0),
             "vulnerability_score": str(vuln_score),
-            "evacuation_routes": vuln.get("priority_zones", []),
+            # H#12: was fed priority_zones (named-place data) under a
+            # route-data field name — the LLM's real evacuation_routes output
+            # was computed then silently discarded. Now persists the field
+            # that actually matches the name, mirroring the DB write fix in
+            # services/db.py. priority_zones itself isn't currently exposed
+            # under its own key here — out of scope for this contained fix
+            # (would need a new field + a reader added, not a rename).
+            "evacuation_routes": vuln.get("evacuation_routes", []),
             "estimated_evacuation_time": (
                 infra.get("estimated_evacuation_time")
                 or vuln.get("estimated_evacuation_time", "4-6 hours")

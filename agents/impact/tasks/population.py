@@ -60,10 +60,28 @@ async def _fetch_geonames_population(city: str) -> int | None:
     return None
 
 
+_DISASTER_LABELS = {
+    "flood": "flood",
+    "earthquake": "earthquake",
+    "landslide": "landslide",
+}
+
+
 def _build_prompt(city: str, area: float, hazard_data: dict, real_pop: int | None) -> str:
     severity = hazard_data.get("severity", "moderate")
-    risk     = hazard_data.get("flood_risk", "UNKNOWN")
-    bbox     = hazard_data.get("bbox", [])
+    disaster_type = str(hazard_data.get("disaster_type") or "flood").lower()
+    disaster_label = _DISASTER_LABELS.get(disaster_type, disaster_type)
+    # Read the risk level for the ACTUAL disaster type, not always flood_risk —
+    # mirrors vulnerability.py's existing correct flood/eq/ls branching (H#1
+    # Part B: this prompt previously hardcoded "flood" regardless of the real
+    # disaster_type, misleading the LLM on every earthquake/landslide event).
+    risk_key = {
+        "flood": "flood_risk",
+        "earthquake": "earthquake_risk",
+        "landslide": "landslide_risk",
+    }.get(disaster_type, "flood_risk")
+    risk = hazard_data.get(risk_key, "UNKNOWN")
+    bbox = hazard_data.get("bbox", [])
 
     if real_pop:
         pop_context = (
@@ -83,7 +101,7 @@ def _build_prompt(city: str, area: float, hazard_data: dict, real_pop: int | Non
 
     return f"""You are a senior UN disaster analyst.
 
-Disaster event: {severity} flood
+Disaster event: {severity} {disaster_label}
 Cities affected: {city}
 Affected area: {area:.0f} sq km  (bbox: {bbox})
 Risk level: {risk}
@@ -96,21 +114,21 @@ Apply risk levels to determine actual disaster impact.
 Use geographic knowledge for district names only — do NOT invent population numbers if real data is provided.
 
 Your task is REASONING, not estimation:
-- What percentage of the real population is in the high-risk flood zone?
+- What percentage of the real population is in the high-risk {disaster_label} zone?
 - What percentage is medium risk (adjacent, evacuation zone)?
 - Typical age distribution for {city} — children under 5 + elderly over 65?
 - 3 specific local vulnerability factors unique to {city}?
 
-Base population_affected on the REAL flood extent and risk level. If the risk is
-genuinely high and people are in the flood zone, report the real exposed count.
+Base population_affected on the REAL {disaster_label} extent and risk level. If the risk is
+genuinely high and people are in the {disaster_label} impact zone, report the real exposed count.
 If the affected area is tiny or the risk is low, a small or zero figure is the
 honest answer — do NOT inflate it.
-{"Derive population_affected from the real GeoNames figure using your flood-zone reasoning." if real_pop else "Estimate based on city size and affected area."}
+{"Derive population_affected from the real GeoNames figure using your " + disaster_label + "-zone reasoning." if real_pop else "Estimate based on city size and affected area."}
 
 Return ONLY valid JSON, no other text:
 {{
-    "population_affected": <integer people in the flood impact zone — honest, may be small>,
-    "high_risk_people": <integer — approx 20% in direct flood zone>,
+    "population_affected": <integer people in the {disaster_label} impact zone — honest, may be small>,
+    "high_risk_people": <integer — approx 20% in direct {disaster_label} zone>,
     "medium_risk_people": <integer — approx 50% in adjacent zones>,
     "vulnerable_population": <children under 5 + elderly over 65>,
     "local_risk_factors": [

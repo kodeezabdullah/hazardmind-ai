@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 
 
 LATEST_FINAL_REPORT_COLUMNS = (
@@ -225,31 +227,72 @@ async def _fetch_hazard_zones(conn, event_id: str) -> list[dict]:
 
 
 async def _fetch_impact_data(conn, event_id: str) -> dict:
-    row = await conn.fetchrow(
-        """
-        SELECT
-            id,
+    # overall_confidence: confirmed present on live Neon (2026-07-28 schema
+    # check), but this SELECT still degrades gracefully if a future/other
+    # environment's impact_data predates that column, rather than hard-failing
+    # the whole report stage on a schema drift (H#2 / SYSTEM_ANALYSIS.md B.6).
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                event_id,
+                total_affected,
+                high_risk_people,
+                medium_risk_people,
+                hospitals_at_risk,
+                schools_at_risk,
+                roads_blocked,
+                bridges_at_risk,
+                vulnerability_score,
+                evacuation_routes,
+                estimated_evacuation_time,
+                overall_confidence,
+                created_at
+            FROM impact_data
+            WHERE event_id = $1::uuid
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
             event_id,
-            total_affected,
-            high_risk_people,
-            medium_risk_people,
-            hospitals_at_risk,
-            schools_at_risk,
-            roads_blocked,
-            bridges_at_risk,
-            vulnerability_score,
-            evacuation_routes,
-            estimated_evacuation_time,
-            overall_confidence,
-            created_at
-        FROM impact_data
-        WHERE event_id = $1::uuid
-        ORDER BY created_at DESC
-        LIMIT 1;
-        """,
-        event_id,
-    )
-    return _row_to_dict(row)
+        )
+        return _row_to_dict(row)
+    except Exception as exc:
+        if not _schema_mismatch(exc):
+            raise
+        logger.warning(
+            "[db_client] impact_data.overall_confidence (or another expected "
+            "column) is missing on this Neon instance — degrading with "
+            "overall_confidence=None instead of failing the report stage: %s",
+            _safe_db_error(exc),
+        )
+        row = await conn.fetchrow(
+            """
+            SELECT
+                id,
+                event_id,
+                total_affected,
+                high_risk_people,
+                medium_risk_people,
+                hospitals_at_risk,
+                schools_at_risk,
+                roads_blocked,
+                bridges_at_risk,
+                vulnerability_score,
+                evacuation_routes,
+                estimated_evacuation_time,
+                created_at
+            FROM impact_data
+            WHERE event_id = $1::uuid
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """,
+            event_id,
+        )
+        result = _row_to_dict(row)
+        if result is not None:
+            result["overall_confidence"] = None
+        return result
 
 
 def build_structured_report_context(
@@ -334,8 +377,27 @@ def db_context_to_report_context(db_context: dict) -> dict:
             "geojson_url": latest_satellite.get("geojson_url") or "",
         },
         "analysis": {
-            "index_type": "database_result",
+            # H#5: previously hardcoded "database_result"/0 for every DB-fetched
+            # report (the live path — report_node calls run_report_pipeline
+            # with fetch_from_db=True and no incoming_payload), meaning the
+            # report LLM never saw the real satellite index label at all.
+            # satellite_results has no index_type/mean_value column (confirmed
+            # live 2026-07-28), so derive the calibration-relevant label from
+            # satellite_type — the only column that actually distinguishes
+            # SAR (uncalibrated) from optical (calibrated NDWI/NDVI) here.
+            "index_type": _index_type_label(latest_satellite.get("satellite_type")),
+            # mean_value genuinely is not persisted anywhere the report DB-fetch
+            # path can read (satellite_results has no such column) — 0 stays a
+            # placeholder here, but is now paired with an honest index_type/
+            # index_calibrated label instead of a meaningless one, so a report
+            # prompt/reader can at least tell "no real index value available"
+            # from "index value is 0".
             "mean_value": 0,
+            # H#11: SAR (uncalibrated, no radiometric LUT/speckle filter/terrain
+            # correction) vs NDWI/NDVI (treated as calibrated for this labeling
+            # purpose) — cheapest correct derivation available from what's
+            # actually in the DB row today.
+            "index_calibrated": _index_calibrated(latest_satellite.get("satellite_type")),
             "affected_area_km2": latest_satellite.get("affected_area_km2") or 0,
             "damage_percent": latest_satellite.get("damage_percent") or 0,
             "total_zones": latest_satellite.get("total_zones") or len(hazard_geojson.get("features", [])),
@@ -411,6 +473,22 @@ def calculate_confidence_level(report: dict) -> str:
     # stage's confidence, since the report's reliability can never exceed its
     # least-confident input.
     combined = min(values)
+    weakest = min(values)
+    # H#6 explicit invariant: the combined figure this function derives its
+    # HIGH/MEDIUM/LOW verdict from must never exceed the weakest per-stage
+    # confidence that fed into it. This is a natural consequence of min()
+    # today, but a future refactor that swaps the aggregation method (e.g. to
+    # a weighted average) could silently violate it -- assert it explicitly so
+    # such a refactor trips a loud failure immediately instead of silently
+    # degrading the exact guarantee this function exists to provide (a
+    # near-zero satellite/hazard confidence must never be smoothed away by
+    # higher-confidence stages).
+    assert combined <= weakest, (
+        "calculate_confidence_level: combined confidence "
+        f"({combined}) exceeds the weakest per-stage confidence "
+        f"({weakest}) that fed into it -- the min()-dominant guarantee has "
+        f"been violated. values={values}"
+    )
     if combined >= 0.8:
         return "HIGH"
     if combined >= 0.6:
@@ -718,6 +796,35 @@ def _route_geojson_list(value) -> list:
                 routes.extend(_route_geojson_list(route))
         return routes
     return []
+
+
+def _index_type_label(satellite_type: str | None) -> str:
+    """Derive the satellite index label from satellite_type (H#5).
+
+    satellite_results has no index_type column, but satellite_type ("sentinel-1"
+    vs "sentinel-2") is exactly what distinguishes SAR from optical NDWI/NDVI in
+    this codebase — cheap and correct for report-prompt labeling purposes.
+    """
+    sat = str(satellite_type or "").lower()
+    if "sentinel-1" in sat or sat in ("sar", "s1"):
+        return "SAR"
+    if "sentinel-2" in sat or sat in ("optical", "s2"):
+        return "NDWI/NDVI"
+    return "unknown"
+
+
+def _index_calibrated(satellite_type: str | None) -> bool | None:
+    """H#11: SAR is never calibrated in this codebase (no radiometric LUT,
+    speckle filter, or terrain correction — see satellite/ANALYSIS.md's SAR
+    section). NDWI/NDVI (optical) is treated as calibrated for labeling
+    purposes. None if satellite_type itself is unknown/absent.
+    """
+    sat = str(satellite_type or "").lower()
+    if "sentinel-1" in sat or sat in ("sar", "s1"):
+        return False
+    if "sentinel-2" in sat or sat in ("optical", "s2"):
+        return True
+    return None
 
 
 def _overall_severity(event: dict, hazard_zones: list[dict]) -> str:

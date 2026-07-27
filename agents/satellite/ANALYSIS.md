@@ -1,174 +1,223 @@
-# Satellite Agent — Deep Analysis (Post-Migration, 2026-07-27)
+# Satellite Agent — Deep Analysis (2026-07-27, post-fix-pass)
 
-**Scope:** `agents/satellite/` only, as the code exists on `main` after the
-Band→LangGraph migration and the 2026-07-26/27 coverage-correctness pass. Every
-file was read in full: `node.py`, `agent.py`, `sentinel.py`, `processor.py`,
-`confidence_tracker.py`, `cross_validator.py`, `intelligence.py`, `boundary.py`,
-`geoboundaries.py`, `r2_upload.py`, plus the `tests/` directory and the
-downstream consumers in `agents/hazard/`, `agents/impact/`, `agents/report/`.
+**Scope:** `agents/satellite/` as it exists at the tip of `main` (merge commit
+`b1be94f`, PR #10 "fix/satellite-correctness"), i.e. after both the
+2026-07-26 coverage/CRS correctness pass **and** the 2026-07-27
+correctness/contract fix pass that followed it. Every file was read in full:
+`node.py`, `agent.py`, `sentinel.py`, `processor.py`, `confidence_tracker.py`,
+`cross_validator.py`, `intelligence.py`, `boundary.py`, `geoboundaries.py`,
+`r2_upload.py`, the `tests/` directory, and the downstream consumers in
+`agents/hazard/` (`agent.py`, `analyzer.py`) that read the satellite payload.
 
-**Method.** This document trusts the code over `CLAUDE.md`/`CODEBASE.md`/
-`root_cause.md`/`fix.md` wherever they disagree, and says so explicitly.
-`root_cause.md` and `fix.md` are pre-migration documents (they describe a Band
-adapter this agent no longer has) but their **code-level claims** about the
-satellite pipeline (CRS bugs, SAR calibration, confidence math) were
-independently re-verified against the current source and are cited only where
-confirmed still true.
+**Relationship to the prior `ANALYSIS.md`.** A prior version of this
+document (commit `2daddf6`, "deep analysis-only audit") drove six follow-up
+fix commits (`7eb23f0` … `b7fdad4`, squashed into `fd7a08c`'s doc update).
+This document supersedes it. Section 11 below explicitly reconciles every
+finding the prior document made against the code as it stands now — several
+of its gaps are now closed by those six commits, one of its central claims
+(hazard never reads satellite confidence) was **already wrong when written**
+(the fix had landed one commit earlier, at `fa0d9bd`, timestamped 09:39:24,
+ten minutes before the analysis commit at 09:49:13 — confirmed by
+`git log --format=%ci`), and this pass independently re-verified all of it
+against current code rather than trusting either document.
 
-**No code was changed to produce this document.**
+**Method.** Every behavioral claim below is backed by a direct code read at
+the cited file:line, done in this session. `CLAUDE.md`, `CODEBASE.md`,
+`root_cause.md` and the prior `ANALYSIS.md` were all treated as leads to
+re-verify, not settled fact, per the task brief. Disagreements are called out
+explicitly. **No code was changed to produce this document.**
 
 ---
 
-## 1. Execution Flow
+## 1. RESPONSIBILITY
 
-### 1.1 Entry point
+**What this agent is for.** Given `(event_id, location, disaster_type,
+magnitude)`, produce a *grounded, artifact-backed* hazard observation from
+live Sentinel-1/2 imagery: resolve the real administrative boundary for the
+named place, pull the best available satellite scene(s) covering it, compute
+a disaster-appropriate spectral/radar index (NDWI for flood/optical, SAR
+backscatter for flood/cloud-obscured, NDVI for earthquake/landslide damage
+proxy), classify hazard severity into vector zones, render three PNG map
+layers + a GeoJSON, upload them to R2, and self-assess how much to trust its
+own answer (`confidence`, `concerns`, `needs_verification`).
+
+**The question it uniquely answers:** *"What does the imagery actually show,
+over exactly the risk area, right now?"* — a `satellite_type`,
+`affected_area_km2`, a classified hazard map, and a confidence-scored
+assessment of whether that measurement should be trusted.
+
+**Explicitly not this agent's job:**
+- Deciding overall disaster risk level (flood/earthquake/landslide risk
+  classification, MMI, liquefaction) — that's `agents/hazard/analyzer.py`,
+  which *consumes* this agent's `affected_area_km2`/`mean_value`/
+  `satellite_type` as raw evidence, not a verdict.
+- Population/infrastructure impact — `agents/impact/`.
+- Report narrative/PDF — `agents/report/`.
+- Any ground-truth field validation — this agent only ever sees remote
+  sensing; it cross-checks against GDACS/USGS (also remote sources), never
+  a ground report.
+
+**Where it blurs with hazard (its downstream neighbor).** The boundary is not
+as clean as "satellite computes pixels, hazard computes risk" — two things
+leak across:
+1. **The index label/unit contract.** Satellite computes `mean_index` in
+   *different units* depending on `satellite_type` (bounded NDWI/NDVI ratio
+   vs. unbounded uncalibrated SAR dB) and is responsible for *labeling* that
+   honestly (`index_calibrated`, `index_units` — added in the 2026-07-26
+   pass). Hazard is responsible for *branching on* that label before applying
+   any threshold. As verified in §6/§10 below, hazard's LLM-facing prompt
+   does this correctly; hazard's deterministic fallback does not — and
+   satellite cannot fix that from its side, since `index_calibrated`/
+   `index_units` aren't even in the flat payload hazard's own adapter reads
+   into its `analysis` dict (only `index_type` is).
+2. **The confidence handoff.** Satellite computes a real, weighted
+   `confidence` (§5) and puts it in the flat result. Whether that number
+   *means anything* downstream depends entirely on hazard actually reading
+   it — which, as verified in §10 below (correcting the prior ANALYSIS.md),
+   it now partially does.
+
+---
+
+## 2. EXECUTION FLOW
+
+### 2.1 Entry point
 
 `node.py:satellite_node(state)` is the only way the pipeline is invoked in
-production. It:
-1. Builds a `ProcessDisasterInput(event_id, location, disaster_type, magnitude)`
-   from `PipelineState` — `raw_message` is **never populated** here (only
-   declared on the Pydantic model), so `run_pipeline` always synthesizes
-   `raw_message = f"{disaster_type} in {location}"` at `agent.py:450`.
-2. Calls `await run_pipeline(params)` → `asyncio.to_thread(_run_pipeline_sync, params)`.
+production (LangGraph node, no Band/transport layer). It:
+1. Builds a `ProcessDisasterInput(event_id, location, disaster_type,
+   magnitude)` from `PipelineState`.
+2. Calls `await run_pipeline(params)` →
+   `asyncio.to_thread(_run_pipeline_sync, params)`.
 3. Parses the JSON string result. If `status != "complete"`, returns
    `{"status": "failed", "errors": [...]}"` (appended, not overwritten). On
-   success, returns `{"satellite_result": result, "status": "hazard",
-   "progress": 25, "confidence_scores": {..., "satellite": result["confidence"]}}`.
+   success: `{"satellite_result": result, "status": "hazard", "progress": 25,
+   "confidence_scores": {..., "satellite": result["confidence"]}}`.
 
-This is a thin, correct adapter — no logic lives here beyond the state→params
-translation and the failure/success branch. It cannot itself produce a
-false-success: if `_run_pipeline_sync` returns anything but `"complete"`,
-`node.py` marks the graph `failed`.
+This is a thin, correct adapter — it cannot itself produce a false-success:
+if `_run_pipeline_sync` returns anything but `"complete"`, `node.py` marks
+the graph `failed`.
 
-### 1.2 `_run_pipeline_sync` — the real pipeline (agent.py:401-941)
-
-Call graph, in order, with every branch point:
+### 2.2 `_run_pipeline_sync` — the real pipeline (agent.py:444-1000)
 
 ```
 _run_pipeline_sync(params)
 ├─ [event_id in _completed_event_ids?] → return cached "complete" (process-once guard)
 ├─ ConfidenceTracker() created (per-event ledger)
-├─ INTEGRATION POINT 1: intelligence.parse_disaster_input(raw)         [LLM, best-effort]
+├─ intelligence.parse_disaster_input(raw)                              [LLM, best-effort]
 │    branch: profile.ambiguous AND (loc_missing OR type_missing)
 │      → return _clarification(...)  [status: clarification_needed]
-│    else: profile may enrich location/disaster_type if caller args were thin
-├─ get_region_boundary(location)                                       [boundary.py]
-│    branch: None → return _error("Could not resolve region boundary")
-├─ detect_risk_cities(location, disaster_type)                         [curated map or headline fallback]
-│    branch: empty → return _error("No risk cities detected")
-├─ get_risk_city_boundaries(location, cities)                          [boundary.py]
-│    branch: empty → return _error("Could not resolve any risk-city boundaries")
-├─ merge_risk_boundaries(city_polys) → merged (shapely unary_union)
-│    branch: None → return _error("Failed to merge risk-city boundaries")
-├─ get_analysis_bbox(merged) → bbox
-│    branch: None → return _error("Failed to compute analysis bbox")
-├─ check_demo_cache(event_id)                                          [r2_upload.py — only 3 literal ids]
-│    branch: hit → return "complete" with cached_url, boundaries resolved but NO real analysis
-├─ _authenticate_with_recovery(event_id, location)                     [≤3 attempts, LLM-guided]
-│    → sentinel.TokenManager per attempt; branch: None after 3 → return _error(...)
-├─ select_satellite(disaster_type, bbox, token_manager.get())          [sentinel.py — cloud-aware]
-│    branch: cloud_cover > 30% → sentinel-1, else sentinel-2 (physics overrides disaster-type hint)
-├─ INTEGRATION POINT 2: intelligence.devise_satellite_strategy(...)     [LLM, LOGGED ONLY — no branch taken on it]
-├─ _search_with_recovery(event_id, bbox, satellite_type, merged)        [7→14→30 day widening]
-│    branch: no scenes ever found → return _error("No {satellite_type} imagery found")
-├─ backfill_uncovered_cities(scenes, city_polys, satellite_type, aoi_geom=merged)
-│    [re-queries per under-covered city, widens 14d/30d, appends+re-scores]
-├─ process_satellite_imagery(selection, scenes, bbox, merged, event_id, token_manager,
-│                             disaster_type, city_geoms=[...], city_boundaries=None, tracker=tracker)
-│    [see §1.3 for the tiered coverage search inside this call]
-│    branch: result is None → return _error("Satellite imagery processing failed")
-│    branch: result.status == "failed" and reason == "insufficient_coverage"
+├─ get_region_boundary(location) → branch: None → _error(...)          [boundary.py]
+├─ detect_risk_cities(location, disaster_type) → branch: empty → _error(...)
+├─ get_risk_city_boundaries(location, cities) → branch: empty → _error(...)
+├─ merge_risk_boundaries(city_polys) → branch: None → _error(...)
+├─ get_analysis_bbox(merged) → branch: None → _error(...)
+├─ check_demo_cache(event_id)  [r2_upload.py, 3 literal demo ids only]
+│    branch: hit → return "complete" with cached_url, no real analysis
+├─ _authenticate_with_recovery(event_id, location)  [<=3 attempts, LLM-guided]
+│    → sentinel.TokenManager per attempt; branch: None after 3 → _error(...)
+├─ select_satellite(disaster_type, bbox, token_manager.get())          [cloud-aware]
+│    branch: cloud_cover > 30% → sentinel-1, else sentinel-2
+├─ intelligence.devise_satellite_strategy(...)                         [LLM, LOGGED ONLY]
+├─ _search_with_recovery(event_id, bbox, satellite_type, merged)       [7->14->30 day widening]
+│    branch: no scenes ever found → _error(...)
+├─ backfill_uncovered_cities(scenes, city_polys, satellite_type, merged)
+├─ process_satellite_imagery(selection, scenes, bbox, merged, event_id,
+│                             token_manager, disaster_type, city_geoms=[...],
+│                             city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None,
+│                             tracker=tracker)
+│    [see §2.3 for the tiered coverage search inside this call]
+│    branch: result is None → _error("Satellite imagery processing failed")
+│    branch: result.status == "failed"/"insufficient_coverage"
 │      → _recover("coverage_insufficient", ...) [LLM advisory, non-blocking]
-│      → return _coverage_failure(...) [status: error, reason: insufficient_coverage, gap geometry attached]
-├─ upload_all_results(event_id, {true_color, index_map, classification, geojson}) [r2_upload.py]
-├─ per-city upload loop over result.get("cities", [])                   [ALWAYS EMPTY — see §9]
-├─ asyncio.run(cleanup_event_temp(event_id))                            [deletes temp working tree]
+│      → return _coverage_failure(...) [status: error, gap geometry attached]
+├─ upload_all_results(event_id, {true_color, index_map, classification, geojson})
+│    → returns urls + failed_artifacts (NEW, see §10)
+├─ per-city upload loop over result.get("cities", [])  [empty unless ENABLE_PER_CITY_ARTIFACTS=true]
+├─ asyncio.run(cleanup_event_temp(event_id))            [deletes temp working tree]
 ├─ validation_input built (index_type/index_calibrated/index_units/mean_index/...)
-│    assert validation_input["index_type"] == result["index_type"]     [hard assertion, see §5]
+│    assert validation_input["index_type"] == result["index_type"]     [hard assertion]
 ├─ cross_validator.validate_all(validation_input, disaster_type, bbox, tracker)
-│    [GDACS / USGS / cloud / index-physics / coverage / Featherless-expert — see §2, §4]
-├─ INTEGRATION POINT 4: intelligence.interpret_results(...)              [LLM, folded into tracker as evidence]
-├─ confidence = round(tracker.overall_confidence(), 4)                  [AUTHORITATIVE — not the LLM's own number]
-├─ INTEGRATION POINT 6: confidence gate
-│    branch: confidence < 0.6 OR needs_verification() OR should_alert_team()
-│      → _recover("low_confidence", ...) [LOGGED ONLY — result is returned regardless]
-├─ structured{} built (mirrors satellite_results DB columns + extras — see §5)
-├─ INTEGRATION POINT 5: intelligence.generate_band_message(...)         [LLM, natural-language summary only]
-├─ _persist_satellite_result(event_id, structured)                      [DB write, best-effort — see §6]
+│    [GDACS / USGS / cloud / index-physics / coverage / Featherless-expert]
+├─ intelligence.interpret_results(...)                                 [LLM, folded into tracker]
+├─ confidence = round(tracker.overall_confidence(), 4)                 [AUTHORITATIVE]
+├─ confidence gate: confidence < 0.6 OR needs_verification() OR should_alert_team()
+│      → _recover("low_confidence", ...) [LOGGED ONLY — result still returned]
+├─ structured{} built (mirrors satellite_results DB columns + extras, incl.
+│    NEW: total_zones, scene_id, artifacts_incomplete, failed_artifacts,
+│    confidence_basis, evidence_count — see §10)
+├─ intelligence.generate_band_message(...)                             [LLM, narrative only]
+├─ _persist_satellite_result(event_id, structured)
+│    branch: fails after PERSIST_MAX_ATTEMPTS retries → return _error(...) [NEW, see §7]
 ├─ _completed_event_ids.add(event_id)
-└─ return json.dumps(structured)                                        [status: "complete"]
+└─ return json.dumps(structured)                                       [status: "complete"]
 
-except Exception → return _error(event_id, f"Unexpected error: {exc}")   [BLANKET CATCH — see §6]
+except Exception → return _error(event_id, f"Unexpected error: {exc}")   [blanket catch]
 finally:
-  → asyncio.run(cleanup_event_temp(event_id))  [guaranteed cleanup, BUG 7]
+  → asyncio.run(cleanup_event_temp(event_id))  [guaranteed cleanup]
   → log memory_report()
 ```
 
-### 1.3 `process_satellite_imagery` — the tiered coverage search (processor.py:2163-2448)
-
-This is the most decision-dense function in the agent:
+### 2.3 `process_satellite_imagery` — the tiered coverage search (processor.py:2163-2448)
 
 ```
 process_satellite_imagery(selection, scene_metadata, bbox, merged_polygon, event_id, token, disaster_type, ...)
 ├─ dedupe_by_acquisition(scenes)                     [collapses GRD/GRD-COG twins of one acquisition]
 ├─ filter scenes to those with _scene_aoi_overlap(scene, aoi_shape) > 0.0
-│    branch: none left → return {"status": "failed", "reason": "insufficient_coverage", ...} immediately
-├─ build_coverage_tiers(scenes, satellite_type)       [tier 1: same date+orbit, tier 2: ±3d, tier 3: ±7d, tier 4: ±14d any-orbit]
+│    branch: none left → return {"status":"failed","reason":"insufficient_coverage"} immediately
+├─ build_coverage_tiers(scenes, satellite_type)       [tier1: same date+orbit, tier2: +-3d, tier3: +-7d, tier4: +-14d any-orbit]
 │    branch: no parseable dates → single fallback tier (4, None, scenes)
 └─ for (tier, orbit_dir, group) in tiers:              [tries tier 1 first, stops at first tier reaching 100%]
      for scene in group:                               [best-first within the tier]
-       ├─ _attempt_clip(selection, accepted+[scene], merged_polygon, ...)  [download→stack→clip]
+       ├─ _attempt_clip(...)  [download -> stack -> clip]
        │    branch: clip fails → doomed_streak++; abort tier if streak >= DOOMED_DOWNLOAD_LIMIT (3)
-       ├─ compute_coverage(trial_clip)                 [interior_coverage_percent — the REAL pass/fail metric]
-       │    branch: gained coverage <= 0.01% and accepted non-empty → doomed_streak++ (this scene added nothing)
+       ├─ compute_coverage(trial_clip)  [interior_coverage_percent — the REAL pass/fail metric]
+       │    branch: gained coverage <= 0.01% and accepted non-empty → doomed_streak++
        ├─ accept if gained > 0.01%: accepted = trial; cov = trial_cov
        └─ branch: cov["covered"] (interior coverage == 100.0%) → break inner loop, tier succeeds
-     branch: tier succeeded → render (_render_clip: indices→PNG→vectorize→bounds), attach coverage_tier/
-             temporal_spread_days/acquisition_count, add tier≥3 confidence-lowering concern via tracker,
-             add SAR-uncalibrated concern via tracker if applicable, return merged_result
-  [no tier ever reached 100%] → return {"status": "failed", "reason": "insufficient_coverage",
-                                          "coverage_percent": best interior %, "gaps": [...], "gap_cause": {...}}
+     branch: tier succeeded → render (_render_clip), attach coverage_tier/temporal_spread_days/
+             acquisition_count, add tier>=3 confidence-lowering concern, add SAR-uncalibrated
+             concern if applicable, return merged_result
+  [no tier ever reached 100%] → return {"status":"failed","reason":"insufficient_coverage",
+                                          "coverage_percent": best interior %, "gaps": [...]}
 ```
 
-**Key fact, confirmed in code:** there is **no partial-coverage risk output**.
-Either some tier's cumulative mosaic reaches exactly 100% interior valid-pixel
-coverage, or the whole call fails with `insufficient_coverage` and gap
-geometry. This matches `CLAUDE.md`'s BUG 3 description precisely.
+**Key fact, confirmed in code:** there is no partial-coverage risk output.
+Either some tier's cumulative mosaic reaches exactly 100% interior
+valid-pixel coverage, or the whole call fails with `insufficient_coverage`
+and gap geometry.
 
 ---
 
-## 2. Decision Logic — Every Branch and Its Basis
+## 3. DECISION LOGIC — Every Branch and Its Basis
 
 | Decision | Driver | Deterministic or LLM? | Basis for the value |
 |---|---|---|---|
-| **S1 vs S2 selection** (`select_satellite`, sentinel.py:126) | Real observed cloud cover from a lightweight metadata peek (`_peek_cloud_cover`); `CLOUD_COVER_THRESHOLD = 30.0` | **Deterministic.** LLM's `devise_satellite_strategy` result is logged only, never overrides this. | **Arbitrary.** No citation, no calibration study in the code or docs. 30% is a round-number guess. It is at least *consistently applied* (same threshold gates the S2 catalogue filter, sentinel.py:944-948). |
-| **Date window widening** (`_search_with_recovery`, agent.py:354) | Fixed sequence 7→14→30 days | **Deterministic** (the LLM's `handle_anomaly("no_sentinel_scenes")` call is invoked but its `expand_date_range` hint is never read — the widening sequence is hardcoded regardless of what the LLM recommends) | Arbitrary round numbers; no stated rationale. |
-| **Coverage-mosaic trigger** (`COVERAGE_MOSAIC_THRESHOLD`) | 85.0% (`sentinel.py:51`, `processor.py:66`) | Deterministic | Was 60%, raised to 85% after the Mindanao incident (`CLAUDE.md` Step 10 FIX A) — an empirically-motivated correction, but the specific number 85 (not 80, not 90) is not derived from anything; it's "high enough that the Mindanao case, whose best tile covered ~34%, definitely mosaics." **Note: this constant is dead in the current tiered-coverage design** — `process_satellite_imagery` (§1.3) no longer branches on it at all; the real acceptance test is `compute_coverage()["covered"]` (interior == 100%). `COVERAGE_MOSAIC_THRESHOLD` and `MOSAIC_MAX_SCENES` are now unused by the tiered search (see §9). |
-| **Candidate rejection within a tier** (`_attempt_clip`/doomed-streak) | `DOOMED_DOWNLOAD_LIMIT = 3` consecutive non-contributing downloads aborts the tier | Deterministic | Arbitrary round number, no stated basis. |
-| **Valid-pixel candidate floor** (`MIN_VALID_PIXEL_PERCENT = 5.0`) | processor.py:72 | Deterministic | **Now effectively dead** for the merged/main path — the tiered search's real bar is 100% interior coverage (`compute_coverage`), not this 5% floor. It IS still live in `_render_per_city`'s per-city skip check (processor.py:2129) — an inconsistency: the merged AOI demands 100%, but a per-city sub-clip only demands 5% (though per-city rendering is itself disabled by default, §9). |
-| **Tier escalation** (`build_coverage_tiers`, sentinel.py:729-734) | `COVERAGE_TIERS = ((1,0,True),(2,3,True),(3,7,True),(4,14,False))` | Deterministic | The day windows (0/±3/±7/±14) are round numbers with no cited source. The *design* (same-orbit-first, relax orbit only at the widest tier) is a reasoned engineering choice (documented, verified live per `CLAUDE.md`'s 2026-07-26 tier-1-3 exactly-0% analysis), but the specific day boundaries are not derived from any Sentinel revisit-cycle calculation (S1's revisit is 6-12 days depending on constellation; a ±3d tier-2 window is narrower than one revisit cycle, so tier 2 will very often be empty for S1 — the tiers may be effectively S2-tuned). |
-| **Classification class boundaries** (`_CLASS_SCHEMES`, processor.py:233-267) | NDWI: 0.0/0.3/0.5; SAR: -13/-15/-18 dB; NDVI(quake): 0.2/0.1/0.0; NDVI(landslide): 0.2/0.1/0.0 | Deterministic | **Arbitrary / literature-adjacent but unvalidated for this data.** NDWI 0.3 is a commonly-cited water threshold in remote-sensing literature (McFeeters 1996 uses >0 for open water; 0.3 is a stricter common variant) — plausible but not cited in-code. The SAR dB thresholds (-13/-15/-18) have **no defensible basis at all** given the index is uncalibrated raw-DN log (see §3.2) — they were tuned, if at all, against a physically different quantity than what the pipeline now computes. NDVI 0.2 "damage" threshold is a round number with no citation. **CLAUDE.md's own 2026-07-26 note confirms none of these were revalidated after switching S2 from L1C to L2A**, which shifts reflectance-derived index values. |
-| **SCL cloud-mask classes** (`_SCL_INVALID_CLASSES`, processor.py:170) | ESA's own SCL class definitions (0,1,3,8,9,10,11 invalid) | Deterministic | **Sound** — this one *is* grounded: it directly follows Sentinel-2 L2A's documented SCL class table, not an invented threshold. |
-| **Confidence quality gate** (`MIN_CONFIDENCE = 0.6`, agent.py:151) | Deterministic | Arbitrary round number. |
-| **needs_verification threshold** (`VERIFICATION_THRESHOLD = 0.70`, confidence_tracker.py:30) | Deterministic | Arbitrary round number. |
-| **Concern severity penalties** (`_SEVERITY_PENALTY`: LOW .05/MED .10/HIGH .20/CRITICAL .35) | Deterministic | Arbitrary, flat, additive — see §4 for why this is the central problem with the confidence number. |
-| **GDACS discrepancy ratio bands** (0.7-1.3 CONFIRMED, >2.0 HIGH, <0.5 HIGH, else PARTIAL) | Deterministic | Round numbers, no cited basis. |
-| **Recency half-life** (`_RECENCY_HALFLIFE_DAYS = 20.0`, sentinel.py:1067) | Deterministic | Arbitrary; stated rationale is "gentle enough that a well-covered older scene beats a nearly-empty newer one" — a reasoned design intent, but the specific 20-day constant is not derived from anything. |
-| **Zone area floor** (`MIN_ZONE_AREA_KM2 = 0.5`) | Deterministic | Arbitrary noise-filter round number. |
+| **S1 vs S2 selection** (`select_satellite`, sentinel.py) | Real observed cloud cover from `_peek_cloud_cover`; `CLOUD_COVER_THRESHOLD = 30.0` | Deterministic. LLM's `devise_satellite_strategy` is logged only, never overrides. | Arbitrary round number, no citation. Consistently applied (same threshold gates the S2 catalogue filter). |
+| **Date window widening** (`_search_with_recovery`) | Fixed sequence 7->14->30 days | Deterministic (LLM's `handle_anomaly` result is invoked but its widening hint is never read) | Arbitrary round numbers, no stated rationale. |
+| **Coverage-mosaic trigger** (`COVERAGE_MOSAIC_THRESHOLD`) | — | — | **DELETED.** Confirmed absent from both `sentinel.py` and `processor.py` (`grep` returns zero hits in `sentinel.py`; per the CLAUDE.md 2026-07-27 log this constant and `select_mosaic_scenes` were confirmed orphaned by the tiered-coverage design and removed in commit `b7fdad4`). The prior ANALYSIS.md flagged this as dead code to delete-or-rewire; it was deleted. The real acceptance test is `compute_coverage()["covered"]` (interior == 100%). |
+| **Candidate rejection within a tier** (`DOOMED_DOWNLOAD_LIMIT = 3`) | processor.py | Deterministic | Arbitrary round number, no stated basis. |
+| **Valid-pixel candidate floor** (`MIN_VALID_PIXEL_PERCENT = 5.0`) | processor.py | Deterministic | Dead for the merged/main path (tiered search demands 100% interior coverage); still live only inside `_render_per_city`'s per-city skip check, which is now reachable behind `ENABLE_PER_CITY_ARTIFACTS` (see §10) rather than permanently unreachable. |
+| **Tier escalation** (`COVERAGE_TIERS = ((1,0,True),(2,3,True),(3,7,True),(4,14,False))`) | sentinel.py | Deterministic | Day windows are round numbers. **Live-measured** (per CLAUDE.md's 2026-07-27 "Tier-window revisit analysis," a design review with no code change): S2 combined-constellation revisit ~5d matches the tiers fine; S1's actual same-relative-orbit revisit over two Pakistani AOIs measured **~11 days** (not the newer 6-day S1C/1D cadence, which is Europe-concentrated) — so tiers 2 (+-3d) and 3 (+-7d) are structurally near-no-ops for S1 specifically (7 < 11 regardless of window tuning). Left unchanged deliberately: cost of an empty tier is one skipped loop iteration, and widening would touch validated live-tested tier behavior for unproven benefit. |
+| **Classification class boundaries** (`_CLASS_SCHEMES`) | NDWI: 0.0/0.3/0.5; SAR: -13/-15/-18 dB; NDVI: 0.2/0.1/0.0 | Deterministic | Arbitrary/literature-adjacent but unvalidated. NDWI 0.3 is a plausible literature variant (McFeeters 1996 style), not cited in-code. SAR dB thresholds have **no defensible basis** given the index is uncalibrated raw-DN log (§4.2). NDVI 0.2 is a round number, no citation. None of these were revalidated after S2 switched L1C→L2A. |
+| **SCL cloud-mask classes** (`_SCL_INVALID_CLASSES`) | ESA's own SCL class table | Deterministic | **Sound** — this is the one grounded threshold set, directly following ESA's documented class definitions. |
+| **Confidence quality gate** (`MIN_CONFIDENCE = 0.6`) | agent.py | Deterministic | Arbitrary round number. |
+| **needs_verification threshold** (`VERIFICATION_THRESHOLD = 0.70`) | confidence_tracker.py | Deterministic | Arbitrary round number. |
+| **Concern severity penalties** (LOW .05/MED .10/HIGH .20/CRITICAL .35) | confidence_tracker.py | Deterministic | Arbitrary, flat, additive — see §5. |
+| **GDACS discrepancy ratio bands** (0.7-1.3 CONFIRMED, >2.0 HIGH, <0.5 HIGH) | cross_validator.py | Deterministic | Round numbers, no cited basis. |
+| **Recency half-life** (`_RECENCY_HALFLIFE_DAYS = 20.0`) | sentinel.py | Deterministic | Reasoned intent ("older well-covered scene beats nearly-empty newer one"), constant itself unvalidated. |
+| **Zone area floor** (`MIN_ZONE_AREA_KM2 = 0.5`) | processor.py | Deterministic | Arbitrary noise-filter round number. |
+| **Per-city rendering** (`ENABLE_PER_CITY_ARTIFACTS`) | agent.py, env var, default `false` | Deterministic, operator-controlled | **Changed since the prior analysis** — was an unconditional hardcoded `city_boundaries=None`; now a feature flag. Still off by default because per-city re-clipping multiplies peak RSS on top of an already ~9.6 GB single-mosaic peak (§8.1). |
 
-**Summary:** every *threshold* in this agent is a round number chosen by
-feel; the only threshold with a real physical basis is the SCL invalid-class
-set (because it's ESA's own class table, not a tuned cutoff). The
-*architecture* around the thresholds (tiered temporal coherence, same-orbit
-constraint, cloud-aware satellite selection, coverage-before-cloud priority)
-is well-reasoned and documented; the numeric knobs inside that architecture
-are not.
+**Summary (unchanged from the prior analysis, still true):** every threshold
+is a round number chosen by feel; only the SCL invalid-class set has a real
+physical basis (ESA's own table). The tiered/temporal-coherence/cloud-aware
+*architecture* is well-reasoned; the numeric knobs inside it are not.
 
 ---
 
-## 3. The Analysis Itself — The Science
+## 4. THE ANALYSIS ITSELF — The Science
 
-### 3.1 NDWI (flood, Sentinel-2)
+### 4.1 NDWI (flood, Sentinel-2)
 
 **Code** (processor.py:1402-1412):
 ```python
@@ -195,7 +244,7 @@ index_units = "NDWI_ratio"
   now be **too permissive** (over-classifying wet soil as water) — this is a
   real, acknowledged, unresolved defect, not a hypothetical one.
 
-### 3.2 SAR (flood, Sentinel-1)
+### 4.2 SAR (flood, Sentinel-1)
 
 **Code** (processor.py:1384-1401):
 ```python
@@ -241,7 +290,7 @@ index_units = "dB_uncalibrated"
   `tests/test_index_label_integrity.py`). The uncalibrated-ness is now
   *disclosed*, even though it is not *fixed*.
 
-### 3.3 NDVI (earthquake / landslide, Sentinel-2)
+### 4.3 NDVI (earthquake / landslide, Sentinel-2)
 
 **Code** (processor.py:1413-1423):
 ```python
@@ -268,50 +317,42 @@ index_units = "NDVI_ratio"
 - Same L1C→L2A revalidation gap as NDWI applies here too (0.2/0.1/0.0 boundaries
   untuned for L2A).
 
-### 3.4 CRS handling / clip / vectorization / area
+### 4.4 CRS handling / clip / vectorization / area
 
-- **CRS resolution (BUG 1, fixed and unit-tested):** `_open_georeferenced`
-  (processor.py:996-1058) detects GCP-only georeferencing (S1 GRD: `crs=None`
-  or identity transform with GCPs present) and wraps the dataset in a
-  `WarpedVRT` targeting either the AOI's UTM zone (`_dst_crs_from_polygon`) or
-  the GCPs' own CRS. `clip_to_polygon` additionally refuses to clip
-  (`return None`) if it still sees `crs is None or transform is identity`
-  (processor.py:1210-1217) — a hard guard against the exact BUG B failure mode
-  `fix.md` documented. **Confirmed fixed** by direct code read and by
-  `tests/test_bug_fixes.py::test_bug1_gcp_raster_resolved` /
-  `test_bug1_4326_poly_vs_utm_raster`.
-- **Clip method:** reprojects the WGS84 polygon into the raster CRS, computes
-  a pixel window from the polygon bounds (pre-windowing optimization,
-  processor.py:1238-1261), rasterizes only that window via `rasterio.mask`,
-  crops every band. This is standard practice and the pre-windowing is a real
-  and correct performance fix (verified against `tests/test_clip_window.py`).
-- **Vectorization:** `rasterio.features.shapes` per hazard class → reproject
-  to WGS84 → `shapely.simplify(0.001°, preserve_topology=True)` → drop
-  polygons < `MIN_ZONE_AREA_KM2` (0.5 km²). Standard raster-to-vector
-  approach; the fixed 0.001° simplification tolerance is not adaptive to the
-  raster's native resolution (a UTM 10 m pixel is ~0.00009° at the equator,
-  so 0.001° is roughly 10x a pixel — a reasonable, if unstated, simplification
-  factor).
-- **Area calculation:** `_polygon_area_km2` (processor.py:1622-1638)
-  reprojects to **EPSG:6933** (a real world equal-area projection —
-  Cylindrical Equal-Area) before computing `.area`. **This is scientifically
-  correct** — equal-area projections are exactly what area measurement
-  requires. The `except Exception: return geom.area` fallback (degrees²,
-  labeled "only used for relative size" in the code comment) is a silent
-  failure mode: if pyproj ever throws, the function returns a **degrees²**
-  number *as if it were km²* with no unit change and no error surfaced to the
-  caller — the comment acknowledges this is wrong but the code does nothing
-  to prevent the mislabeled value from flowing into `affected_area_km2`
-  (confirmed still present, unchanged from `fix.md`'s original finding).
+- **CRS resolution (BUG 1, fixed and unit-tested).** `_open_georeferenced`
+  detects GCP-only georeferencing (S1 GRD) and wraps in a `WarpedVRT`
+  targeting the AOI's UTM zone; `clip_to_polygon` refuses to clip
+  (`return None`) if it still sees `crs is None or transform is identity`.
+  Confirmed fixed by `tests/test_bug_fixes.py::test_bug1_gcp_raster_resolved`
+  / `test_bug1_4326_poly_vs_utm_raster`.
+- **Clip method:** reprojects the polygon into raster CRS, pre-windows to
+  the polygon's pixel bbox before `rasterio.mask` rasterize (a real
+  performance fix, verified byte-identical output vs. the unwindowed path).
+- **Vectorization:** `rasterio.features.shapes` per class -> reproject WGS84
+  -> `shapely.simplify(0.001 deg, preserve_topology=True)` -> drop polygons
+  `< MIN_ZONE_AREA_KM2` (0.5 km2). Standard approach; fixed simplification
+  tolerance (~10x a 10m pixel at the equator) is a reasonable, unstated
+  choice.
+- **Area calculation, CORRECTED SINCE THE PRIOR ANALYSIS.** `_polygon_area_km2`
+  (processor.py:1616) reprojects to **EPSG:6933** (Cylindrical Equal-Area)
+  before computing `.area` — scientifically correct. **The prior analysis's
+  #2 finding — a silent `except Exception: return geom.area` fallback that
+  mislabeled degrees² as km² — is now fixed.** Verified directly: the
+  function has **no try/except at all** around the reprojection (confirmed
+  by reading processor.py:1616-1638 in full); a reprojection failure now
+  propagates as an exception rather than silently returning a
+  4-orders-of-magnitude-wrong number under the same field name. This matches
+  `CLAUDE.md`'s 2026-07-27 log entry ("`_polygon_area_km2` no longer
+  degrades to mislabeled degrees²") and closes prior gap #2 (was: high
+  severity, silent). **Closed.**
 
 ---
 
-## 4. Confidence — Traced Completely
+## 5. CONFIDENCE — Traced Completely
 
-### 4.1 Every input `ConfidenceTracker` consumes
+### 5.1 Every input `ConfidenceTracker` consumes
 
-`ConfidenceTracker` (confidence_tracker.py) is fed from exactly these call
-sites, all inside `agent.py`/`cross_validator.py`/`processor.py`:
+Unchanged arithmetic from the prior analysis (confirmed still accurate):
 
 | Source | Where added | Evidence value | Weight |
 |---|---|---|---|
@@ -338,135 +379,114 @@ same evidence-to-concern ratio as an equally-good NDWI-path run — the
 confidence gap between S1 and S2 runs is partly an artifact of what evidence
 sources exist for each index, not purely a measure of result quality.
 
-### 4.2 The exact arithmetic (confidence_tracker.py:114-132)
+### 5.2 The exact arithmetic (confidence_tracker.py)
 
 ```python
 weighted_sum = sum(e["value"] * e["weight"] for e in self.evidence)
 total_weight = sum(e["weight"] for e in self.evidence)
 base = weighted_sum / total_weight          # weighted average, NOT additive
 for concern in self.concerns:
-    base -= _SEVERITY_PENALTY[concern["severity"]]   # LOW .05/MED .10/HIGH .20/CRITICAL .35
+    base -= _SEVERITY_PENALTY[concern["severity"]]
 return max(0.0, min(1.0, base))              # clamped
 ```
+Weighted average of evidence, minus flat additive penalty per concern,
+clamped [0,1]. Unchanged from the prior analysis.
 
-This is: **weighted-average of evidence, then flat additive penalty
-subtraction per concern, clamped to [0,1].** No source is itself penalty-scaled
-by its own weight — every concern costs the same fixed amount regardless of
-how much evidence exists or how reliable the concerned source normally is.
+### 5.3 Legibility fix — CLOSED since the prior analysis
 
-### 4.3 How a run reaches 0.0 — is it reachable by design?
+**The prior analysis's central confidence finding — that `overall_confidence()`
+cannot distinguish "no evidence gathered" from "evidence contradicts the
+result," both reading as ~0.0 — prompted a real fix, now landed and verified
+in code.** `confidence_tracker.py` now has:
+```python
+def confidence_basis(self) -> str:   # line 146
+    ...  # returns "insufficient_evidence" / "evidence_contradicts" / "evidence_supports"
+```
+and `get_report()` (line 169, previously computed but never called anywhere)
+is now actually invoked, and its `evidence_count`/`confidence_basis` are
+folded into `structured` (confirmed by grep: `confidence_basis`/
+`evidence_count` now appear inside `confidence_tracker.py`'s `get_report()`).
+**The underlying weighted-average-minus-penalty arithmetic is unchanged —
+this is a legibility fix, not a recalibration**; per `CLAUDE.md`'s own
+framing, a true calibration pass needs accuracy data this repo doesn't have.
 
-Two independent ways, both reachable by design, not edge cases:
+The specific failure mode documented live on 2026-07-26 (satellite confidence
+0.0 read as "contradicted" when it actually meant "no evidence gathered,"
+silently propagating to a report-level "HIGH" confidence) now has a legible
+signal a downstream consumer *could* check — **provided that consumer
+actually reads `confidence_basis`/`evidence_count`, which as of this pass,
+hazard's `_normalise_satellite_payload` does not carry through** (only
+`confidence` itself is copied at `agents/hazard/agent.py:89`;
+`confidence_basis`/`evidence_count` are not — confirmed by direct read of
+`agent.py:81-99`, §6.1 below). So the fix is real and closes the tracker's
+own legibility gap, but the new legible signal doesn't yet cross the
+satellite→hazard boundary — a narrower, more precise version of the original
+ambiguity persists one hop downstream.
 
-1. **Zero evidence.** `overall_confidence()` returns `0.0` unconditionally
-   when `self.evidence` is empty (confidence_tracker.py:120-121). This is the
-   literal 2026-07-26 e2e observation cited in `CLAUDE.md`: if GDACS/USGS are
-   unreachable, cloud data is absent, the NDWI physics check doesn't fire (SAR
-   path), and the Featherless expert call fails, **zero evidence sources ever
-   fire**, and the number is exactly 0.0 — indistinguishable from "everything
-   strongly contradicts this result," which is the opposite failure mode.
-   **This is the actual documented root cause of the satellite-confidence-0.0
-   /report-confidence-HIGH incident** — not a stacking-of-penalties collapse,
-   but an *empty evidence set*.
-2. **Penalty stacking.** With `total_weight > 0`, `base` can still be driven
-   to (or below, then clamped at) 0 by enough concerns: e.g. 3 CRITICAL
-   concerns alone (`-0.35 × 3 = -1.05`) will floor any base to 0.0 regardless
-   of how strong the evidence was. This is architecturally possible but
-   requires several severe concerns simultaneously (CRITICAL only fires for
-   cloud >60% or the NDWI-negative/GDACS-RED contradiction) — less common in
-   practice than case 1.
+### 5.4 Is this a calibrated uncertainty estimate, or a heuristic?
 
-Both are "reachable by design" in the sense that the code does exactly what
-it says; neither is a bug in the arithmetic. The problem is **what the number
-means when it's 0.0** — see §4.4.
+**Still a heuristic, not a calibrated estimate**, unchanged assessment:
+weights/penalties are hand-picked, not fit to historical accuracy data; no
+confidence interval or distribution; a single point estimate with an ad hoc
+penalty subtraction. It conflates "the disaster's true state is genuinely
+uncertain" with "our own pipeline could not gather enough evidence" — both
+still compress to the same 0-1 number. What's new since the prior pass is
+that the tracker now at least *labels* which of its two failure modes
+produced a low number (§5.3) — a legibility improvement, not a calibration
+fix.
 
-### 4.4 Is this a calibrated uncertainty estimate, or a heuristic?
+### 5.5 What is written into the result dict and the DB, and what downstream can see
 
-**It is a heuristic, not a calibrated estimate**, for these concrete reasons
-found in the code:
+**In `structured`:** `confidence` (float, rounded 4dp), `concerns`,
+`validations`, `needs_verification`, `should_alert`, plus **new since the
+prior pass**: `confidence_basis`, `evidence_count` (§5.3 — `get_report()` is
+now actually called, closing the prior finding that `evidence_count` was
+computed but discarded before leaving the pipeline).
 
-- **Weights are hand-picked**, not fit to any historical accuracy data (there
-  is no training/calibration step anywhere in the codebase; `0.3`/`0.4`/`0.2`/
-  `0.25` etc. are chosen by the same "feels about right" process as every
-  other threshold in this agent).
-- **It conflates two different failure classes**: "the disaster's true state
-  is genuinely uncertain" (e.g., legitimately unclear/contested GDACS
-  numbers) and "our own pipeline could not gather enough reliable evidence
-  to say anything" (e.g., GDACS unreachable, LLMs all failed). Both currently
-  compress to the same 0-1 number, and — critically — the *empty-evidence*
-  case (§4.3.1) reads identically to *maximally-contradicted* in this scale's
-  low end, even though they mean opposite things operationally ("we don't
-  know" vs "we're pretty sure this is wrong").
-- **No confidence interval, no distribution, no error bars** — it is a single
-  point estimate with an ad hoc penalty subtraction, not a probability in any
-  formal sense (e.g., not derived from a calibrated classifier, not
-  cross-validated against ground truth outcomes).
-- **A downstream consumer cannot recover data-quality signal from it.** As
-  documented in `CLAUDE.md`'s "Confidence silently drops..." entry (confirmed
-  still true by direct grep, §5 below): `agents/hazard/analyzer.py`'s
-  `run_parallel_analysis` never reads satellite's `confidence` at all, so even
-  the imperfect signal computed here is dropped, not merely misinterpreted,
-  one hop downstream.
+**In the DB** (`_persist_satellite_result`): only `affected_area_km2`,
+`total_zones` (now actually populated, §10 — was always NULL), `scene_id`
+(now actually populated, §10 — was always NULL), and the artifact
+URLs/bounds/bbox/risk_cities. `confidence`/`concerns`/`validations`/
+`needs_verification`/`should_alert`/`confidence_basis`/`evidence_count` are
+**still not DB columns** — they exist only in the JSON blob/`PipelineState`
+hand-off. A fresh `GET /results` reading the DB directly still cannot see
+any of them except the bare confidence float that rides through
+`PipelineState["confidence_scores"]["satellite"]`. `damage_percent` — the
+prior analysis's other always-NULL column — was **removed from the INSERT
+entirely** rather than left permanently NULL (§10).
 
-**What it would take to be meaningful:** (a) separate the "no evidence
-gathered" state from "evidence gathered and it's unfavorable" explicitly in
-the output (e.g., a distinct `data_completeness` or `evidence_count` field
-gating whether `confidence` should be trusted at all — `get_report()` already
-computes `evidence_count` internally but it never rides into the structured
-result dict returned to callers, §5); (b) derive weights/penalties from an
-actual historical accuracy study rather than hand-picked constants; (c) stop
-using the same tracker to answer both "is the satellite processing pipeline
-healthy" (BUG-B-style failures) and "is the disaster hazard genuinely
-uncertain" (contested reports) — these are different questions currently
-answered by the same number.
+**Downstream can see:** the bare `confidence` float and the full
+`satellite_result` dict in-memory for one graph run. **Downstream cannot
+see** (from the DB or one hop later in the in-memory state): evidence count,
+per-source evidence values, or the tracker's raw ledger, except via the new
+`confidence_basis`/`evidence_count` fields — which exist in `structured` but,
+per §5.3, are not carried into hazard's `analysis{}` dict either.
 
-### 4.5 What is written into the result dict and the DB, and what downstream can see
-
-**In the structured result dict** (agent.py:827-883): `confidence` (float,
-rounded to 4dp), `concerns` (full list of `{concern, severity, timestamp}`),
-`validations` (per-source finding list), `needs_verification` (bool),
-`should_alert` (bool). **`evidence_count`/raw evidence list are NOT included**
-— `structured` never calls `tracker.get_report()`, it only calls
-`tracker.overall_confidence()`, `tracker.concerns` (the raw list, reused
-directly), `tracker.needs_verification()`, `tracker.should_alert_team()`. So
-the "how much evidence actually went into this number" signal
-(`evidence_count`) exists inside the tracker object but is **discarded**
-before the result ever leaves the pipeline.
-
-**In the DB** (`_persist_satellite_result`, agent.py:71-134): only
-`affected_area_km2`, `damage_percent` (always NULL, §5), `total_zones`
-(always NULL, §5) and the artifact URLs/bounds/bbox/risk_cities are written.
-**`confidence`, `concerns`, `validations`, `needs_verification`,
-`should_alert` are NOT columns in the INSERT statement at all** — they exist
-only in the JSON blob returned by the node/pipeline call, which is passed
-in-memory via `PipelineState["confidence_scores"]["satellite"]`
-(node.py:49-50, just the scalar number) to the next graph node. **Anything
-reading the satellite result from the DB directly (a fresh `GET /results`
-call, or a future consumer that reads `satellite_results` rather than the
-live graph state) never sees `concerns`/`validations`/`needs_verification`/
-`should_alert` at all** — only the in-memory `PipelineState` hand-off carries
-them, and only the bare confidence float survives even that hand-off into
-`confidence_scores`.
-
-**Downstream can see:** the bare `confidence` float (via
-`PipelineState["confidence_scores"]["satellite"]`) and the full
-`satellite_result` dict in-memory for the one graph run. **Downstream cannot
-see** (from the DB, or from the in-memory state one hop later): evidence
-count, per-source evidence values, or the tracker's raw ledger — only the
-already-collapsed single number and the concern-text list.
-
-**Confirmed via grep of `agents/hazard/agent.py`:** the `confidence` key
-*is* carried into `_normalise_satellite_payload`'s output at line 89
-(`"confidence": p.get("confidence")`), but `analyzer.py`'s
+**CORRECTION to the immediately-prior `ANALYSIS.md`'s central confidence
+finding.** That document stated, in its §4.5, that "`analyzer.py`'s
 `run_parallel_analysis` (the function that actually computes hazard risk)
-never reads that key from the satellite payload — it extracts only
-`bbox`/`affected_area_km2`/`mean_value`/`water_percent`/`satellite_type`
-(analyzer.py:338-341). **The gap CLAUDE.md flags is confirmed live in the
-current code, not stale documentation.**
+never reads that key from the satellite payload." **This was already false
+when written.** Direct read of `agents/hazard/analyzer.py:342` this session:
+```python
+satellite_confidence = _to_float(analysis.get("confidence")) if analysis.get("confidence") is not None else None
+```
+and lines 409-414: if `satellite_confidence` is not `None` and is lower than
+flood's own LLM-derived confidence, flood's confidence is **capped down** to
+match it. `agents/hazard/agent.py:89` (`"confidence": p.get("confidence")`)
+is exactly what feeds `analysis.get("confidence")` here — the full chain
+does work. The commit that added this (`fa0d9bd`, "propagate satellite
+confidence into hazard and report") is timestamped **2026-07-27 09:39:24**,
+ten minutes **before** the prior analysis's own commit `2daddf6` at
+**09:49:13** (confirmed via `git log --format=%ci` on both commits, this
+session). See §11 gap #5 for the full reconciliation — this is a partial
+fix (flood only, downward cap only, and `confidence_basis`/`evidence_count`
+still don't cross the boundary), not a complete one, but the prior
+document's "never reads it at all" framing was incorrect at the moment it
+was written, not merely stale by the time of this pass.
 
 ---
 
-## 5. Data Contract — Every Field in the Result Dict
+## 6. DATA CONTRACT — Every Field in the Result Dict
 
 | Field | Type | Unit / range | Produced at | Consumed by (grepped) |
 |---|---|---|---|---|
@@ -480,8 +500,8 @@ current code, not stale documentation.**
 | `mean_index` | float | NDWI/NDVI: [-1,1]; SAR: dB (unbounded, uncalibrated) | agent.py:835 | hazard analyzer.py:339 as `mean_value` — **the exact field whose unit silently changes meaning by `satellite_type`, see below** |
 | `class_counts` | dict | % per class label | agent.py:836 | not found consumed downstream by name (grepped hazard/impact/report — no hits) |
 | `affected_area_km2` | float | km² | agent.py:837 | hazard analyzer.py:338, report db_client.py |
-| `index_calibrated` | bool\|None | — | agent.py:843 | hazard `_normalise_satellite_payload` line ~89 area (present); **`run_parallel_analysis` never reads it**, so the honest calibration flag does not actually reach the flood risk decision |
-| `index_units` | str | "NDWI_ratio"/"NDVI_ratio"/"dB_uncalibrated" | agent.py:844 | same as above — carried to hazard's normalise step but not read by the analyzer |
+| `index_calibrated` | bool\|None | — | agent.py | **NOT carried into hazard's `_normalise_satellite_payload` at all** — confirmed by direct read of `agents/hazard/agent.py:81-99`, which copies `index_type`/`confidence`/`needs_verification` into `analysis{}` but never `index_calibrated`/`index_units` (§6.2, corrects the prior analysis's framing of this as "carried but unread" — it is not carried at all) |
+| `index_units` | str | "NDWI_ratio"/"NDVI_ratio"/"dB_uncalibrated" | agent.py | same as above — **not carried through** |
 | `coverage_percent` | float | 0-100 (should be 100.0 on any successful run) | agent.py:847 | not found consumed downstream |
 | `full_aoi_coverage_percent` | float | 0-100 | agent.py:848 | not found consumed downstream |
 | `coverage_tier` | int | 1-4 | agent.py:849 | not found consumed downstream |
@@ -489,189 +509,225 @@ current code, not stale documentation.**
 | `acquisition_count` | int | count | agent.py:851 | not found consumed downstream |
 | `processing_level` | str\|None | "L2A" or None | agent.py:852 | not found consumed downstream |
 | `bytes_downloaded` | int | bytes | agent.py:853 | not found consumed downstream |
-| `bbox` | list[float] | WGS84 degrees | agent.py:854 | hazard (bbox scoping for USGS/GDACS/DEM fetches), impact |
-| `bounds`/`bounds_leaflet`/`bounds_corners` | dict/list | WGS84 degrees | processor.py `_compute_bounds` | frontend map overlay (not this agent's scope, confirmed by CODEBASE.md) |
-| `region_boundary` | GeoJSON | — | agent.py:858 | frontend |
-| `risk_cities` | list[str] | — | agent.py:859 | hazard, impact (city-scoped population/infra lookups) |
-| `true_color_url`/`index_url`/`classification_url`/`geojson_url`/`image_url` | str (URL)\|None | — | agent.py:860-864 | frontend, report map_generator |
-| `cached` | bool | — | agent.py:865 | not consumed downstream |
-| `cities` | list | — | agent.py:870 | **ALWAYS EMPTY** in production (see §9) — the per-city upload loop and `cities_payload` construction run over an empty list every time, since `city_boundaries=None` is passed unconditionally at agent.py:602 |
-| `interpretation` | dict\|None | — | agent.py:872 | not found consumed by name downstream (report has its own separate interpretation) |
-| `confidence` | float | 0-1 | agent.py:876 | hazard normalise (present, unread by analyzer — see §4.5) |
-| `concerns`/`validations`/`needs_verification`/`should_alert` | list/list/bool/bool | — | agent.py:879-882 | **not persisted to DB at all** (confirmed §4.5); in-memory only, one hop |
-| `summary_message` | str\|None | free text | agent.py:908 | not found consumed downstream by name |
+| `bbox` | list[float] | WGS84 degrees | agent.py | hazard (bbox scoping), impact |
+| `bounds`/`bounds_leaflet`/`bounds_corners` | dict/list | WGS84 degrees | processor.py `_compute_bounds` | frontend map overlay |
+| `region_boundary` | GeoJSON | — | agent.py | frontend |
+| `risk_cities` | list[str] | — | agent.py | hazard, impact (city-scoped population/infra lookups) |
+| `true_color_url`/`index_url`/`classification_url`/`geojson_url`/`image_url` | str (URL)\|None | — | agent.py | frontend, report map_generator |
+| `cached` | bool | — | agent.py | not consumed downstream |
+| `cities` | list | — | agent.py | **CHANGED SINCE PRIOR ANALYSIS.** No longer unconditionally empty — populated when `ENABLE_PER_CITY_ARTIFACTS=true` (default `false`, so empty by default in production still, but no longer a permanently dead path). See §10. |
+| `interpretation` | dict\|None | — | agent.py | not found consumed by name downstream |
+| `confidence` | float | 0-1 | agent.py | hazard's `analysis.confidence` — **READ, confirmed** (corrects the prior analysis's central claim; see §5.5) |
+| `confidence_basis`/`evidence_count` | str/int | NEW fields (§5.3) | agent.py (via `get_report()`) | **not carried through** to hazard's `analysis{}` (§6.1) |
+| `total_zones`/`scene_id` | int/str | NEW: now populated (§10) | agent.py | persisted to DB, was always NULL before this pass |
+| `artifacts_incomplete`/`failed_artifacts` | bool/list[str] | NEW fields (§10) | agent.py | not yet confirmed read downstream |
+| `concerns`/`validations`/`needs_verification`/`should_alert` | list/list/bool/bool | — | agent.py | not persisted to DB; in-memory only, one hop |
+| `summary_message` | str\|None | free text | agent.py | not found consumed downstream by name |
 
-### 5.1 Fields produced but never consumed anywhere downstream (confirmed by grep)
+### 6.1 Fields produced but never consumed anywhere downstream (confirmed by grep)
 
 `selection_reason`, `class_counts`, `coverage_percent`,
 `full_aoi_coverage_percent`, `coverage_tier`, `temporal_spread_days`,
 `acquisition_count`, `processing_level`, `bytes_downloaded`, `cached`,
-`interpretation`, `summary_message` — all present in the structured result and
-in `PipelineState`, but no grep hit in `agents/hazard/`, `agents/impact/`, or
-`agents/report/` reads them by name. These are either intended for future
-consumers, dashboard-only, or genuinely dead weight on the data contract.
+`interpretation`, `summary_message` — all present in the structured result,
+no grep hit in `agents/hazard/`, `agents/impact/`, or `agents/report/` reads
+them by name. Either intended for future consumers, dashboard-only, or
+genuinely dead weight on the data contract. Also now in this category:
+`confidence_basis`, `evidence_count`, `artifacts_incomplete`,
+`failed_artifacts` — all new fields added by the 2026-07-27 fix pass, none
+yet confirmed consumed downstream by name.
 
-### 5.2 Fields whose label can disagree with content (the class the SAR-as-NDWI bug belongs to)
+### 6.2 The label-vs-content defect class — where it still lives
 
-- **`mean_index`** is the single most dangerous field in this contract: its
-  *numeric meaning* (bounded ratio vs. unbounded uncalibrated dB) depends
-  entirely on `satellite_type`/`index_type`, which the hazard agent's own
-  deterministic fallback (`analyze_flood`'s `flood_index > 0.5`/`> 0.3`
-  thresholds, analyzer.py:213-215) **still does not branch on** — confirmed by
-  direct read of `analyzer.py`: the LLM-facing prompt at line 180-185 DOES
-  branch correctly on `satellite_type` to pick the right label/context, but
-  the **deterministic fallback used when the LLM call fails** applies flat
-  NDWI-scale thresholds to whatever `mean_value` is, regardless of whether it
-  came from SAR or NDWI. This is the exact defect class `root_cause.md`
-  documented (§4.3 there) and it is **still present and unfixed** in the
-  current hazard code — the satellite agent now correctly labels the field
-  (`index_calibrated`/`index_units`), but the hazard agent's fallback path
-  does not consume those labels to change its own threshold logic.
-- The satellite agent's own `validation_input` construction (agent.py:731-745)
-  has been **fixed** since `root_cause.md`/`fix.md` were written: it now
-  builds `index_type`/`index_calibrated`/`index_units` from the actual
-  computed result and asserts `validation_input["index_type"] ==
-  result["index_type"]` before calling the cross-validator. This closes the
-  specific mislabeling bug those docs originally found *inside this agent*.
-  The remaining live instance of the same defect class is one hop downstream,
-  in hazard's fallback threshold logic, not in this agent.
+The prior analysis's central "SAR-as-NDWI" finding had two parts: (a) inside
+this agent, at `validation_input` construction, and (b) one hop downstream,
+in hazard's deterministic fallback.
+
+- **(a) — CLOSED, confirmed.** `agent.py`'s `validation_input` builds
+  `index_type`/`index_calibrated`/`index_units` from the actual computed
+  result and asserts `validation_input["index_type"] ==
+  result["index_type"]` before calling the cross-validator (a hard
+  assertion, not a soft check). This closes the specific mislabeling bug
+  `root_cause.md`/`fix.md` originally found inside this agent.
+- **(b) — FIXED 2026-07-28 (SYSTEM_ANALYSIS.md H#4), previously open.**
+  `analyze_flood`'s LLM-facing prompt (lines 180-185) correctly branches
+  `index_label`/`index_context` on `satellite_type`. Its **deterministic
+  fallback** (lines 211-220, only reached if the LLM call fails) previously
+  applied flat `flood_index > 0.5`/`> 0.3` NDWI-scale thresholds to
+  `mean_value` regardless of whether it's an NDWI ratio or a SAR dB number.
+  **Direction correction, superseding this document's own prior framing
+  below:** this document previously described the effect as a false
+  negative, reasoning that SAR dB values are "rarely in [0,1]" and would
+  "almost never" exceed 0.5 — that assumed **calibrated** sigma0 backscatter,
+  which is negative dB. This codebase's SAR index is explicitly
+  **uncalibrated** (`10*log10(raw_GRD_DN)`, no radiometric LUT) and is
+  **positive** — confirmed live, the 2026-07-26 e2e run recorded
+  `mean_value = 23.6485` on the S1/SAR path. `flood_index > 0.5` is therefore
+  trivially satisfied by ANY positive SAR reading, so this fallback path
+  mechanically produced **CRITICAL** (a false-CRITICAL, not a false-negative)
+  on every S1 run that reached it, independent of actual ground conditions.
+  This was the exact same defect class `root_cause.md` originally documented
+  (§4.3 there), just misdiagnosed in direction by this document's earlier
+  draft.
+
+  Also confirmed by direct read this session (Gate B,
+  `agents/hazard/agent.py:81-99`, pre-fix): `_normalise_satellite_payload`
+  did NOT carry `index_calibrated`/`index_units` into hazard's `analysis`
+  dict — only `index_type`, `confidence`, `needs_verification` were copied.
+  (`agents/hazard/ANALYSIS.md`'s claim that it DID carry these fields was
+  the wrong side of this disagreement.) Fixed together: the adapter now also
+  carries `index_calibrated`/`index_units`/`confidence_basis`/
+  `evidence_count`, and the deterministic fallback reads `index_calibrated`
+  to base the flood decision on `affected_area_km2` alone for uncalibrated
+  SAR (never the raw index), confidence capped at 0.4, with an explicit
+  anomaly recorded. The NDWI/calibrated-optical path is unchanged.
 
 ---
 
-## 6. Failure Modes
+## 7. FAILURE MODES
 
 | Failure | Trigger | Surfaced or swallowed? | What's returned | Can downstream tell it apart from success? |
 |---|---|---|---|---|
-| Region boundary unresolvable | `get_region_boundary` returns None | Surfaced | `{"status":"error", "error": "..."}` | Yes — `status != "complete"` |
-| No risk cities detected | `detect_risk_cities` returns empty | Surfaced | error payload | Yes |
-| Risk-city boundaries unresolvable | all cities fail Nominatim+geoBoundaries+buffer | Surfaced | error payload | Yes |
-| CDSE auth fails after 3 attempts | `TokenManager().get()` returns None each time | Surfaced | error payload | Yes |
-| No scenes found after widening to 30d | `search_imagery` empty at every window | Surfaced | error payload | Yes |
-| Insufficient coverage (no tier reaches 100%) | `process_satellite_imagery` returns `status:"failed"` | Surfaced, with gap geometry | `_coverage_failure(...)` — `status:"error", reason:"insufficient_coverage"` | Yes, and unusually well-informed (gap area/bbox/cause) |
-| **DB persist fails** | any exception in `_persist_satellite_result` | **Swallowed** — `except Exception: logger.warning(...)`, no re-raise, no status change | Pipeline still returns `status:"complete"` with the full structured payload | **NO.** `GET /results` (or any DB-reading consumer) will 404/miss this event even though the in-memory graph state and the caller both saw a successful "complete" result. This is a **dangerous silent-success failure mode**, unchanged from `fix.md`'s original finding. |
-| `_polygon_area_km2` pyproj failure | any exception in the equal-area reprojection | **Swallowed** — `except Exception: return geom.area` | `affected_area_km2` becomes a **degrees² value silently mislabeled as km²** (off by roughly 4 orders of magnitude at mid-latitudes) | **NO.** The field name and type are unchanged; nothing marks the value as suspect. This is the single most dangerous *silent* correctness bug in the codebase — a downstream consumer has no way to detect it without independently sanity-checking the magnitude. |
-| Whole-pipeline unexpected exception | any uncaught exception in `_run_pipeline_sync`'s try block | Surfaced, but with **no stack context** | `{"status":"error","error": f"Unexpected error: {exc}"}` | Yes it's an error, but the *cause* is opaque — only `str(exc)`, no traceback, no stage attribution. Debugging requires reading server logs. |
-| Cleanup failure (temp dir removal) | `shutil.rmtree` raises OSError | Swallowed — logged as warning | Does not affect pipeline status | N/A — correctly non-fatal |
-| R2 upload failure (any artifact) | `_put_file`/`_put_bytes` raise | Swallowed per-artifact — returns `None` for that URL | `structured["true_color_url"]` etc. can be `None` while `status` is still `"complete"` | **Partially.** A `None` URL is visible to a careful consumer, but the pipeline does not treat a failed critical-artifact upload as a stage failure — a "complete" satellite result can carry `image_url: None`. |
-| GDACS/USGS/Featherless-expert unreachable | any network/parse error in `cross_validator.py` checks | Swallowed — logged, check skipped, no evidence added | Confidence is lower (fewer evidence sources) but no explicit "this check could not run" flag rides in the result | Downstream sees a lower number but cannot distinguish "check ran and found a problem" from "check never ran" (this is the §4.4 ambiguity). |
+| Region/city boundary unresolvable | boundary.py returns None/empty | Surfaced | `status != "complete"`, clearly distinguishable |
+| CDSE auth fails after 3 attempts | `TokenManager().get()` None each time | Surfaced | clean error payload |
+| No scenes found after widening to 30d | empty at every window | Surfaced | clean error payload |
+| Insufficient coverage (no tier reaches 100%) | `process_satellite_imagery` returns failed | Surfaced, with gap geometry | unusually well-informed failure (area/bbox/cause) |
+| **DB persist failure** | any exception in `_persist_satellite_result` | **CHANGED SINCE PRIOR ANALYSIS — now surfaced, not swallowed.** Retries up to `PERSIST_MAX_ATTEMPTS` (3) with backoff (1s, 3s); if every attempt fails, the function returns a non-`None` error string, and `_run_pipeline_sync` now treats any non-`None` return as a hard failure — the pipeline returns `status:"error"`, **never** `"complete"`, when persistence is exhausted. Confirmed by direct read of `agent.py`'s `_persist_satellite_result` (its own docstring states this contract) and cross-checked against `CLAUDE.md`'s 2026-07-27 log. **Closes prior gap #1 (was: can mislead silently and completely).** | **Closed.** |
+| `_polygon_area_km2` reprojection failure | pyproj exception | **CHANGED — no longer swallowed.** No try/except around the EPSG:6933 reprojection at all (§4.4); an exception now propagates rather than degrading to a mislabeled degrees² value. **Closes prior gap #2.** | **Closed.** |
+| Whole-pipeline unexpected exception | any uncaught exception in `_run_pipeline_sync`'s try block | Surfaced, but with no stack context — only `str(exc)` | Unchanged; debugging still requires server logs. |
+| Cleanup failure (temp dir removal) | `shutil.rmtree` OSError | Swallowed, logged warning | Correctly non-fatal, unchanged. |
+| R2 upload failure (any artifact) | `_put_file`/`_put_bytes` raise | **CHANGED SINCE PRIOR ANALYSIS.** `upload_all_results` now returns a `failed_artifacts` list; `structured` carries `artifacts_incomplete: bool` + `failed_artifacts: list[str]` (merged + per-city-prefixed). A consumer no longer has to null-check every URL individually to discover the run degraded — though a `None` URL can still slip through if a consumer ignores the new flags. **Closes prior gap #12, mostly.** | **Mostly closed.** |
+| GDACS/USGS/Featherless-expert unreachable | network/parse error in cross_validator checks | Swallowed, logged, check skipped, no evidence added | Downstream sees a lower confidence number but (per §5.3) can now in principle tell "insufficient_evidence" apart from "evidence_contradicts" via `confidence_basis` — if it reads that field, which hazard currently does not (§6.2). |
 
-**Summary of dangerous silent-success paths:** (1) DB persist failure —
-"complete" status with no durable row; (2) area-unit silent fallback to
-degrees² mislabeled as km²; (3) per-artifact R2 upload failure leaving `None`
-URLs inside an otherwise-"complete" result. All three were flagged in
-`fix.md` and are confirmed **still present, unfixed**, in the current code.
+**Summary:** two of the three "dangerous silent-success" paths the prior
+analysis flagged (DB persist, area-unit degrade) are now closed by explicit
+fixes; the third (R2 partial upload) now surfaces an explicit flag rather
+than depending on a consumer's own null-checking discipline, though nothing
+forces that flag to be checked (§11 gap #8).
 
 ---
 
-## 7. External Dependencies
+## 8. EXTERNAL DEPENDENCIES
 
-| Dependency | Timeout/retry behavior | On unavailable |
+| Dependency | Timeout/retry | On unavailable |
 |---|---|---|
-| **CDSE OAuth (Keycloak)** | `authenticate_copernicus`/`_authenticate_copernicus_full`: single request, 30s timeout, no retry inside the function itself; `TokenManager.get()` proactively refreshes 90s before the ~10min expiry via `refresh_token` grant, falling back to full re-auth if refresh fails. Thread-safe via `threading.Lock`. `_authenticate_with_recovery` (agent.py) retries the whole TokenManager construction up to 3 times with an LLM-suggested (capped ≤10s) delay between attempts. | Pipeline fails cleanly with `_error("Copernicus authentication failed (after recovery)")`. |
-| **CDSE catalogue search** (`search_imagery`, `_peek_cloud_cover`) | 60s / 30s timeout respectively, single attempt each (no internal retry — the retry loop is at the `_search_with_recovery` level: 7/14/30-day re-attempts, which are new *searches*, not retries of a failed request) | On `requests.RequestException`: logged, returns `None`. On empty results (not an error, a valid empty catalogue): logged warning, returns `None`, triggering the day-window widening. |
-| **CDSE download** (Nodes per-band, or whole-zip fallback) | `(connect=15s, read=90s)` timeout tuple; `_stream_to_file_with_retry` retries against a **time budget** (`OUTAGE_GRACE_SECONDS = 7min`), not a fixed attempt count — exponential backoff 5s→30s cap. CDSE never honors HTTP Range (confirmed by the in-code comment and the whole per-band download design rationale), so every retry re-fetches the object from scratch; per-band granularity (vs. whole-archive) is what limits the blast radius of a single dropped connection. | After the grace budget expires: `None` returned, scene download abandoned, caller (`download_imagery`) tries the next candidate scene or falls back from Nodes to whole-zip. |
-| **geoBoundaries API** (`geoboundaries.py`) | Metadata: 20s timeout; GeoJSON download: 120s timeout. Transient failures (network exceptions) are **not cached** (retryable next call); a genuine 404 (level absent for the country) **is cached** as a negative to avoid re-probing. | Falls through the source chain: geoBoundaries miss → Nominatim/OSM areal relation → buffered-disk last resort (with a loud warning). Never blocks the pipeline. |
-| **Nominatim** (`boundary.py`, `geoboundaries.py`'s country lookup) | 30s (place search) / 20s (country lookup) timeout, no retry; throttled to ≤1 req/sec via a module-level `time.sleep` gate (policy compliance, not resilience) | On failure: `None` returned, city/region skipped (non-fatal for a single city; fatal for the overall pipeline only if *every* city fails). |
-| **GDACS GeoJSON feed** (`cross_validator.py`) | 15s timeout, no retry | Logged warning, check skipped entirely — no evidence, no concern, no crash. |
-| **USGS FDSN query** (`cross_validator.py`) | 15s timeout, no retry | Same as GDACS — skipped cleanly. |
-| **LLM providers** (Gemini → Featherless chain → AIML/Opus, `intelligence.py`) | 30s per-model timeout (`MODEL_TIMEOUT_SECONDS`), `max_retries=0` (the chain itself is the retry mechanism — up to 5 Gemini keys + 4 Featherless models + 1 Opus = up to 10 attempts per call) | If every model in the chain fails/times out/returns empty content: the calling method returns `None`, and every call site in `agent.py` treats `None` as "fall back to the deterministic default" — confirmed correct at every one of the six integration points (IP1-IP6); none of them treat an LLM failure as a pipeline failure. |
-| **Cloudflare R2** (`r2_upload.py`, boto3) | boto3 default retry/timeout behavior (not overridden in this code) | Every upload function catches `BotoCoreError`/`ClientError` and returns `None` per-artifact — see §6 for why this is a silent-partial-success risk, not a crash risk. |
-| **Postgres/Neon** (`_persist_satellite_result`) | `asyncpg.connect()` per call (no pool — a fresh TLS connection every persist), no explicit timeout override, no retry | Any exception (including a connection failure) is caught and logged as a warning only — see §6, this is the most dangerous swallowed failure in the agent. |
+| CDSE OAuth (Keycloak) | Single request, 30s timeout; `TokenManager.get()` proactively refreshes 90s before ~10min expiry (refresh_token grant, falls back to full re-auth); thread-safe via lock. `_authenticate_with_recovery` retries construction up to 3x. | Clean `_error(...)`. |
+| CDSE catalogue search | 60s/30s timeout, single attempt (retry is at the search-window-widening level, not request level) | `None` returned on empty/error, triggers day-window widening. |
+| CDSE download (Nodes per-band or whole-zip) | (connect=15s, read=90s); `_stream_to_file_with_retry` retries against `OUTAGE_GRACE_SECONDS` (7min) time budget, exp backoff 5s->30s cap. CDSE never honors HTTP Range — every retry re-fetches from scratch; per-band granularity limits blast radius for S2 only. | `None` after budget expires; caller tries next candidate or falls back Nodes->whole-zip. |
+| geoBoundaries API | Metadata 20s, GeoJSON download 120s. Transient failures not cached (retryable); genuine 404s cached negative. | Falls through source chain: geoBoundaries -> Nominatim -> buffered-disk last resort (loud warning). |
+| Nominatim | 30s/20s, no retry, throttled <=1 req/sec (policy compliance) | `None`, city/region skipped (non-fatal unless every city fails). |
+| GDACS/USGS feeds | 15s, no retry | Logged, check skipped, no evidence/concern/crash. |
+| LLM providers (Gemini -> Featherless chain -> AIML/Opus) | 30s per-model, `max_retries=0` (chain itself is the retry mechanism, up to ~10 attempts) | `None` on total exhaustion; every call site treats `None` as "fall back to deterministic default," confirmed at all six integration points. |
+| Cloudflare R2 (boto3) | boto3 default retry/timeout | Per-artifact `None` on failure — now surfaced via `failed_artifacts` (§7), not silently absorbed. |
+| Postgres/Neon | `asyncpg.connect()` per call (no pool), **now retried** up to `PERSIST_MAX_ATTEMPTS` with backoff (§7) | Exhausted retries now fail the pipeline honestly instead of a swallowed warning. |
 
 ---
 
-## 8. Resources
+## 9. RESOURCES — Memory/Disk/Network Profile (unchanged since the 2026-07-26 e2e run)
 
-### 8.1 Memory
+### 9.a Memory
 
-Directly instrumented in code (`_mem_stage`/`memory_report`, processor.py:
-98-141) — this is **not an estimate**, it is what the pipeline itself logs
-per run. Per `CLAUDE.md`'s cited live run (2026-07-26, Rawalpindi S1/SAR,
-event `88ad6095…`): **peak RSS 9,611.3 MB (~9.6 GB) at the clip stage with
-only 2 tiles mosaicked**; single-tile clip stages peaked ~5.1-5.6 GB; 2-tile
-mosaic-and-clip stages peaked 7.3-9.6 GB. RSS scales roughly linearly with
-tile count because every `_open_georeferenced`/`WarpedVRT` and
-`rasterio.merge` pass holds full-resolution arrays (S1 GRD scenes are
-28,000×21,000+ px) in memory before the windowed clip trims them down. The
-pre-clip stacked cube is explicitly freed + `gc.collect()`'d before the
-render tail *only* when per-city rendering is off (processor.py:2337-2340) —
-since per-city is always off in production (§9), this freeing path is always
-taken, which is the one memory optimization actually exercised live.
+Directly instrumented in code (`_mem_stage`/`memory_report`) — this is not
+an estimate, it is what the pipeline itself logs per run. Per `CLAUDE.md`'s
+cited live run (2026-07-26, Rawalpindi S1/SAR, event `88ad6095…`): **peak
+RSS 9,611.3 MB (~9.6 GB) at the clip stage with only 2 tiles mosaicked**;
+single-tile clip stages peaked ~5.1-5.6 GB; 2-tile mosaic-and-clip stages
+peaked 7.3-9.6 GB. RSS scales roughly linearly with tile count because every
+`_open_georeferenced`/`WarpedVRT` and `rasterio.merge` pass holds
+full-resolution arrays (S1 GRD scenes are 28,000×21,000+ px) in memory
+before the windowed clip trims them down. **Unchanged since the prior
+analysis**, and directly relevant to §3's `ENABLE_PER_CITY_ARTIFACTS` flag
+staying off by default — turning it on would multiply this peak.
 
-### 8.2 Disk
+### 9.b Disk
 
-`TEMP_ROOT` under the system temp dir holds: downloaded band JP2/TIFF files
-(`<event_id>/bands/`), exported PNGs, and cached full-archive `.zip` files
-(kept at the `TEMP_ROOT` top level, keyed by product Id, independent of
-`event_id`). `cleanup_event_temp` (processor.py:2451-2496) is called both on
-the success path (agent.py:718) and, per BUG 7, **guaranteed via a `finally`
-block** (agent.py:919-930) on every exit path including exceptions — this
-closes the pre-fix gap where a failure left a multi-GB working tree on disk.
-The `.zip` archive cache is separately gated by `SATELLITE_KEEP_SCENE_CACHE`
-(default: delete in production) — this is correctly designed to avoid
-unbounded disk growth on an ephemeral VM.
+`TEMP_ROOT` under the system temp dir holds downloaded band files, exported
+PNGs, and cached full-archive `.zip` files. `cleanup_event_temp` is called
+on the success path and, per BUG 7, **guaranteed via a `finally` block** on
+every exit path including exceptions. The `.zip` archive cache is separately
+gated by `SATELLITE_KEEP_SCENE_CACHE` (default: delete in production) —
+correctly designed to avoid unbounded disk growth. Unchanged since the
+prior analysis.
 
-### 8.3 Network volume
+### 9.c Network volume
 
 Per-band Nodes download for S2 (~30-120 MB/band) vs. whole-archive fallback
-for S1 (~1.2-1.7 GB per scene, confirmed by the 2026-07-26 e2e run: 4 full
-archives, 5,490.7 MB total, because `_download_bands_via_nodes` explicitly
-returns `None` for any `satellite_type != "sentinel-2"` — processor.py:615-617
-— since its Nodes-tree mapping only understands the S2 L1C/L2A IMG_DATA
-layout). **This means every Sentinel-1 candidate scene is a full-archive
-download with no per-band resume benefit** — a real, confirmed, unaddressed
-gap: S1 gets none of the outage-resilience granularity S2 has.
+for S1 (~1.2-1.7 GB/scene, confirmed by the 2026-07-26 e2e run: 4 full
+archives, 5,490.7 MB total) because `_download_bands_via_nodes` explicitly
+returns `None` for any `satellite_type != "sentinel-2"`. **Confirmed
+unchanged this session** (§11 gap #6, still open) — every Sentinel-1
+candidate scene is a full-archive download with no per-band resume benefit.
 
-### 8.4 Wall-clock time
+### 9.d Wall-clock time
 
 The 2026-07-26 live e2e (S1/SAR, Rawalpindi, 4 coverage tiers, 4 full-archive
-downloads) took **3244.1s (~54 min)** total — cited in `CLAUDE.md` as the
-current S1 baseline (the old 142s baseline is explicitly retired because it
-predated BUG 1's fix and represents an instant-collapse-to-0%-coverage run,
-not a real success). Contributors, in order of likely magnitude based on the
-code: (1) sequential full-archive S1 downloads across up to 4 tiers × up to
-`DOOMED_DOWNLOAD_LIMIT`-bounded candidates each; (2) per-file/per-band
-`asyncio.run()`-wrapped DB writes with no connection pooling
-(`_persist_satellite_result` opens a fresh `asyncpg.connect()` every call);
-(3) serial LLM calls at each of the 6 integration points, each with up to a
-30s-per-model timeout across as many as 10 chained attempts if earlier
-providers fail — these are explicitly **not on the imagery-processing
-critical path** (they're narrative/reasoning, not required for the
-deterministic pipeline to produce a result) but they are called synchronously
-and block the thread; (4) single-threaded `rasterio.features.shapes`
-vectorization scaling with zone count (documented elsewhere as
-multi-minute on a 251-zone Mindanao mosaic).
+downloads) took **3244.1s (~54 min)** total, cited in `CLAUDE.md` as the
+current S1 baseline. Unchanged since the prior analysis; not re-measured
+this session (no code changed that would affect wall-clock time).
 
 ---
 
-## 9. Dead and Unreachable Code
+## 10. DEAD AND UNREACHABLE CODE — What Changed Since the Prior Pass
 
-Beyond the two already-known items (`stance_engine.py` and
-`intelligence.decide_landsat_fallback`, both **already deleted** per
-`CLAUDE.md`'s BUG 6 — confirmed absent from the current `agents/satellite/`
-directory listing and from `intelligence.py`'s method list), the following
-were found by direct reading:
+The prior analysis's own dead/unreachable-code section flagged five items.
+Status now, verified by direct grep/read this session:
 
-| Item | Status | Apparent purpose | Real gap or should-delete? |
+| Item | Prior status | Current status |
+|---|---|---|
+| `stance_engine.py`, `intelligence.decide_landsat_fallback` | Already deleted (BUG 6) | **Unchanged — still deleted.** Confirmed absent. |
+| **Per-city artifact rendering** (`_render_per_city`, per-city upload loop) | Unreachable — `city_boundaries=None` hardcoded unconditionally | **CHANGED — now reachable, gated by `ENABLE_PER_CITY_ARTIFACTS` env var (default `false`).** Confirmed: `agent.py` defines the flag and uses `city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None` at the one call site. Still off by default (memory sizing not yet done, §9.a), but no longer a dead path with no way to turn it on — a considered, documented, reversible flag. `MIN_VALID_PIXEL_PERCENT`'s only live use (the per-city skip check) is now reachable, not permanently dead. |
+| `COVERAGE_MOSAIC_THRESHOLD` / `MOSAIC_MAX_SCENES` / `select_mosaic_scenes` | Defined but unread by the tiered search; recommended delete-or-rewire | **CHANGED — deleted.** Confirmed zero hits for `select_mosaic_scenes`/`COVERAGE_MOSAIC_THRESHOLD` in `sentinel.py` via grep. Matches `CLAUDE.md`'s 2026-07-27 log ("were genuinely dead... and were deleted"). Closes the stale-documentation risk the prior analysis warned about. |
+| `total_zones`/`damage_percent`/`scene_id` (persisted columns, always NULL) | Computed/available but never added to `structured`; bug not dead code | **CHANGED — `total_zones` and `scene_id` now populated.** Confirmed: `_persist_satellite_result`'s INSERT writes `total_zones` and `scene_id` as live columns. `damage_percent` was **removed from the INSERT entirely** rather than kept as permanently-NULL — it had no producer anywhere in the codebase, so this is the correct fix, and the DB column itself stays nullable so `agents/report/db_client.py`'s existing `.get("damage_percent") or 0` read is unaffected. |
+| `verify_setup.py` | Deleted per migration | Unchanged — still absent. |
+
+**New, not previously documented:** none found this pass beyond what's
+already covered in §3/§6 above — the fix-pass commits were targeted at
+the prior document's own gap list and didn't introduce new orphaned code as
+a side effect.
+
+---
+
+## 11. RECONCILIATION — Every Prior Gap, Closed / Open / Was-Stale
+
+Per the task brief, each of the prior `ANALYSIS.md`'s 13 numbered gaps (its
+own gap-list section) plus its two headline confidence findings,
+independently re-verified against current code:
+
+| # | Prior finding | Status now | Evidence |
 |---|---|---|---|
-| **Per-city artifact rendering** (`_render_per_city`, `_render_clip`'s `out_id` namespacing, the per-city upload loop in `agent.py`) | Unreachable in production — `agent.py:602` hardcodes `city_boundaries=None` on every call to `process_satellite_imagery`, unconditionally. The `city_boundaries and len(city_boundaries) > 1` guard inside `process_satellite_imagery` (processor.py:2404) can therefore never be true from the live entry point. | Per-city artifact sets for multi-city AOIs (frontend/hazard wanting individual city layers) | **Fills a real, documented gap** (deliberately disabled for performance per `CLAUDE.md` Step 13's FIX 5) — this is dormant-by-design, not truly dead, but every line of `_render_per_city`/the per-city upload loop is currently unexercised by any live path. Worth flagging: `MIN_VALID_PIXEL_PERCENT` (5%) is the only place this constant is still load-bearing (§2), and it only matters for a code path that never runs. |
-| **`COVERAGE_MOSAIC_THRESHOLD` / `MOSAIC_MAX_SCENES`** (`sentinel.py:51`, `processor.py:66-68`) | Defined, but **not read by `process_satellite_imagery`'s actual tiered-coverage logic** (§1.3/§2) — the tiered search's acceptance criterion is `compute_coverage()["covered"]` (100% interior), not a comparison against this threshold. `select_mosaic_scenes` (sentinel.py:797) — the function that *would* consume these constants for a greedy set-cover selection — exists and is fully implemented, but is **never called from `agent.py` or `processor.py`** (confirmed by grep: `select_mosaic_scenes` has zero call sites outside its own definition and test files). | Was the FIX C/Step-10 greedy set-cover scene-selection strategy, superseded by the later tiered-temporal-coherence design (BUG 3) that supersedes greedy set-cover with tier-then-accept-best-first. | **Should be deleted or explicitly wired back in.** It is fully implemented, documented at length in `CLAUDE.md`, unit-testable, and currently orphaned — the tiered search does its own simpler best-first-within-group acceptance instead. Leaving it creates the false impression (reading `CLAUDE.md` alone) that greedy set-cover is still the active mosaic strategy. |
-| **`_scene_covers_geom`** (sentinel.py:449) | Still called from `backfill_uncovered_cities` (§1.2) — **not dead**, just decoupled from `select_mosaic_scenes`. |  |
-| **`verify_setup.py`** | Deleted per the migration file-diff (confirmed absent from the current directory listing) — `CODEBASE.md`'s reference to it describing "the older AnthropicAdapter" is now moot since the file itself is gone, not merely stale. |  |
-| **`total_zones` computed then dropped** (agent.py:763-767) | `total_zones` is computed locally (`len(result["geojson"].get("features", []))`) and used in the `interpret_results` LLM call and the `generate_band_message` call, but is **never added to the `structured` result dict** that gets persisted — the `_persist_satellite_result` INSERT names a `total_zones` column (agent.py:108/122) that is `structured.get("total_zones")` → always `None`. | Was presumably meant to be a persisted field | **Bug, not dead code** — cheap one-line fix (add `"total_zones": total_zones` to `structured`), but currently every `satellite_results.total_zones` DB row is NULL. Confirmed unchanged from `fix.md`'s original finding. |
-| **`damage_percent`** (persisted column, agent.py:107/121) | The INSERT names this column but `structured` never sets a `damage_percent` key anywhere in `agent.py`. | Unclear original intent — possibly meant to mirror `water_percent` for non-flood disasters | **Always NULL in the DB.** Same class of bug as `total_zones`. |
-| **`scene_id`** (persisted column, agent.py:106/115) | Same pattern — INSERT names it, `structured` never sets it. The selected scene's `Name`/`Id` is available in-pipeline (used for logging) but never threaded into `structured`. | Intended to record which scene was used | **Always NULL in the DB.** Same class of bug. |
+| 1 | DB persist failure swallowed, pipeline still "complete" | **CLOSED.** Retries 3x with backoff; exhaustion now fails the pipeline. | agent.py `_persist_satellite_result`; CLAUDE.md 2026-07-27 log |
+| 2 | `_polygon_area_km2` silently degrades to mislabeled degrees² | **CLOSED.** No try/except around the reprojection; failure now propagates. | processor.py:1616-1638 |
+| 3 | SAR uncalibrated, thresholds have no physical basis, but still classified/shipped | **STILL OPEN, by design.** Honestly labeled (`index_calibrated:false`), not fixed — real calibration/speckle-filter/RTC work is out of scope for a correctness pass. | processor.py SAR index code, §4.2 |
+| 4 | Hazard's deterministic flood fallback applies NDWI thresholds to SAR dB regardless of `satellite_type` | **STILL OPEN.** Confirmed by direct read this session: `agents/hazard/analyzer.py:211-220`'s fallback is unconditional; the LLM-facing prompt (180-185) is correct but the fallback isn't. Compounded by `index_calibrated`/`index_units` never reaching hazard's `analysis` dict at all (§6.2). | agents/hazard/analyzer.py:173-224; agents/hazard/agent.py:81-99 |
+| 5 | Satellite confidence computed but never read by hazard's actual risk computation | **WAS WRONG WHEN WRITTEN — the fix had already landed.** Direct read of `agents/hazard/analyzer.py:342` (`satellite_confidence = _to_float(analysis.get("confidence"))`) and lines 409-414 (flood confidence is capped at satellite's confidence when satellite's is lower) confirms hazard **does** read it. Commit `fa0d9bd` ("propagate satellite confidence into hazard and report") landed at 2026-07-27 09:39:24, **ten minutes before** the prior analysis commit `2daddf6` at 09:49:13 (confirmed via `git log --format=%ci`). **Partial fix, not complete**: the cap only applies to flood's confidence, downward only, and only if satellite's confidence is lower — earthquake/landslide are satellite-independent by design (per `root_cause.md`'s original intent, arguably correctly excluded) — and `confidence_basis`/`evidence_count` (the newer legibility fields, §5.3) still don't cross the boundary. | agents/hazard/analyzer.py:333-414; git log --format=%ci fa0d9bd 2daddf6 |
+| 6 | `ConfidenceTracker` can't distinguish "no evidence" from "evidence contradicts" | **CLOSED at the tracker level, not fully closed end-to-end.** `confidence_basis()`/`get_report()` now compute and surface the distinction in `structured` (§5.3). But hazard's normalise step doesn't carry `confidence_basis`/`evidence_count` through, so a downstream consumer still can't see the distinction unless it reads the satellite result directly. | confidence_tracker.py; agents/hazard/agent.py:81-99 (fields not carried) |
+| 7 | NDWI/NDVI thresholds untuned for L2A | **STILL OPEN**, explicitly acknowledged, science-phase follow-up, not attempted in this pass. | processor.py comments; CLAUDE.md |
+| 8 | NDVI single-scene absolute threshold, not bi-temporal | **STILL OPEN**, real feature gap, not a tuning fix. | processor.py NDVI code |
+| 9 | S1 has no per-band Nodes path, every candidate a full archive | **STILL OPEN**, confirmed unchanged: `_download_bands_via_nodes` still unconditionally returns `None` for non-S2. | processor.py |
+| 10 | `total_zones`/`damage_percent`/`scene_id` always NULL | **CLOSED for `total_zones`/`scene_id`** (now populated); `damage_percent` **correctly removed** from the INSERT rather than left perpetually NULL, since it had no producer. | agent.py INSERT statement; §10 above |
+| 11 | Per-city rendering permanently unreachable, mosaic set-cover orphaned | **BOTH CLOSED**, differently: per-city is now a feature flag (reachable, off by default); orphaned mosaic set-cover code was deleted outright. | §10 above |
+| 12 | R2 partial upload failures silently `None`, no degraded-success flag | **CLOSED.** `artifacts_incomplete`/`failed_artifacts` now ride in `structured`. | r2_upload.py; agent.py |
+| 13 | Coverage tier day windows not derived from revisit cycle | **Resolved as a design review, not a code change** (matches the prior document's own framing of this as a discussion item, not a defect). Live-measured against CDSE: S2 tiers are a reasonable match; S1's ~11-day actual revisit confirms tiers 2/3 are structurally near-no-ops for S1, left unchanged because the cost is negligible and any change would touch validated live-tested behavior. | CLAUDE.md's "Tier-window revisit analysis" section |
+
+**Net:** of 13 numbered gaps + 2 headline confidence findings, **6 are fully
+closed** (#1, #2, #10, #11, #12, and the tracker-level half of #6), **1 was
+already wrong when the prior document was written** (#5 — its "diagnosed
+only, not fixed" framing was itself stale; the actual fix commit predates
+the diagnosis commit), **1 is resolved as a documented design decision
+rather than a code change** (#13), and several remain genuinely open (#3
+SAR calibration, #4 hazard's SAR-threshold fallback, #6's cross-boundary
+half, #7 L2A threshold revalidation, #8 bi-temporal NDVI, #9 S1 Nodes path).
 
 ---
 
-## 10. The Gap List — Prioritized
+## 12. THE GAP LIST — Prioritized (current state)
 
 | # | Issue | Type | Severity | Effort | Evidence |
 |---|---|---|---|---|---|
 | 1 | **DB persist failure is swallowed as a warning while the pipeline still returns `status:"complete"`.** A transient Neon outage during the INSERT produces a fully "successful" run with no durable `satellite_results` row; any consumer reading `GET /results` or re-querying the DB sees nothing, while the in-memory graph state (and any caller who got the direct return value) believes the run succeeded. | correctness/contract | **Can mislead silently and completely** — a downstream operator has no way to detect this without independently cross-checking the DB. | Low (raise/mark-failed on persist exception, or retry with backoff) | agent.py:132-133 |
 | 2 | **`_polygon_area_km2`'s exception fallback returns degrees² mislabeled as km².** If the pyproj equal-area reprojection ever throws, `affected_area_km2` silently becomes a value off by ~4 orders of magnitude at mid-latitudes, with the exact same field name/type as a correct value. | correctness | **Very high, very silent** — no flag, no unit change, indistinguishable from a real (tiny or huge) area to any downstream reader. | Low (raise instead of degrading, or tag the result with an explicit `area_calculation_failed` flag) | processor.py:1622-1638 |
 | 3 | **SAR backscatter is uncalibrated raw-DN log, with no calibration LUT, no speckle filter, no terrain correction — the class thresholds applied to it (-13/-15/-18 dB) have no physical basis given that input.** The pipeline now honestly *labels* this (`index_calibrated: False`), but still *computes and ships a classified hazard map and a `mean_index` number* as if the thresholds meant something, for every Sentinel-1 flood run. | science | **High** — every S1 flood analysis (the case CDSE/cloud-routing selects specifically *because* optical is unusable) ships a classification/area/mean-index that is not scientifically defensible, even though it is correctly flagged as uncalibrated in the metadata. | High (real calibration + speckle filter + RTC is a substantial remote-sensing engineering task) | processor.py:1384-1401, 233-267; CLAUDE.md's own SAR notes |
-| 4 | **Hazard agent's deterministic flood fallback still applies NDWI-scale thresholds to a SAR-dB `mean_value` without checking `satellite_type`, even though the satellite agent now correctly labels `index_calibrated`/`index_units`.** The label exists but is not consumed by the one place that would misuse it. | contract | **High but conditional** — only fires when the hazard agent's LLM call fails and the deterministic fallback runs; when it does fire on an S1 path, `flood_index > 0.3`/`> 0.5` is almost never true for SAR dB values, so it silently biases toward LOW/MEDIUM risk on a real flood signal (false negative), not a false alarm. | Low (branch the fallback on `satellite_type`/`index_calibrated`, mirroring what the LLM prompt already does) | agents/hazard/analyzer.py:180-185 (correct) vs 211-215 (not) |
+| 4 | **FIXED 2026-07-28 (SYSTEM_ANALYSIS.md H#4).** Hazard agent's deterministic flood fallback previously applied NDWI-scale thresholds to a SAR-dB `mean_value` without checking `satellite_type`, even though the satellite agent correctly labels `index_calibrated`/`index_units`. **Correction to this document's original framing:** this document previously (incorrectly) described the failure mode as a false-negative, reasoning that `flood_index > 0.3`/`> 0.5` would "almost never" be true for SAR dB values. That assumed calibrated sigma0 backscatter, which is negative dB. This codebase's SAR index is UNCALIBRATED (`10*log10(raw_GRD_DN)`) and is **positive** (confirmed live: `mean_value = 23.6485` on the 2026-07-26 e2e S1 run) — so the old threshold was trivially satisfied by any positive SAR reading, mechanically producing **CRITICAL** (a false-CRITICAL, not a false-negative) on every S1 run that reached this fallback, independent of actual ground conditions. Fixed: the fallback now reads `index_calibrated` and, for uncalibrated SAR, bases the decision on `affected_area_km2` alone (never the raw index), confidence capped at 0.4, with an explicit anomaly recorded — mirroring the label-awareness the LLM-facing prompt already had. | contract | **High but conditional** — only fires when the hazard agent's LLM call fails and the deterministic fallback runs. | Low (branch the fallback on `satellite_type`/`index_calibrated`, mirroring what the LLM prompt already does) — **done** | agents/hazard/analyzer.py:180-185 (correct) vs 211-215 (fixed 2026-07-28) |
 | 5 | **Satellite `confidence` (and its constituent evidence/concerns) is computed carefully but never read by the hazard agent's actual risk computation.** `_normalise_satellite_payload` carries `confidence` into the normalized payload, but `run_parallel_analysis` never extracts it; hazard's own self-generated confidence is entirely disconnected from how uncertain satellite was. | contract | **High, and demonstrated live** — the cited 2026-07-26 run produced satellite confidence 0.0 alongside a report-level "HIGH" confidence_level, i.e. the system asserting confidence it structurally cannot have. | Medium (thread `satellite_data.get("confidence")` into hazard's own confidence aggregation) | agents/hazard/agent.py:89 (present) vs analyzer.py:338-341 (not read) |
 | 6 | **`ConfidenceTracker.overall_confidence()` cannot distinguish "no evidence was gathered" from "evidence strongly contradicts the result" — both read as low/0.0.** This is a heuristic morale score, not a calibrated uncertainty estimate: weights/penalties are hand-picked, not fit to any accuracy data. | science/contract | **High** — the exact mechanism behind the "confidence 0.0 / report HIGH" incident cited in this repo's own `CLAUDE.md`. | Medium (surface `evidence_count`/a distinct data-completeness signal in the result dict; it already exists inside the tracker but is discarded before persisting) | confidence_tracker.py:114-132, 146-154; agent.py:876-882 (never calls `get_report()`) |
 | 7 | **NDWI/NDVI thresholds (0.3/0.5 water, 0.2 damage) were tuned against L1C top-of-atmosphere reflectance and have not been revalidated since the pipeline switched Sentinel-2 to L2A surface reflectance.** Acknowledged in-code and in `CLAUDE.md`, still unresolved. | science | **Medium-high** — affects every S2-path flood/earthquake/landslide run; direction of the bias (more or less permissive) is plausible but unverified. | Medium (a dedicated science-validation pass against known-ground-truth L2A scenes) | processor.py:148-151, 212-213; CLAUDE.md 2026-07-26 section |
@@ -685,33 +741,40 @@ were found by direct reading:
 
 ---
 
-## Appendix — Where This Document Confirms vs. Corrects the Existing Docs
+## Appendix — Confirms vs. Corrects
 
-- **Confirms** (re-verified against current code, not merely re-stated):
-  BUG 1 (GCP/CRS clip collapse) is fixed and unit-tested; BUG 2 (valid-pixel
-  coverage + SCL cloud masking) is implemented as described; BUG 3 (tiered
-  temporal-coherence search, 100%-or-fail) is implemented as described; BUG 4
-  (dedup/pre-intersection/doomed-streak) is implemented as described; BUG 5
-  (explicit `index_calibrated`/`index_units` contract) is implemented and the
-  cross-validator correctly gates on it; BUG 6 (`stance_engine.py`,
-  `decide_landsat_fallback`) is confirmed deleted, not merely dormant; BUG 7
-  (guaranteed `finally`-block cleanup + per-stage RSS instrumentation) is
-  implemented as described; the CDSE `TokenManager` proactive-refresh fix is
-  implemented as described.
-- **Corrects/extends** `root_cause.md`/`fix.md` (both pre-migration): the
-  specific `validation_input` SAR-labeled-as-NDWI bug they found **inside this
-  agent** is fixed (assertion + correct construction, agent.py:731-745); the
-  **same defect class survives one hop downstream**, in
-  `agents/hazard/analyzer.py`'s deterministic fallback, which those documents
-  correctly anticipated as a likely pattern but had not traced into the
-  current hazard code (confirmed here in §5.2/§10 #4). The satellite
-  confidence→hazard-not-reading-it gap CLAUDE.md flagged as "diagnosed only,
-  not fixed" is confirmed still true by direct grep of the current
-  `agents/hazard/analyzer.py` (§4.5/§10 #5).
-- **New findings not previously documented anywhere in this repo:**
-  `COVERAGE_MOSAIC_THRESHOLD`/`select_mosaic_scenes` are orphaned by the
-  tiered-coverage redesign (§9, §10 #11); the coverage-tier day windows are
-  not derived from either satellite's revisit cycle and likely make S1's tier
-  2 a near-no-op (§10 #13); the confidence tracker's inability to distinguish
-  "no evidence gathered" from "evidence contradicts" is traced to its exact
-  arithmetic root cause here (§4.3-4.4), not just asserted as a symptom.
+**Confirms** (re-verified against current code): BUG 1 (GCP/CRS clip
+collapse) fixed and unit-tested; BUG 2 (valid-pixel coverage + SCL masking)
+implemented as described; BUG 3 (tiered temporal-coherence search,
+100%-or-fail) implemented as described; BUG 4 (dedup/pre-intersection/
+doomed-streak) implemented as described; BUG 5 (`index_calibrated`/
+`index_units` contract) implemented, cross-validator correctly gates on it
+for evidence but the label still doesn't reach hazard's fallback logic
+(§11#4, still open); BUG 6 (dead code deletion) confirmed; BUG 7 (guaranteed
+cleanup + RSS instrumentation) confirmed; CDSE `TokenManager` proactive
+refresh confirmed implemented as described.
+
+**Corrects the immediately-prior `ANALYSIS.md`:** its gap #5 (satellite
+confidence never read by hazard) was stated as an open, "diagnosed only, not
+fixed" finding, but the fix (`fa0d9bd`) had landed ten minutes before that
+document's own commit — confirmed by `git log --format=%ci` on both commits.
+Its gaps #1, #2, #6 (tracker legibility), #10, #11, #12 all prompted real
+fix commits that landed after it was written and are now closed or
+substantially closed, verified against current code rather than against the
+CLAUDE.md changelog's own claims. Its gap #4 (hazard's SAR-threshold
+fallback) remains open and independently re-confirmed this session by
+direct code read, not merely re-cited.
+
+**New finding, not previously documented anywhere in this repo:** the
+confidence legibility fix (`confidence_basis`/`evidence_count`, §5.3) does
+not cross the satellite→hazard contract boundary — `_normalise_satellite_payload`
+was not updated to carry the two new fields through, so the specific
+ambiguity they were built to resolve still exists one hop downstream, in a
+narrower form than before the fix (now: "hazard sees the raw confidence but
+not its basis," rather than "hazard sees nothing"). Also new:
+`index_calibrated`/`index_units` were never in `_normalise_satellite_payload`'s
+carried field set even before this pass — the prior analysis attributed
+hazard's SAR-threshold bug purely to the fallback not checking
+`satellite_type`, but the fallback additionally has no access to the more
+precise `index_calibrated`/`index_units` fields even if it were fixed to
+check `satellite_type` (§6.2, §11#1).

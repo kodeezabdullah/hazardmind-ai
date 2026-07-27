@@ -176,6 +176,7 @@ async def analyze_flood(
     mean_value,
     gdacs_data,
     satellite_type="sentinel-2",
+    index_calibrated=None,
 ) -> dict:
     if satellite_type == "sentinel-1":
         index_label = "SAR backscatter ratio (VV-VH)"
@@ -209,6 +210,55 @@ async def analyze_flood(
         }
 
     area = _to_float(affected_area_km2)
+
+    # DETERMINISTIC FALLBACK (LLM call failed). GATE B / H#4: satellite's SAR
+    # index is 10*log10(raw uncalibrated GRD DN) -- always POSITIVE in this
+    # codebase (no radiometric LUT), unlike real calibrated sigma0 backscatter
+    # (virtually always negative dB). Applying the NDWI-scale threshold
+    # (`> 0.5`/`> 0.3`) unconditionally to that value is trivially satisfied by
+    # ANY positive SAR reading, mechanically producing a FALSE-CRITICAL verdict
+    # on every S1 run that reaches this fallback, regardless of actual ground
+    # conditions -- not a false-negative (see satellite/ANALYSIS.md, corrected
+    # 2026-07-28 to match this).
+    #
+    # is_uncalibrated_sar: prefer the explicit index_calibrated flag carried
+    # through by _normalise_satellite_payload (Gate B); if that field is
+    # itself absent (e.g. an older/incomplete payload), fall back to inferring
+    # from satellite_type, which is strictly worse but still correct for the
+    # common S1-vs-S2 case and was the previous (bug-free-on-this-axis, just
+    # unit-blind) behavior.
+    is_uncalibrated_sar = (
+        index_calibrated is False
+        if index_calibrated is not None
+        else satellite_type == "sentinel-1"
+    )
+
+    if is_uncalibrated_sar:
+        # The raw index has no physical interpretation here -- do NOT invent
+        # NDWI-style thresholds on it. Base the decision on affected_area_km2
+        # alone, and cap confidence at 0.4 since we are deliberately excluding
+        # a data source we cannot interpret.
+        if area > 200:
+            risk, confidence = "CRITICAL", 0.4
+        elif area > 100:
+            risk, confidence = "HIGH", 0.4
+        elif area > 25:
+            risk, confidence = "MEDIUM", 0.4
+        else:
+            risk, confidence = "LOW", 0.4
+        return {
+            "risk": risk,
+            "confidence": confidence,
+            "reasoning": (
+                "Fallback flood risk based on affected_area_km2 only. The SAR "
+                "index was excluded as uninterpretable (uncalibrated raw "
+                "backscatter, no radiometric LUT/speckle filter/terrain "
+                "correction) -- NDWI-scale thresholds cannot be applied to it."
+            ),
+            "affected_zones": [],
+            "anomaly": "sar_index_excluded_uncalibrated",
+        }
+
     flood_index = _to_float(mean_value)
     if area > 200 or flood_index > 0.5:
         risk, confidence = "CRITICAL", 0.7
@@ -235,30 +285,32 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     ]
     max_mag = max((_to_float(mag) for mag in magnitudes), default=0.0)
     eq_count = usgs_data.get("count", 0)
-    prompt = (
-        f"Earthquake risk assessment from OBSERVED data only.\n"
-        f"Recent earthquakes in area (USGS, last 7 days): count={eq_count}, "
-        f"max magnitude={max_mag}.\n"
-        f"BBox: {bbox}.\n"
-        f"Rules: base risk ONLY on the observed count/magnitude above. "
-        f"If count is 0 and max magnitude is 0, there is NO recent seismic "
-        f"activity, so risk is LOW. Do NOT raise the risk from general regional "
-        f"seismicity or geographic assumptions — only real recent events count.\n"
-        f"Return JSON only."
-    )
-    system = (
-        "You are a seismic risk analyst who reports ONLY what the observed data "
-        "supports. Absence of recent earthquakes means LOW risk — never invent "
-        "elevated risk from a region's general reputation. Return only JSON with "
-        "keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning "
-        "(string), liquefaction_probability (0.0-1.0)."
-    )
 
     # DETERMINISTIC risk from observed seismicity. We intentionally do NOT ask an
     # LLM here: earthquake risk is a direct function of recent magnitude/count,
     # and LLMs repeatedly inflated it from a region's general reputation (e.g.
     # "Pakistan is seismically active" -> HIGH) even when USGS shows zero recent
     # events — fabricating a disaster on a no-event feed. The data decides.
+    #
+    # (Hazard #6, SYSTEM_ANALYSIS.md: a prompt/system pair was previously built
+    # here on every call and never used, since this function is fully
+    # deterministic. Removed as dead code — the LLM prompt an earlier design
+    # would have used is preserved below for reference/future reactivation:
+    #
+    #   prompt: "Earthquake risk assessment from OBSERVED data only.
+    #     Recent earthquakes in area (USGS, last 7 days): count={eq_count},
+    #     max magnitude={max_mag}. BBox: {bbox}. Rules: base risk ONLY on the
+    #     observed count/magnitude above. If count is 0 and max magnitude is 0,
+    #     there is NO recent seismic activity, so risk is LOW. Do NOT raise the
+    #     risk from general regional seismicity or geographic assumptions —
+    #     only real recent events count. Return JSON only."
+    #   system: "You are a seismic risk analyst who reports ONLY what the
+    #     observed data supports. Absence of recent earthquakes means LOW
+    #     risk — never invent elevated risk from a region's general
+    #     reputation. Return only JSON with keys: risk
+    #     (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning
+    #     (string), liquefaction_probability (0.0-1.0)."
+    # )
     if max_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
     elif max_mag >= 5.5:
@@ -283,23 +335,6 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
 
 async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     slope_estimate = slope_data.get("slope_estimate", 15.0)
-    prompt = (
-        f"Landslide risk assessment from OBSERVED data only.\n"
-        f"Mean terrain slope (real DEM): {slope_estimate} degrees.\n"
-        f"GDACS landslide events in area: {gdacs_data.get('count', 0)}.\n"
-        f"BBox: {bbox}.\n"
-        f"Rules: base risk ONLY on the slope and events above. Flat terrain "
-        f"(slope < 10 degrees) with no events is LOW risk. Do NOT raise risk "
-        f"from general regional assumptions — only the measured slope/events "
-        f"count.\nReturn JSON only."
-    )
-    system = (
-        "You are a landslide risk analyst who reports ONLY what the observed "
-        "slope/events support. Flat terrain with no events means LOW risk — "
-        "never invent elevated risk from a region's reputation. Return only JSON "
-        "with keys: risk (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), "
-        "reasoning (string), high_risk_zones (list)."
-    )
 
     # DETERMINISTIC risk from the real DEM slope. No LLM: LLMs inflated landslide
     # risk from a region's reputation even on flat terrain. We also do NOT use the
@@ -307,6 +342,24 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     # is unreliable; e.g. it returned 93 events for Rawalpindi, all at coordinates
     # in China/Mongolia), so a raw count would falsely raise the risk. The real
     # measured slope is the trustworthy signal.
+    #
+    # (Hazard #6, SYSTEM_ANALYSIS.md: a prompt/system pair was previously built
+    # here on every call and never used, since this function is fully
+    # deterministic. Removed as dead code — preserved below for reference:
+    #
+    #   prompt: "Landslide risk assessment from OBSERVED data only. Mean
+    #     terrain slope (real DEM): {slope_estimate} degrees. GDACS landslide
+    #     events in area: {gdacs_data.get('count', 0)}. BBox: {bbox}. Rules:
+    #     base risk ONLY on the slope and events above. Flat terrain (slope <
+    #     10 degrees) with no events is LOW risk. Do NOT raise risk from
+    #     general regional assumptions — only the measured slope/events
+    #     count. Return JSON only."
+    #   system: "You are a landslide risk analyst who reports ONLY what the
+    #     observed slope/events support. Flat terrain with no events means
+    #     LOW risk — never invent elevated risk from a region's reputation.
+    #     Return only JSON with keys: risk (CRITICAL/HIGH/MEDIUM/LOW),
+    #     confidence (0.0-1.0), reasoning (string), high_risk_zones (list)."
+    # )
     slope = _to_float(slope_estimate)
     if slope > 45:
         risk, confidence = "CRITICAL", 0.8
@@ -340,14 +393,25 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     risk_cities = boundaries.get("risk_cities", [])
     satellite_type = satellite_data.get("satellite", {}).get("type", "sentinel-2")
     satellite_confidence = _to_float(analysis.get("confidence")) if analysis.get("confidence") is not None else None
+    index_calibrated = analysis.get("index_calibrated")
 
     if not bbox or len(bbox) < 4:
+        # A plumbing failure (no valid bbox handed off from satellite) is NOT
+        # a disaster signal. Previously this returned overall_severity="HIGH"
+        # in the same dict as an honest "error" string -- a fake HIGH that
+        # passed quality_check unflagged (a valid enum value) and could flow
+        # straight into an NDMA response-level escalation with zero real
+        # disaster behind it (SYSTEM_ANALYSIS.md H#3 / Section E.1). Use an
+        # explicit UNKNOWN severity + insufficient_data status instead, so a
+        # plumbing failure can never masquerade as a real HIGH-severity
+        # verdict downstream.
         return {
             "event_id": event_id,
             "flood_risk": "UNKNOWN",
             "earthquake_risk": "UNKNOWN",
             "landslide_risk": "UNKNOWN",
-            "overall_severity": "HIGH",
+            "overall_severity": "UNKNOWN",
+            "status": "insufficient_data",
             "confidence_scores": {
                 "flood": 0.0,
                 "earthquake": 0.0,
@@ -380,7 +444,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     )
 
     analysis_results = await asyncio.gather(
-        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type),
+        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type, index_calibrated),
         analyze_earthquake(bbox, usgs_data),
         analyze_landslide(bbox, gdacs_data, slope_data),
         return_exceptions=True,
@@ -452,6 +516,9 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         "confidence_cap_applied": confidence_cap_applied,
         "risk_polygons": {},
         "raw": {"gdacs": gdacs_data, "usgs": usgs_data, "slope": slope_data},
+        # H#4: surfaced only when the deterministic flood fallback excluded an
+        # uncalibrated SAR index rather than misapplying NDWI thresholds to it.
+        "anomalies": [flood["anomaly"]] if flood.get("anomaly") else [],
     }
 
 
