@@ -297,6 +297,21 @@ RETRY_BACKOFF_MAX = 30            # backoff is capped here
 ODATA_BASE = "https://catalogue.dataspace.copernicus.eu/odata/v1"
 
 
+def _resolve_token(token) -> Optional[str]:
+    """Resolve `token` to a fresh access-token string.
+
+    `token` is either a plain string (legacy call sites / tests: used as-is,
+    no refresh possible) or a `sentinel.TokenManager` (has `.get()`, which
+    proactively refreshes before the ~10 min CDSE access-token expiry). A
+    multi-tile mosaic download can run tens of minutes, so pulling a fresh
+    token per file here — rather than reusing one string captured once at
+    pipeline start — is what actually prevents the mid-run 401s.
+    """
+    if hasattr(token, "get") and callable(getattr(token, "get")):
+        return token.get()
+    return token
+
+
 def _stream_to_file_with_retry(
     session: requests.Session,
     url: str,
@@ -433,7 +448,11 @@ def _download_product_zip(
     os.makedirs(TEMP_ROOT, exist_ok=True)
     dest_path = os.path.join(TEMP_ROOT, f"{product_id}.zip")
     url = DOWNLOAD_URL.format(product_id=product_id)
-    auth_header = {"Authorization": f"Bearer {token}"}
+    fresh_token = _resolve_token(token)
+    if not fresh_token:
+        logger.error("No valid CDSE access token available; cannot download %s", name)
+        return None
+    auth_header = {"Authorization": f"Bearer {fresh_token}"}
 
     logger.info("Downloading scene %s (full archive) from CDSE", name)
     with _CDSESession() as session:
@@ -599,7 +618,11 @@ def _download_bands_via_nodes(
 
     bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
     os.makedirs(bands_dir, exist_ok=True)
-    auth_header = {"Authorization": f"Bearer {token}"}
+    fresh_token = _resolve_token(token)
+    if not fresh_token:
+        logger.error("No valid CDSE access token available for %s", event_id)
+        return None
+    auth_header = {"Authorization": f"Bearer {fresh_token}"}
     timeout = (DOWNLOAD_CONNECT_TIMEOUT, DOWNLOAD_READ_TIMEOUT)
 
     # Fast path: if every requested band is already fully on disk, return them
@@ -638,14 +661,27 @@ def _download_bands_via_nodes(
             # sustained outage still aborts: the in-flight band's own budget
             # expires with no completion. This is the per-band analogue of the
             # whole-zip path's "progress resets the clock".
+            #
+            # Re-resolve the token before EACH band (not just once at the top
+            # of this function): several bands at ~30-120 MB each can add up to
+            # many minutes, comfortably past the ~10 min CDSE access-token
+            # lifetime, and a stale Bearer header here is exactly what produced
+            # the mid-run 401s this fix addresses.
             band_paths: dict = {}
             for tok, segments in node_map.items():
+                band_token = _resolve_token(token)
+                if not band_token:
+                    logger.error(
+                        "No valid CDSE access token available for band %s", tok
+                    )
+                    return None
+                band_auth_header = {"Authorization": f"Bearer {band_token}"}
                 out_path = os.path.join(bands_dir, f"{tok}.jp2")
                 url = _node_url(product_id, segments)
                 result = _stream_to_file_with_retry(
                     session,
                     url,
-                    auth_header,
+                    band_auth_header,
                     out_path,
                     label=f"band {tok}",
                     timeout=timeout,

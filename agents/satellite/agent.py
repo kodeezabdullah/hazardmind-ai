@@ -45,6 +45,7 @@ from processor import (
 )
 from r2_upload import check_demo_cache, upload_all_results
 from sentinel import (
+    TokenManager,
     authenticate_copernicus,
     backfill_uncovered_cities,
     search_imagery,
@@ -311,19 +312,24 @@ def _recover(anomaly_type: str, context: dict, attempt: int) -> Optional[dict]:
     return strategy
 
 
-def _authenticate_with_recovery(event_id: str, location: str) -> Optional[str]:
+def _authenticate_with_recovery(event_id: str, location: str) -> Optional[TokenManager]:
     """Authenticate to CDSE, retrying up to MAX_STEP_ATTEMPTS with LLM recovery.
 
     On each failure, asks the intelligence layer for a recovery strategy
     (anomaly ``copernicus_auth_failed``) and respects its delay hint before the
-    next attempt (integration point 3). Returns the token or ``None``.
+    next attempt (integration point 3). Returns a `TokenManager` (not a bare
+    token string) or ``None``: a satellite run can take tens of minutes
+    (multi-tile mosaic + large downloads), well past CDSE's ~10 min
+    access-token lifetime, so every downstream consumer must be able to pull a
+    freshly-refreshed token rather than reuse one string captured here.
     """
     import time
 
     for attempt in range(1, MAX_STEP_ATTEMPTS + 1):
-        token = authenticate_copernicus()
+        manager = TokenManager()
+        token = manager.get()
         if token is not None:
-            return token
+            return manager
 
         strategy = _recover(
             "copernicus_auth_failed",
@@ -520,13 +526,15 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
 
         # (d) Copernicus authentication (needed by select_satellite's cloud
         # peek). INTEGRATION POINT 3 — retry with LLM-guided recovery on
-        # failure (anomaly copernicus_auth_failed, max 3 attempts).
-        token = _authenticate_with_recovery(event_id, location)
-        if token is None:
+        # failure (anomaly copernicus_auth_failed, max 3 attempts). Returns a
+        # TokenManager, not a bare string, so later long-running downloads can
+        # pull a refreshed token instead of reusing this moment's snapshot.
+        token_manager = _authenticate_with_recovery(event_id, location)
+        if token_manager is None:
             return _error(event_id, "Copernicus authentication failed (after recovery)")
 
         # (e) Smart, cloud-aware Sentinel selection.
-        selection = select_satellite(disaster_type, bbox=bbox, token=token)
+        selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
         satellite_type = selection["satellite_type"]
 
         # INTEGRATION POINT 2 — devise the satellite strategy with full LLM
@@ -582,7 +590,9 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                 continue
 
         result = process_satellite_imagery(
-            selection, scenes, bbox, merged, event_id, token, disaster_type,
+            # Pass the TokenManager itself (not .get()'s snapshot) so downloads
+            # deep inside the pipeline can refresh it as the run proceeds.
+            selection, scenes, bbox, merged, event_id, token_manager, disaster_type,
             city_geoms=city_geoms,
             # Per-city artifacts are intentionally disabled: re-clipping the full
             # mosaic to each city is very expensive on a large multi-tile AOI

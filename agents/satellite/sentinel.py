@@ -20,6 +20,8 @@ Run this file directly for a small smoke test:
 import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -240,6 +242,135 @@ def authenticate_copernicus(timeout: int = 30) -> Optional[str]:
 
     logger.info("Obtained Copernicus access token")
     return token
+
+
+def _authenticate_copernicus_full(timeout: int = 30) -> Optional[dict]:
+    """Like `authenticate_copernicus`, but returns the full token response.
+
+    Used by `TokenManager` so it can capture `refresh_token`/`expires_in`
+    alongside the access token. `authenticate_copernicus` itself is left
+    untouched since other call sites only need the bare token string for a
+    single short-lived request.
+    """
+    username = os.getenv("COPERNICUS_USERNAME")
+    password = os.getenv("COPERNICUS_PASSWORD")
+
+    if not username or not password:
+        logger.error(
+            "COPERNICUS_USERNAME / COPERNICUS_PASSWORD not set; "
+            "cannot authenticate"
+        )
+        return None
+
+    data = {
+        "client_id": "cdse-public",
+        "username": username,
+        "password": password,
+        "grant_type": "password",
+    }
+
+    logger.info("Requesting Copernicus access token for %s", username)
+    try:
+        response = requests.post(TOKEN_URL, data=data, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.error("Copernicus authentication failed: %s", exc)
+        return None
+
+
+class TokenManager:
+    """Keeps a CDSE access token valid across a long-running pipeline.
+
+    A single `authenticate_copernicus()` call is only good for ~10 minutes
+    (CDSE Keycloak's access-token lifetime); a multi-tile S1 GRD download can
+    run for tens of minutes, so a token fetched once at pipeline start expires
+    mid-run and every subsequent download 401s (observed live: a ~51 min e2e
+    run had exactly one "Obtained Copernicus access token" log line and every
+    download after ~10 min failed with 401 Unauthorized).
+
+    `get()` returns a token that is valid for at least `refresh_margin_seconds`
+    longer, refreshing proactively (not reactively on a 401) using the
+    Keycloak `refresh_token` grant when available, falling back to a full
+    username/password re-auth if the refresh token itself has expired or a
+    refresh attempt fails. Safe to call from multiple threads (band downloads
+    can run concurrently); refresh happens under a lock so only one request
+    hits Keycloak at a time and the rest wait for the new token.
+    """
+
+    # CDSE access tokens live ~10 min; refresh this long before expiry so a
+    # download already in flight doesn't straddle the boundary.
+    _REFRESH_MARGIN_SECONDS = 90
+
+    def __init__(self, timeout: int = 30):
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
+        self._expires_at: float = 0.0
+
+    def _apply_response(self, payload: dict) -> Optional[str]:
+        token = payload.get("access_token")
+        if not token:
+            logger.error("Copernicus token response contained no access_token")
+            return None
+        self._access_token = token
+        self._refresh_token = payload.get("refresh_token")
+        expires_in = payload.get("expires_in")
+        try:
+            expires_in = float(expires_in)
+        except (TypeError, ValueError):
+            expires_in = 600.0  # CDSE default; conservative if missing
+        self._expires_at = time.monotonic() + expires_in
+        return token
+
+    def _refresh(self) -> Optional[str]:
+        if not self._refresh_token:
+            return None
+        data = {
+            "client_id": "cdse-public",
+            "refresh_token": self._refresh_token,
+            "grant_type": "refresh_token",
+        }
+        try:
+            response = requests.post(TOKEN_URL, data=data, timeout=self._timeout)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning(
+                "Copernicus token refresh failed (%s); falling back to full "
+                "re-authentication",
+                exc,
+            )
+            return None
+        token = self._apply_response(payload)
+        if token:
+            logger.info("Refreshed Copernicus access token (refresh_token grant)")
+        return token
+
+    def get(self) -> Optional[str]:
+        """Return a currently-valid access token, refreshing/re-authing as needed."""
+        with self._lock:
+            if self._access_token and time.monotonic() < (
+                self._expires_at - self._REFRESH_MARGIN_SECONDS
+            ):
+                return self._access_token
+
+            if self._access_token:  # had a token, it's just expiring soon
+                token = self._refresh()
+                if token:
+                    return token
+
+            payload = _authenticate_copernicus_full(timeout=self._timeout)
+            if not payload:
+                self._access_token = None
+                return None
+            token = self._apply_response(payload)
+            if token:
+                logger.info(
+                    "Obtained Copernicus access token (full re-authentication)"
+                )
+            return token
 
 
 def _aoi_geometry(bbox: tuple, aoi_geom: Optional[dict]):
