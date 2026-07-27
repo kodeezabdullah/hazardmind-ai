@@ -2349,6 +2349,10 @@ def process_satellite_imagery(
                 return None
 
             bytes_after = _bytes_downloaded_total()
+            # Scene id(s) actually accepted into this result — comma-joined
+            # since a mosaic can accept more than one acquisition, but
+            # satellite_results.scene_id is a single text column.
+            scene_ids = [s.get("Id") or s.get("Name") for s in accepted if s.get("Id") or s.get("Name")]
             merged_result.update({
                 "valid_percent": round(cov["interior_coverage_percent"], 2),
                 "coverage_percent": cov["interior_coverage_percent"],
@@ -2359,6 +2363,7 @@ def process_satellite_imagery(
                 "orbit_direction": orbit_dir,
                 "coverage_gaps": [],
                 "bytes_downloaded": bytes_after - bytes_before,
+                "scene_id": ",".join(scene_ids) if scene_ids else None,
                 "processing_level": (
                     "L2A" if satellite_type == "sentinel-2" else None
                 ),

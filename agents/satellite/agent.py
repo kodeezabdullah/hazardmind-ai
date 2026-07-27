@@ -121,9 +121,9 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                     INSERT INTO satellite_results
                         (event_id, satellite_type, cloud_cover, scene_id,
                          true_color_url, index_url, classification_url, geojson_url,
-                         affected_area_km2, damage_percent, total_zones,
+                         affected_area_km2, total_zones,
                          bounds, bbox, risk_cities)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                     """,
                     event_id,
                     structured.get("satellite_type"),
@@ -134,7 +134,6 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                     structured.get("classification_url"),
                     structured.get("geojson_url"),
                     _f("affected_area_km2"),
-                    _f("damage_percent"),
                     _i("total_zones"),
                     json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
                     json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
@@ -869,6 +868,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "mean_index": result["mean_index"],
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
+            # The satellite_results INSERT names these columns; total_zones was
+            # already computed above (used in the LLM calls) but previously
+            # dropped before reaching structured, and scene_id is the accepted
+            # scene(s)' product id(s) from process_satellite_imagery. Both
+            # persisted every row as NULL before this fix.
+            "total_zones": total_zones,
+            "scene_id": result.get("scene_id"),
             # BUG 5 — explicit calibration contract so the hazard agent can
             # branch on a real field instead of inferring from satellite_type.
             # SAR is 10*log10(raw GRD DN): uncalibrated, no speckle filter, no
