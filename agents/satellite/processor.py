@@ -1926,6 +1926,58 @@ def calculate_indices(
     scheme = _CLASS_SCHEMES[scheme_key]
     classification = _classify(index, valid, scheme)
 
+    # Phase 1c (science/full-pass): permanent-water masking. Flood means
+    # water where water is NOT normally present — rivers/lakes/reservoirs
+    # (JRC Global Surface Water occurrence >= 75% of observed months,
+    # 1984-2021) were previously counted as flood on every run. Pixels
+    # classified water that are NORMALLY water are reclassified to 0
+    # ("not flood-affected" — the honest flood-purpose claim) and excluded
+    # from water_percent / affected_mean_index / affected_area_km2, with
+    # the share recorded as permanent_water_percent. Best-effort: an
+    # unreachable JRC bucket degrades to no mask with the applied-flag
+    # False — it never fails a run. See permanent_water.py for the
+    # sourcing decision (windowed /vsicurl/ reads, disk cache) and the
+    # 75-vs-50 occurrence-threshold argument (75 errs toward NOT masking
+    # seasonal water: recall cost beats precision cost in life safety).
+    permanent_water_percent = None
+    permanent_water_threshold = None
+    permanent_water_source = None
+    permanent_water_mask_applied = False
+    if disaster == "flood":
+        try:
+            from permanent_water import (
+                DEFAULT_OCCURRENCE_THRESHOLD,
+                JRC_SOURCE_LABEL,
+                permanent_water_mask_for_clip,
+            )
+
+            pw_mask = permanent_water_mask_for_clip(
+                index.shape, clipped.get("transform"), clipped.get("crs")
+            )
+        except Exception as exc:  # noqa: BLE001 — mask is optional, run is not
+            logger.warning("Permanent-water masking unavailable (%s)", exc)
+            pw_mask = None
+        if pw_mask is not None:
+            affected_now = (classification >= 1) & (classification != NODATA_CLASS)
+            reclassified = affected_now & pw_mask
+            classification[reclassified] = 0
+            valid_now = int(valid.sum())
+            permanent_water_percent = (
+                round(100.0 * int(reclassified.sum()) / valid_now, 2)
+                if valid_now
+                else 0.0
+            )
+            permanent_water_threshold = DEFAULT_OCCURRENCE_THRESHOLD
+            permanent_water_source = JRC_SOURCE_LABEL
+            permanent_water_mask_applied = True
+            logger.info(
+                "Permanent-water mask applied: %.2f%% of valid pixels "
+                "reclassified water->normally-water (occurrence >= %d, %s)",
+                permanent_water_percent,
+                permanent_water_threshold,
+                permanent_water_source,
+            )
+
     valid_count = int(valid.sum())
     affected_mask = (classification >= 1) & (classification != NODATA_CLASS)
     affected_count = int(affected_mask.sum())
@@ -1976,6 +2028,13 @@ def calculate_indices(
         # cloud/shadow/cirrus mask (None on S1 / no-SCL runs). Auditability:
         # any run's index support can be re-derived from this.
         "scl_masked_percent": scl_masked_percent,
+        # Phase 1c: permanent-water audit trail — threshold + source make any
+        # run's mask re-derivable; applied=False means the run proceeded
+        # unmasked (JRC unreachable / non-flood), never silently.
+        "permanent_water_mask_applied": permanent_water_mask_applied,
+        "permanent_water_percent": permanent_water_percent,
+        "permanent_water_occurrence_threshold": permanent_water_threshold,
+        "permanent_water_source": permanent_water_source,
         "threshold_used": threshold,
         "class_counts": class_counts,
         # BUG 5 calibration contract (see the branch above).
@@ -2618,6 +2677,11 @@ def _render_clip(
         # Phase 1a: % of in-AOI pixels the SCL cloud/shadow mask excluded
         # from the index support (None on S1 / no-SCL runs).
         "scl_masked_percent": indices.get("scl_masked_percent"),
+        # Phase 1c: permanent-water audit trail.
+        "permanent_water_mask_applied": indices.get("permanent_water_mask_applied"),
+        "permanent_water_percent": indices.get("permanent_water_percent"),
+        "permanent_water_occurrence_threshold": indices.get("permanent_water_occurrence_threshold"),
+        "permanent_water_source": indices.get("permanent_water_source"),
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         # BUG 5 — calibration contract rides through to the result dict.

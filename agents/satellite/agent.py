@@ -1088,6 +1088,12 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # Phase 1a — % of in-AOI pixels the SCL cloud/shadow mask excluded
             # from the index support (None on S1 / no-SCL runs).
             "scl_masked_percent": result.get("scl_masked_percent"),
+            # Phase 1c — permanent-water audit trail (threshold + source make
+            # the mask re-derivable; applied=False is explicit, not silent).
+            "permanent_water_mask_applied": result.get("permanent_water_mask_applied"),
+            "permanent_water_percent": result.get("permanent_water_percent"),
+            "permanent_water_occurrence_threshold": result.get("permanent_water_occurrence_threshold"),
+            "permanent_water_source": result.get("permanent_water_source"),
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
             # The satellite_results INSERT names these columns; total_zones was

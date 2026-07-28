@@ -354,14 +354,46 @@ def _run_one_path(
             bytes_downloaded=bytes_downloaded,
         )
 
-    # 4. Score.
+    # 4. Score. Phase 1c: the excluding-permanent-water split is now REAL —
+    # the permanent-water geometry comes from the SAME source and threshold
+    # the pipeline masks with (agents/satellite/permanent_water.py, JRC GSW
+    # occurrence >= 75), so the split measures the pipeline's own definition
+    # of "normally water", not a diverging harness-side one. Best-effort: an
+    # unreachable JRC bucket degrades to the pre-1c no-split behaviour with
+    # the note metrics.py already emits.
+    pw_geom = None
+    pw_source = None
+    try:
+        from permanent_water import (  # agents/satellite on sys.path
+            JRC_SOURCE_LABEL,
+            DEFAULT_OCCURRENCE_THRESHOLD,
+            permanent_water_geojson,
+        )
+        from shapely.geometry import shape as _shp_shape
+
+        bounds_geom = ref_geom.union(predicted_geom)
+        west, south, east, north = bounds_geom.bounds
+        pw_json = permanent_water_geojson(
+            west - 0.005, south - 0.005, east + 0.005, north + 0.005
+        )
+        if pw_json is not None:
+            pw_shape = _shp_shape(pw_json)
+            if not pw_shape.is_empty:
+                pw_geom = pw_shape
+            pw_source = (
+                f"{JRC_SOURCE_LABEL} (occurrence >= "
+                f"{DEFAULT_OCCURRENCE_THRESHOLD}%)"
+            )
+    except Exception as exc:  # noqa: BLE001 — split is optional, scoring is not
+        print(f"[permanent-water] split unavailable: {exc}")
+
     split = compute_with_permanent_water_split(
         predicted_geom=predicted_geom,
         predicted_crs="EPSG:4326",
         reference_geom=ref_geom,
         reference_crs=ref_crs,
-        permanent_water_geom=None,  # no permanent-water mask sourced this pass
-        permanent_water_source=None,
+        permanent_water_geom=pw_geom,
+        permanent_water_source=pw_source,
     )
 
     return EventResult(
