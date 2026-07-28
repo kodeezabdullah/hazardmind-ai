@@ -69,8 +69,90 @@ MIN_VALID_PIXEL_PERCENT = 5.0
 # no coverage, abort the tier rather than working through every candidate.
 DOOMED_DOWNLOAD_LIMIT = 3
 
-# Per-tier date window (days) for log/anomaly text; mirrors sentinel.COVERAGE_TIERS.
+# Per-tier date window (days) for log/anomaly text; mirrors
+# sentinel.COVERAGE_TIERS_S2/COVERAGE_TIERS_S1 (2026-07-28, CHANGE 5 —
+# per-satellite tier windows). Union of both satellites' windows so a log line
+# always has a value regardless of which one produced the tier number.
 COVERAGE_TIERS_DAYS = {1: 0, 2: 3, 3: 7, 4: 14}
+
+# --------------------------------------------------------------------------- #
+# 2026-07-28 — coverage tolerance (fix/coverage-tolerance)
+#
+# The prior rule demanded EXACTLY 100.0% interior-AOI valid-pixel coverage or
+# the whole call failed with `insufficient_coverage`. That rule was written to
+# stop the pipeline from silently reporting a partial AOI as a complete
+# analysis — a real goal. But it enforced that goal by refusing to answer
+# instead of answering honestly with the limitation stated, and cloud gaps
+# cannot be downloaded away: if the sky was covered that week, no amount of
+# additional scenes closes the gap, so the search could never terminate
+# successfully in exactly the weather conditions where flood analysis matters
+# most (a real 2.4x2.7 km AOI turned into a 6-hour, 4-scene search on this
+# rule). Coverage is now a caller-controlled quality band instead of a single
+# cliff — see `process_satellite_imagery`'s docstring and CLAUDE.md's
+# "Coverage tolerance" section for the full writeup.
+# --------------------------------------------------------------------------- #
+
+# Caller's default coverage target when none is supplied. Coverage at or above
+# this is "complete" with only a proportional confidence penalty.
+DEFAULT_MIN_COVERAGE_PERCENT = 90.0
+
+# Hard floor — never caller-adjustable below this. Below the floor the AOI is
+# too poorly sampled to mean anything, so the call still hard-fails with
+# status "insufficient_coverage" (unchanged shape from the old 100%-only rule,
+# just now driven by this constant instead of 100.0).
+COVERAGE_FLOOR = 80.0
+
+# Clamp ceiling — a caller-supplied target above this is just 100 (asking for
+# more than 100% coverage is meaningless).
+COVERAGE_CEILING = 100.0
+
+# Confidence-penalty scale for the shortfall between 100% and the achieved
+# coverage, in the >= min_coverage_percent band (proportional, not a cliff):
+# a linear penalty of `(100 - coverage) * COVERAGE_PENALTY_SCALE`, added to
+# the tracker as a concern whose severity scales with the shortfall. E.g. at
+# scale 0.01, a 97% run gets a 0.03 confidence knock; a 100% run gets none.
+COVERAGE_PENALTY_SCALE = 0.01
+
+# Minimum percentage-point gain a newly accepted scene must add over the
+# marginal-return threshold to be worth continuing the search (CHANGE 4). This
+# is DISTINCT from the near-zero (0.01) doomed-streak duplicate-detection
+# check below — that one detects a raw non-contributing download; this one
+# detects a technically-contributing but not-worth-its-cost download and stops
+# the search entirely (not just this candidate).
+MIN_MARGINAL_COVERAGE_GAIN = 2.0
+
+
+def _clamp_min_coverage_percent(value: Optional[float]) -> float:
+    """Clamp a caller-supplied coverage target into [COVERAGE_FLOOR, COVERAGE_CEILING].
+
+    A caller cannot set the target below 80 (non-negotiable — below that the
+    AOI is too poorly sampled to mean anything) or above 100 (meaningless).
+    ``None``/unparseable falls back to `DEFAULT_MIN_COVERAGE_PERCENT`.
+    """
+    if value is None:
+        value = DEFAULT_MIN_COVERAGE_PERCENT
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = DEFAULT_MIN_COVERAGE_PERCENT
+    return max(COVERAGE_FLOOR, min(COVERAGE_CEILING, value))
+
+
+def _coverage_band(interior_pct: float, min_coverage_percent: float) -> str:
+    """Classify achieved coverage into one of three bands (CHANGE 1).
+
+    - "complete": >= min_coverage_percent — full pass, small proportional
+      confidence penalty for any shortfall from 100.
+    - "below_target": >= COVERAGE_FLOOR and < min_coverage_percent — still
+      "complete" status, but flagged and penalised harder.
+    - "insufficient": < COVERAGE_FLOOR — hard stop, unchanged shape from the
+      old 100%-only rule.
+    """
+    if interior_pct >= min_coverage_percent:
+        return "complete"
+    if interior_pct >= COVERAGE_FLOOR:
+        return "below_target"
+    return "insufficient"
 
 # BUG 4d: cumulative bytes downloaded this process (for per-run logging). A
 # simple module-level counter incremented by the streaming download helpers.
@@ -1873,9 +1955,18 @@ def compute_coverage(clipped: dict) -> dict:
     carrying non-nodata data, and (Sentinel-2) not cloud/shadow/cirrus per SCL.
 
     Per the coverage contract:
-      - `interior_coverage_percent` is the PASS/FAIL metric and must be 100.0.
+      - `interior_coverage_percent` is the real, continuous coverage figure.
         The interior AOI is the clip mask eroded inward by one pixel, so
         boundary-pixel rasterization artifacts never count as gaps.
+      - `covered` here is a legacy "exactly 100%" convenience flag, kept for
+        any caller/test still reading it directly. **As of 2026-07-28
+        (fix/coverage-tolerance) this is NOT the pass/fail decision anymore**
+        — the caller (`process_satellite_imagery`) now compares
+        `interior_coverage_percent` against a caller-controlled
+        `min_coverage_percent`/`COVERAGE_FLOOR` band instead of requiring
+        exactly 100.0 (see that function's docstring and CLAUDE.md's
+        "Coverage tolerance" section). This function itself is unchanged —
+        it still just measures.
       - `full_aoi_coverage_percent` is informational (slightly < 100 from the
         boundary pixels the erosion drops).
       - Any uncovered region inside the interior AOI is a genuine gap regardless
@@ -2167,8 +2258,12 @@ def process_satellite_imagery(
     city_geoms=None,
     city_boundaries=None,
     tracker=None,
+    min_coverage_percent: Optional[float] = DEFAULT_MIN_COVERAGE_PERCENT,
+    max_scenes: int = 3,
+    max_download_gb: float = 4.0,
+    max_search_seconds: float = 900.0,
 ) -> Optional[dict]:
-    """Run the full remote-sensing pipeline to 100% valid-pixel AOI coverage.
+    """Run the full remote-sensing pipeline to a caller-controlled coverage band.
 
     download_imagery -> stack_bands -> clip_to_polygon -> calculate_indices
         -> export_png -> vectorize_classification
@@ -2176,17 +2271,51 @@ def process_satellite_imagery(
     Coverage is measured on VALID pixels (non-nodata, and for Sentinel-2 non-cloud
     per SCL) of the AOI, NOT on footprint overlap (BUG 2). Scene selection is a
     tiered, temporally-coherent search (BUG 3): the anchor is the most recent
-    acquisition; tiers widen the date window (0, +/-3, +/-7, +/-14 d) and, for
-    tiers 1-3, require the same relative orbit; Sentinel-1 never mixes ascending
-    and descending passes in one mosaic. Within a tier, acquisitions are added
-    best-first and the cumulative mosaic is re-clipped until interior-AOI
-    coverage reaches 100%. The first tier that reaches 100% wins.
+    acquisition; tiers widen the date window per-satellite (see
+    `sentinel.COVERAGE_TIERS_S2`/`COVERAGE_TIERS_S1`, CHANGE 5) and, for the
+    same-orbit tiers, require the same relative orbit; Sentinel-1 never mixes
+    ascending and descending passes in one mosaic. Within a tier, acquisitions
+    are added best-first and the cumulative mosaic is re-clipped until interior
+    coverage stops improving usefully.
 
-    Tiers 3 and 4 lower the confidence score (via `tracker`) and append an
-    anomaly naming the temporal spread. If NO tier reaches 100%, returns
-    ``{"status": "failed", "reason": "insufficient_coverage", ...}`` with the
-    best coverage achieved and the geometry of the uncovered gaps — the pipeline
-    NEVER analyses a partial AOI and reports a risk level for it.
+    **Coverage tolerance (2026-07-28, replaces the old exact-100%-or-fail
+    rule — see CLAUDE.md's "Coverage tolerance" section for the full
+    rationale).** `min_coverage_percent` (caller-supplied, clamped into
+    `[COVERAGE_FLOOR, COVERAGE_CEILING]` = [80, 100]) sets the target. A run's
+    achieved `interior_coverage_percent` bands into one of three outcomes:
+      - `>= min_coverage_percent` -> status "complete", `coverage_status`
+        "target_met", a small proportional confidence penalty for any
+        shortfall from 100 (`(100 - coverage) * COVERAGE_PENALTY_SCALE`).
+      - `>= COVERAGE_FLOOR` and `< min_coverage_percent` -> still status
+        "complete", but `coverage_status: "below_target_coverage"`, a larger
+        confidence penalty, and an anomaly appended to
+        `coverage_anomalies` naming the shortfall.
+      - `< COVERAGE_FLOOR` -> status "failed", reason "insufficient_coverage"
+        (the hard stop, unchanged shape from the old rule — just driven by
+        `COVERAGE_FLOOR` instead of 100.0).
+    The search stops trying more scenes within a tier as soon as
+    `interior_coverage_percent >= min_coverage_percent` (not `== 100.0`); the
+    outer tier loop only advances to the next tier if the current one never
+    reached at least `COVERAGE_FLOOR`. `coverage_percent`, `gap_count`,
+    `gap_area_km2`, `gaps` and `gap_attribution` (nodata vs cloud pixel/area
+    breakdown) ride in the result on every path, not just the failure path.
+
+    **Search budgets (CHANGE 2 — the actual runaway-cost fix).**
+    `max_scenes`/`max_download_gb`/`max_search_seconds` bound the WHOLE
+    tiered search (across all tiers, not per-tier). Exhausting any budget
+    stops the search immediately and returns the best coverage achieved so
+    far, banded the same way as above (`budget_exhausted` names which budget
+    tripped) — never starts another download after a budget trips.
+
+    **Un-closeable gaps (CHANGE 3) and marginal returns (CHANGE 4).** Before
+    attempting another scene, its footprint must genuinely intersect the
+    remaining gap geometry. A gap attributed to cloud (per `gap_cause`) stops
+    being chased once no remaining candidate has materially lower AOI cloud
+    cover over it (`gap_limited_by: "cloud"`/`"nodata"`/`None` on the
+    result). An accepted scene that gains less than
+    `MIN_MARGINAL_COVERAGE_GAIN` percentage points stops the search entirely
+    (`marginal_return_stop` in `coverage_anomalies`) — distinct from the
+    pre-existing near-zero (0.01) doomed-streak duplicate-detection check.
 
     Args:
         selection / scene_metadata / bbox / merged_polygon / event_id / token /
@@ -2195,14 +2324,22 @@ def process_satellite_imagery(
             spreading a tier's scenes across scattered cities.
         city_boundaries: per-city `{"name","geojson"}`; when >1, per-city
             artifacts are rendered from the same accepted mosaic.
-        tracker: the event's `ConfidenceTracker`; tiers 3/4 add a concern and
-            lower confidence through it.
+        tracker: the event's `ConfidenceTracker`; coverage shortfall and
+            tiers 3/4 add concerns and lower confidence through it.
+        min_coverage_percent: caller's coverage target (see above); defaults
+            to `DEFAULT_MIN_COVERAGE_PERCENT` and is clamped server-side.
+        max_scenes / max_download_gb / max_search_seconds: whole-search
+            budgets (see above); defaults are the only place these are
+            hardcoded — every upstream caller should thread its own values.
 
     On success returns the merged result dict, which now also carries
     `coverage_percent`, `full_aoi_coverage_percent`, `coverage_tier`,
-    `temporal_spread_days`, `acquisition_count` and `bytes_downloaded`.
+    `coverage_status`, `temporal_spread_days`, `acquisition_count`,
+    `gap_count`, `gap_area_km2`, `gap_attribution`, `gap_limited_by` and
+    `bytes_downloaded`.
     """
     satellite_type = selection.get("satellite_type", "sentinel-2")
+    min_cov = _clamp_min_coverage_percent(min_coverage_percent)
 
     scenes = (
         list(scene_metadata)
@@ -2249,6 +2386,9 @@ def process_satellite_imagery(
             "coverage_percent": 0.0,
             "best_interior_coverage_percent": 0.0,
             "gaps": [],
+            "gap_count": 0,
+            "gap_area_km2": 0.0,
+            "gap_attribution": {"nodata": 0, "cloud": 0},
             "detail": "no candidate scene intersects the AOI footprint",
         }
 
@@ -2261,22 +2401,91 @@ def process_satellite_imagery(
     bytes_before = _bytes_downloaded_total()
     best_cov = None
     best_interior = -1.0
+    best_clipped = None
+    best_accepted: list = []
+    best_tier = None
+    best_orbit_dir = None
+
+    # CHANGE 2 — whole-search budgets, tracked across ALL tiers.
+    search_start = time.monotonic()
+    scenes_attempted = 0
+    budget_exhausted = None  # "max_scenes" | "max_download_gb" | "max_search_seconds" | None
+    marginal_stop = False
+    gap_limited_by = None
 
     for tier, orbit_dir, group in tiers:
+        if budget_exhausted:
+            break
         # BUG 3: within a tier, add acquisitions best-first and re-measure real
-        # coverage until interior AOI hits 100%. Consecutive doomed downloads
-        # (valid pixels don't grow) abort the tier early (BUG 4c).
+        # coverage until interior AOI reaches the caller's target. Consecutive
+        # doomed downloads (valid pixels don't grow) abort the tier early
+        # (BUG 4c).
         accepted: list = []
         doomed_streak = 0
         clipped = None
         cov = None
         for scene in group:
+            # CHANGE 3 — before attempting a candidate to fill a remaining
+            # gap, check it genuinely intersects the gap geometry (not just
+            # the whole AOI, which was already checked above). Only
+            # meaningful once we have at least one accepted scene with a
+            # measured gap; the very first scene in a tier always gets tried.
+            if cov and cov.get("gaps"):
+                gap_polys = _gap_geoms_as_shapes(cov["gaps"])
+                if gap_polys is not None and not _scene_intersects_gaps(
+                    scene, gap_polys
+                ):
+                    logger.info(
+                        "Tier %d: %s does not intersect the remaining gap "
+                        "geometry; skipping", tier, scene.get("Name"),
+                    )
+                    continue
+                # Cloud-attributed gap: stop chasing it once no remaining
+                # candidate has materially lower AOI cloud cover than what
+                # was already tried.
+                cause = cov.get("gap_cause") or {}
+                if cause.get("cloud", 0) > cause.get("nodata", 0):
+                    prev_cloud = _scene_cloud_for_gap_check(accepted[-1] if accepted else None)
+                    cand_cloud = _scene_cloud_for_gap_check(scene)
+                    if (
+                        prev_cloud is not None
+                        and cand_cloud is not None
+                        and cand_cloud >= prev_cloud - 5.0  # not "materially" lower
+                    ):
+                        gap_limited_by = "cloud"
+                        logger.info(
+                            "Tier %d: remaining gap is cloud-attributed and "
+                            "%s has no materially lower AOI cloud cover "
+                            "(%.1f%% vs %.1f%%); stopping this tier's search.",
+                            tier, scene.get("Name"), cand_cloud, prev_cloud,
+                        )
+                        break
+
+            # CHANGE 2 — budget checks BEFORE starting another download.
+            elapsed = time.monotonic() - search_start
+            bytes_so_far_gb = (_bytes_downloaded_total() - bytes_before) / 1e9
+            logger.info(
+                "[BUDGET] scenes=%d/%d bytes=%.2f/%.2f GB elapsed=%.0f/%.0f s",
+                scenes_attempted, max_scenes, bytes_so_far_gb, max_download_gb,
+                elapsed, max_search_seconds,
+            )
+            if scenes_attempted >= max_scenes:
+                budget_exhausted = "max_scenes"
+                break
+            if bytes_so_far_gb >= max_download_gb:
+                budget_exhausted = "max_download_gb"
+                break
+            if elapsed >= max_search_seconds:
+                budget_exhausted = "max_search_seconds"
+                break
+
             trial = accepted + [scene]
             attempt_id = f"{event_id}/t{tier}"
             trial_clip = _attempt_clip(
                 selection, trial, merged_polygon, attempt_id, token,
                 disaster_type,
             )
+            scenes_attempted += 1
             if trial_clip is None:
                 doomed_streak += 1
                 if doomed_streak >= DOOMED_DOWNLOAD_LIMIT:
@@ -2287,9 +2496,8 @@ def process_satellite_imagery(
                     break
                 continue
             trial_cov = compute_coverage(trial_clip)
-            gained = trial_cov["interior_coverage_percent"] - (
-                cov["interior_coverage_percent"] if cov else 0.0
-            )
+            prior_pct = cov["interior_coverage_percent"] if cov else 0.0
+            gained = trial_cov["interior_coverage_percent"] - prior_pct
             if gained <= 0.01 and accepted:
                 # This acquisition added no coverage — a doomed contribution.
                 doomed_streak += 1
@@ -2313,123 +2521,100 @@ def process_satellite_imagery(
                 tier, len(accepted), cov["interior_coverage_percent"],
                 cov["full_aoi_coverage_percent"],
             )
-            if cov["covered"]:
+            # CHANGE 1 — stop as soon as the caller's target is met, not only
+            # at exactly 100%.
+            if cov["interior_coverage_percent"] >= min_cov:
+                break
+            # CHANGE 4 — marginal-return stopping: an accepted-but-small
+            # contribution (below MIN_MARGINAL_COVERAGE_GAIN, but above the
+            # 0.01 doomed-streak floor above) isn't worth its download cost.
+            # Only applies after the FIRST acquisition in a tier (the first
+            # scene establishes a baseline; there's nothing to compare it
+            # against).
+            if len(accepted) > 1 and gained < MIN_MARGINAL_COVERAGE_GAIN:
+                marginal_stop = True
+                logger.info(
+                    "Tier %d: %s gained only +%.3f%% (< %.1f%% marginal "
+                    "threshold); stopping search rather than trying more "
+                    "scenes.", tier, scene.get("Name"), gained,
+                    MIN_MARGINAL_COVERAGE_GAIN,
+                )
                 break
 
         if cov and cov["interior_coverage_percent"] > best_interior:
             best_interior = cov["interior_coverage_percent"]
             best_cov = cov
+            best_clipped = clipped
+            best_accepted = accepted
+            best_tier = tier
+            best_orbit_dir = orbit_dir
 
-        if cov and cov["covered"]:
-            # 100% reached in this tier. Compute temporal spread + count.
+        if cov and cov["interior_coverage_percent"] >= min_cov:
+            # Target reached in this tier. Compute temporal spread + count.
             dates = [d for d in (scene_acq_date(s) for s in accepted) if d]
             spread = (max(dates) - min(dates)).days if len(dates) >= 2 else 0
             logger.info(
-                "Coverage reached 100%% at tier %d (%d acquisition(s), "
-                "%d-day spread, orbit=%s)",
-                tier, len(accepted), spread, orbit_dir,
+                "Coverage target %.1f%% reached at tier %d (%.3f%% achieved, "
+                "%d acquisition(s), %d-day spread, orbit=%s)",
+                min_cov, tier, cov["interior_coverage_percent"],
+                len(accepted), spread, orbit_dir,
+            )
+            return _finish_success(
+                clipped, cov, accepted, tier, orbit_dir, spread,
+                satellite_type, disaster_type, event_id, city_boundaries,
+                tracker, bytes_before, min_cov, budget_exhausted=None,
+                marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
             )
 
-            if not (city_boundaries and len(city_boundaries) > 1):
-                clipped.pop("_stacked", None)
-                import gc
-                gc.collect()
+        if budget_exhausted or marginal_stop or gap_limited_by:
+            # gap_limited_by: the remaining gap is weather-limited within
+            # THIS tier's own candidates, but a wider/different tier may
+            # still offer a genuinely different (non-cloud-affected)
+            # acquisition — so this only stops the OUTER search, same as a
+            # budget or marginal-return stop, rather than being treated as
+            # "try the next tier and see" (which would just re-hit the same
+            # cloud ceiling on every tier's candidates, burning budget for
+            # nothing, as the search-budget log would show).
+            break
 
-            merged_result = _render_clip(
-                clipped, satellite_type, disaster_type, event_id
-            )
-            if merged_result is None:
-                logger.error("Aborting pipeline: merged render failed")
-                return None
+    # No tier reached the target (or a budget/marginal-return/weather stop fired).
+    # Band the best-effort result per CHANGE 1: if it's still >= min_cov here
+    # (possible when a budget/marginal stop hit mid-tier after already
+    # crossing the target — defensive, the success return above should have
+    # already caught that) or >= COVERAGE_FLOOR, report "complete" with the
+    # coverage caveat; only below the floor is a true hard stop.
+    if best_cov and best_interior >= COVERAGE_FLOOR:
+        dates = [d for d in (scene_acq_date(s) for s in best_accepted) if d]
+        spread = (max(dates) - min(dates)).days if len(dates) >= 2 else 0
+        logger.warning(
+            "Coverage search stopped (%s) at %.3f%% (target %.1f%%, floor "
+            "%.1f%%) — reporting best-effort as complete with caveats.",
+            budget_exhausted or ("marginal_return" if marginal_stop else "exhausted_tiers"),
+            best_interior, min_cov, COVERAGE_FLOOR,
+        )
+        return _finish_success(
+            best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
+            spread, satellite_type, disaster_type, event_id, city_boundaries,
+            tracker, bytes_before, min_cov, budget_exhausted=budget_exhausted,
+            marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
+        )
 
-            bytes_after = _bytes_downloaded_total()
-            # Scene id(s) actually accepted into this result — comma-joined
-            # since a mosaic can accept more than one acquisition, but
-            # satellite_results.scene_id is a single text column.
-            scene_ids = [s.get("Id") or s.get("Name") for s in accepted if s.get("Id") or s.get("Name")]
-            merged_result.update({
-                "valid_percent": round(cov["interior_coverage_percent"], 2),
-                "coverage_percent": cov["interior_coverage_percent"],
-                "full_aoi_coverage_percent": cov["full_aoi_coverage_percent"],
-                "coverage_tier": tier,
-                "temporal_spread_days": spread,
-                "acquisition_count": len(accepted),
-                "orbit_direction": orbit_dir,
-                "coverage_gaps": [],
-                "bytes_downloaded": bytes_after - bytes_before,
-                "scene_id": ",".join(scene_ids) if scene_ids else None,
-                "processing_level": (
-                    "L2A" if satellite_type == "sentinel-2" else None
-                ),
-                # BUG 7 — per-stage peak RSS + which stage peaked, scaled by tiles.
-                "memory_report": memory_report(),
-            })
-
-            # Tiers 3 and 4 are a real limitation: a 7-14 day spread on a flood
-            # is stale imagery. Lower confidence + append an anomaly so it is
-            # visible downstream.
-            if tier >= 3 and tracker is not None:
-                sev = "HIGH" if tier == 4 else "MEDIUM"
-                tracker.add_concern(
-                    f"Coverage reached 100% only at tier {tier} "
-                    f"(±{COVERAGE_TIERS_DAYS.get(tier)}d window, "
-                    f"{spread}-day temporal spread across {len(accepted)} "
-                    f"acquisitions"
-                    + (", mixed relative orbits" if tier == 4 else "")
-                    + "); imagery is temporally dispersed for this disaster.",
-                    sev,
-                )
-                merged_result.setdefault("coverage_anomalies", []).append({
-                    "type": "temporal_spread",
-                    "tier": tier,
-                    "temporal_spread_days": spread,
-                    "acquisition_count": len(accepted),
-                    "severity": sev,
-                })
-
-            # BUG 5 — the SAR index is uncalibrated (10*log10 of raw GRD DN, no
-            # speckle filter, no terrain correction). Append a concern stating it
-            # must not be threshold-compared and lower confidence via the tracker
-            # (not a hardcoded number) so the limitation is visible downstream.
-            if merged_result.get("index_calibrated") is False and tracker is not None:
-                tracker.add_concern(
-                    "SAR index is uncalibrated (10*log10 of raw GRD DN; no "
-                    "radiometric calibration LUT, speckle filter, or terrain "
-                    "correction). It is a relative DN-space value in "
-                    f"'{merged_result.get('index_units')}', NOT calibrated "
-                    "sigma0 dB — it must not be threshold-compared as an "
-                    "absolute water/flood cutoff.",
-                    "MEDIUM",
-                )
-
-            if city_boundaries and len(city_boundaries) > 1:
-                cities = _render_per_city(
-                    stacked=clipped.get("_stacked"),
-                    satellite_type=satellite_type,
-                    disaster_type=disaster_type,
-                    event_id=event_id,
-                    city_boundaries=city_boundaries,
-                )
-                if cities:
-                    merged_result["cities"] = cities
-
-            logger.info("Satellite imagery pipeline complete for %s", event_id)
-            return merged_result
-
-    # No tier reached 100% coverage — fail honestly with gap geometry. NEVER
-    # analyse a partial AOI (BUG 3).
+    # Below COVERAGE_FLOOR — fail honestly with gap geometry. NEVER analyse a
+    # partial AOI below the floor (BUG 3, floor-driven per CHANGE 1).
     gaps = best_cov["gaps"] if best_cov else []
     gap_cause = best_cov["gap_cause"] if best_cov else {"nodata": 0, "cloud": 0}
     total_gap_km2 = round(sum(g["area_km2"] for g in gaps), 4)
     bytes_after = _bytes_downloaded_total()
     logger.error(
-        "INSUFFICIENT COVERAGE for %s: best interior coverage %.3f%% across all "
-        "tiers; %d uncovered region(s) totalling %.3f km^2 (nodata=%d px, "
-        "cloud=%d px). Refusing to analyse a partial AOI.",
-        event_id, max(best_interior, 0.0), len(gaps), total_gap_km2,
-        gap_cause["nodata"], gap_cause["cloud"],
+        "INSUFFICIENT COVERAGE for %s: best interior coverage %.3f%% (floor "
+        "%.1f%%) across all tiers; %d uncovered region(s) totalling %.3f "
+        "km^2 (nodata=%d px, cloud=%d px). Refusing to analyse a partial "
+        "AOI below the floor.%s",
+        event_id, max(best_interior, 0.0), COVERAGE_FLOOR, len(gaps),
+        total_gap_km2, gap_cause["nodata"], gap_cause["cloud"],
+        f" budget_exhausted={budget_exhausted}" if budget_exhausted else "",
     )
-    return {
+    result = {
         "status": "failed",
         "reason": "insufficient_coverage",
         "satellite_type": satellite_type,
@@ -2441,12 +2626,284 @@ def process_satellite_imagery(
         "uncovered_regions": len(gaps),
         "uncovered_area_km2": total_gap_km2,
         "gaps": gaps,
+        "gap_count": len(gaps),
+        "gap_area_km2": total_gap_km2,
         "gap_cause": gap_cause,
+        "gap_attribution": gap_cause,
+        "gap_limited_by": gap_limited_by,
         "bytes_downloaded": bytes_after - bytes_before,
         "processing_level": (
             "L2A" if satellite_type == "sentinel-2" else None
         ),
+        "min_coverage_percent": min_cov,
     }
+    if budget_exhausted:
+        result["budget_exhausted"] = budget_exhausted
+    return result
+
+
+def _gap_geoms_as_shapes(gaps: list):
+    """Best-effort bbox polygons (WGS84) for a `compute_coverage` gap list.
+
+    Used by CHANGE 3's pre-download gap-intersection check. Returns None when
+    no gap has usable bbox geometry (falls back to "always try" upstream).
+    """
+    from shapely.geometry import box as _box
+
+    polys = []
+    for g in gaps or []:
+        bbox = g.get("bbox")
+        if not bbox:
+            continue
+        try:
+            polys.append(
+                _box(bbox["west"], bbox["south"], bbox["east"], bbox["north"])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return polys or None
+
+
+def _scene_intersects_gaps(scene: dict, gap_polys: list) -> bool:
+    """True if `scene`'s WGS84 footprint intersects any gap bbox polygon.
+
+    CHANGE 3: cheapest-correct implementation — a real geometric intersection
+    test (not "try it and see"), restricted to the gap bboxes rather than the
+    full AOI (which was already checked earlier in the search).
+    """
+    footprint = scene.get("GeoFootprint")
+    if not footprint:
+        return True  # unknown footprint: don't block the candidate
+    try:
+        geom = shape(footprint)
+    except (ValueError, AttributeError, TypeError):
+        return True
+    for gap in gap_polys:
+        try:
+            if geom.intersects(gap):
+                return True
+        except (ValueError, AttributeError, TypeError):
+            continue
+    return False
+
+
+def _scene_cloud_for_gap_check(scene: Optional[dict]) -> Optional[float]:
+    """Cloud-cover percent for CHANGE 3's cloud-gap comparison, or None.
+
+    Prefers the AOI-restricted figure (CHANGE 6) when the scene carries one
+    (`_aoi_cloud`), then the scene-level catalogue figure already annotated
+    by `sentinel.search_imagery`'s ranking pass (`_cloud`), then falls back to
+    reading the raw `cloudCover` attribute directly (a scene passed straight
+    from a catalogue query that skipped `search_imagery`'s ranking, e.g. a
+    single-scene direct call, still has `Attributes` but no `_cloud`).
+    """
+    if not scene:
+        return None
+    aoi_cloud = scene.get("_aoi_cloud")
+    if aoi_cloud is not None:
+        try:
+            return float(aoi_cloud)
+        except (TypeError, ValueError):
+            pass
+    cloud = scene.get("_cloud")
+    if cloud is not None and cloud != float("inf"):
+        try:
+            return float(cloud)
+        except (TypeError, ValueError):
+            pass
+    try:
+        from sentinel import _scene_cloud_cover
+        raw = _scene_cloud_cover(scene)
+        if raw != float("inf"):
+            return float(raw)
+    except Exception:
+        pass
+    return None
+
+
+def _finish_success(
+    clipped: dict,
+    cov: dict,
+    accepted: list,
+    tier: int,
+    orbit_dir,
+    spread: int,
+    satellite_type: str,
+    disaster_type: str,
+    event_id: str,
+    city_boundaries,
+    tracker,
+    bytes_before: int,
+    min_cov: float,
+    budget_exhausted: Optional[str],
+    marginal_stop: bool,
+    gap_limited_by: Optional[str],
+) -> Optional[dict]:
+    """Render + finalize a successful (target-met or best-effort) coverage result.
+
+    Shared tail for both the "target reached" return and the "budget/marginal
+    stop but still >= COVERAGE_FLOOR" best-effort return (CHANGE 1/2/4), so
+    both paths carry identical fields.
+    """
+    interior_pct = cov["interior_coverage_percent"]
+    band = _coverage_band(interior_pct, min_cov)
+
+    if not (city_boundaries and len(city_boundaries) > 1):
+        clipped.pop("_stacked", None)
+        import gc
+        gc.collect()
+
+    merged_result = _render_clip(
+        clipped, satellite_type, disaster_type, event_id
+    )
+    if merged_result is None:
+        logger.error("Aborting pipeline: merged render failed")
+        return None
+
+    bytes_after = _bytes_downloaded_total()
+    scene_ids = [
+        s.get("Id") or s.get("Name") for s in accepted
+        if s.get("Id") or s.get("Name")
+    ]
+    gaps = cov.get("gaps") or []
+    gap_cause = cov.get("gap_cause") or {"nodata": 0, "cloud": 0}
+    total_gap_km2 = round(sum(g["area_km2"] for g in gaps), 4)
+
+    # Proportional confidence penalty for shortfall from 100% (CHANGE 1). Not
+    # a hardcoded cliff: linear in the shortfall, scaled by
+    # COVERAGE_PENALTY_SCALE, and doubled in the below-target band since that
+    # band is a real, larger limitation (the caller's own quality bar wasn't
+    # met).
+    shortfall = max(0.0, 100.0 - interior_pct)
+    penalty = shortfall * COVERAGE_PENALTY_SCALE
+    if band == "below_target":
+        penalty *= 2.0
+
+    merged_result.update({
+        "valid_percent": round(interior_pct, 2),
+        "coverage_percent": interior_pct,
+        "full_aoi_coverage_percent": cov["full_aoi_coverage_percent"],
+        "coverage_tier": tier,
+        "coverage_status": (
+            "target_met" if band == "complete" else "below_target_coverage"
+        ),
+        "min_coverage_percent": min_cov,
+        "temporal_spread_days": spread,
+        "acquisition_count": len(accepted),
+        "orbit_direction": orbit_dir,
+        "coverage_gaps": gaps,
+        "gaps": gaps,
+        "gap_count": len(gaps),
+        "gap_area_km2": total_gap_km2,
+        "gap_cause": gap_cause,
+        "gap_attribution": gap_cause,
+        "gap_limited_by": gap_limited_by,
+        "bytes_downloaded": bytes_after - bytes_before,
+        "scene_id": ",".join(scene_ids) if scene_ids else None,
+        "processing_level": (
+            "L2A" if satellite_type == "sentinel-2" else None
+        ),
+        # BUG 7 — per-stage peak RSS + which stage peaked, scaled by tiles.
+        "memory_report": memory_report(),
+    })
+    if budget_exhausted:
+        merged_result["budget_exhausted"] = budget_exhausted
+
+    # Coverage shortfall confidence penalty + anomaly (CHANGE 1). Applied
+    # whenever coverage is below 100%, regardless of band.
+    if shortfall > 0.0:
+        if tracker is not None:
+            tracker.add_evidence(
+                "coverage_shortfall", max(0.0, 1.0 - penalty), weight=0.3
+            )
+        if band == "below_target_coverage" or merged_result["coverage_status"] == "below_target_coverage":
+            if tracker is not None:
+                tracker.add_concern(
+                    f"Coverage reached only {interior_pct:.2f}% "
+                    f"(target {min_cov:.1f}%, floor {COVERAGE_FLOOR:.1f}%); "
+                    f"{len(gaps)} uncovered region(s) totalling "
+                    f"{total_gap_km2:.3f} km^2 (nodata={gap_cause.get('nodata')}px, "
+                    f"cloud={gap_cause.get('cloud')}px).",
+                    "HIGH",
+                )
+            merged_result.setdefault("coverage_anomalies", []).append({
+                "type": "below_target_coverage",
+                "coverage_percent": interior_pct,
+                "min_coverage_percent": min_cov,
+                "gap_count": len(gaps),
+                "gap_area_km2": total_gap_km2,
+                "gap_cause": gap_cause,
+                "severity": "HIGH",
+            })
+
+    if marginal_stop:
+        merged_result.setdefault("coverage_anomalies", []).append({
+            "type": "marginal_return_stop",
+            "coverage_percent": interior_pct,
+            "threshold_percent": MIN_MARGINAL_COVERAGE_GAIN,
+        })
+
+    if gap_limited_by:
+        merged_result.setdefault("coverage_anomalies", []).append({
+            "type": "gap_limited_by_weather",
+            "gap_limited_by": gap_limited_by,
+            "gap_count": len(gaps),
+            "gap_area_km2": total_gap_km2,
+        })
+
+    # Tiers 3 and 4 are a real limitation: a 7-14 day spread on a flood
+    # is stale imagery. Lower confidence + append an anomaly so it is
+    # visible downstream.
+    if tier >= 3 and tracker is not None:
+        sev = "HIGH" if tier == 4 else "MEDIUM"
+        tracker.add_concern(
+            f"Coverage reached target only at tier {tier} "
+            f"(±{COVERAGE_TIERS_DAYS.get(tier)}d window, "
+            f"{spread}-day temporal spread across {len(accepted)} "
+            f"acquisitions"
+            + (", mixed relative orbits" if tier == 4 else "")
+            + "); imagery is temporally dispersed for this disaster.",
+            sev,
+        )
+        merged_result.setdefault("coverage_anomalies", []).append({
+            "type": "temporal_spread",
+            "tier": tier,
+            "temporal_spread_days": spread,
+            "acquisition_count": len(accepted),
+            "severity": sev,
+        })
+
+    # BUG 5 — the SAR index is uncalibrated (10*log10 of raw GRD DN, no
+    # speckle filter, no terrain correction). Append a concern stating it
+    # must not be threshold-compared and lower confidence via the tracker
+    # (not a hardcoded number) so the limitation is visible downstream.
+    if merged_result.get("index_calibrated") is False and tracker is not None:
+        tracker.add_concern(
+            "SAR index is uncalibrated (10*log10 of raw GRD DN; no "
+            "radiometric calibration LUT, speckle filter, or terrain "
+            "correction). It is a relative DN-space value in "
+            f"'{merged_result.get('index_units')}', NOT calibrated "
+            "sigma0 dB — it must not be threshold-compared as an "
+            "absolute water/flood cutoff.",
+            "MEDIUM",
+        )
+
+    if city_boundaries and len(city_boundaries) > 1:
+        cities = _render_per_city(
+            stacked=clipped.get("_stacked"),
+            satellite_type=satellite_type,
+            disaster_type=disaster_type,
+            event_id=event_id,
+            city_boundaries=city_boundaries,
+        )
+        if cities:
+            merged_result["cities"] = cities
+
+    logger.info(
+        "Satellite imagery pipeline complete for %s (coverage=%.3f%%, "
+        "status=%s)", event_id, interior_pct, merged_result["coverage_status"],
+    )
+    return merged_result
 
 
 async def cleanup_event_temp(event_id: str) -> None:
