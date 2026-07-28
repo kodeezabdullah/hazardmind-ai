@@ -1085,6 +1085,9 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # LLM prompt should compare against water thresholds; the
             # whole-AOI mean_index above is context, never counter-evidence.
             "affected_mean_index": result.get("affected_mean_index"),
+            # Phase 1a — % of in-AOI pixels the SCL cloud/shadow mask excluded
+            # from the index support (None on S1 / no-SCL runs).
+            "scl_masked_percent": result.get("scl_masked_percent"),
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
             # The satellite_results INSERT names these columns; total_zones was

@@ -1569,10 +1569,21 @@ def stack_bands(
                 continue
             src_ds, src_raw = _open_georeferenced(path, dst_crs)
             try:
+                # Phase 1a: SCL is a CATEGORICAL class layer — bilinear
+                # interpolation of class ids invents non-existent classes at
+                # every boundary (e.g. midway between cloud-shadow 3 and
+                # vegetation 4 reads as 3.5). Nearest keeps every resampled
+                # pixel a real ESA class id; continuous spectral bands stay
+                # bilinear as before.
+                resampling = (
+                    Resampling.nearest
+                    if token.upper() == "SCL"
+                    else Resampling.bilinear
+                )
                 arr = src_ds.read(
                     1,
                     out_shape=(ref_h, ref_w),
-                    resampling=Resampling.bilinear,
+                    resampling=resampling,
                 ).astype("float32")
                 bands[token] = arr
             finally:
@@ -1866,6 +1877,25 @@ def calculate_indices(
     valid = np.isfinite(index)
     if mask is not None:
         valid = valid & mask
+    # Phase 1a (science/full-pass): per-pixel SCL masking INSIDE the index.
+    # SCL was used for the coverage metric but not for the index itself —
+    # cloud shadow (class 3) is spectrally almost identical to water in any
+    # water index and is the largest false-positive source after built-up
+    # surfaces. Masked pixels (same _SCL_INVALID_CLASSES set coverage uses:
+    # 0 nodata, 1 saturated, 3 cloud shadow, 8/9 cloud, 10 cirrus, 11 snow)
+    # are excluded from the index, the classification, mean_value,
+    # affected_mean_index, water_percent and affected_area_km2 — they become
+    # NODATA_CLASS, never silently "safe land" or zero.
+    scl_masked_percent = None
+    cloud_invalid = _scl_cloud_mask(clipped) if satellite_type == "sentinel-2" else None
+    if cloud_invalid is not None:
+        in_aoi = mask if mask is not None else np.isfinite(index)
+        aoi_count = int(np.count_nonzero(in_aoi))
+        masked_count = int(np.count_nonzero(cloud_invalid & in_aoi & valid))
+        scl_masked_percent = (
+            round(100.0 * masked_count / aoi_count, 2) if aoi_count else 0.0
+        )
+        valid = valid & ~cloud_invalid
     scheme = _CLASS_SCHEMES[scheme_key]
     classification = _classify(index, valid, scheme)
 
@@ -1915,6 +1945,10 @@ def calculate_indices(
         "water_percent": water_percent,
         "mean_value": mean_value,
         "affected_mean_index": affected_mean_index,
+        # Phase 1a: % of in-AOI otherwise-valid pixels excluded by the SCL
+        # cloud/shadow/cirrus mask (None on S1 / no-SCL runs). Auditability:
+        # any run's index support can be re-derived from this.
+        "scl_masked_percent": scl_masked_percent,
         "threshold_used": threshold,
         "class_counts": class_counts,
         # BUG 5 calibration contract (see the branch above).
@@ -2554,6 +2588,9 @@ def _render_clip(
         # Phase 0b: mean index over classified-affected pixels only (the
         # within-water mean on the flood path); None when nothing classified.
         "affected_mean_index": indices.get("affected_mean_index"),
+        # Phase 1a: % of in-AOI pixels the SCL cloud/shadow mask excluded
+        # from the index support (None on S1 / no-SCL runs).
+        "scl_masked_percent": indices.get("scl_masked_percent"),
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         # BUG 5 — calibration contract rides through to the result dict.
