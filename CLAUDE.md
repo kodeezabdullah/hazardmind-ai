@@ -266,7 +266,16 @@ class PipelineState(TypedDict):
 
 ## Database Schema (Current Live)
 
-⚠️ `shared/db/schema.sql` is **stale** — the live Neon DB has more columns than this file declares. Treat this as a floor, not a ceiling.
+**RESOLVED 2026-07-28 (durable-evidence-trail pass):** `shared/db/schema.sql` is
+now kept in sync with live Neon and is trustworthy again — it was rebuilt from
+a real `information_schema.columns` introspection and now matches live
+exactly (including the two structural corrections below: `satellite_results`
+and `impact_data` both have an INTEGER `SERIAL` PK on live Neon, not the UUID
+PK this file used to claim). Going forward, any column change must land in
+`shared/db/migrations/` (see the "Rules For Claude" entry on migrations) AND
+update this file in the same change — do not let it drift again. The
+narrative below (the historical mismatch findings) is kept for history, not
+because schema.sql is untrustworthy today.
 
 **`disaster_events`** — `event_id UUID PK`, `disaster_type`, `location`, `bbox FLOAT[]`, `created_at`. **Live DB also has** (not in schema.sql, confirmed by `backend/db.py` usage): `status`, `step`, `progress`, `magnitude`, `updated_at`, `band_room_id` (self-migrated via `ADD COLUMN IF NOT EXISTS` — this one becomes dead post-migration).
 

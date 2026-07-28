@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS satellite_results (
     bounds JSONB,
     bbox JSONB,
     risk_cities JSONB,
-    scene_age_days INTEGER,        -- confirmed absent pre-2026-07-28; see agents/satellite CLAUDE.md
+    scene_age_days DOUBLE PRECISION, -- confirmed absent pre-2026-07-28; see agents/satellite CLAUDE.md
     -- Durable evidence trail (0002_durable_evidence_trail.sql, feat/durable-evidence-trail):
     confidence REAL,
     confidence_basis TEXT,
@@ -94,7 +94,10 @@ ON hazard_zones(event_id, hazard_type);
 
 CREATE TABLE IF NOT EXISTS impact_data (
     id SERIAL PRIMARY KEY,
-    event_id TEXT UNIQUE NOT NULL,   -- UUID string in practice; column type is TEXT (agents/impact/services/db.py DDL)
+    event_id UUID UNIQUE NOT NULL,   -- agents/impact/services/db.py's own DDL declares TEXT, but live Neon's
+                                      -- actual column type is UUID (confirmed via information_schema.columns,
+                                      -- 2026-07-28) -- the app-level DDL string here is stale/aspirational and
+                                      -- was never what actually ran; this file reflects the real column type
     total_affected INTEGER,
     high_risk_people INTEGER,
     medium_risk_people INTEGER,

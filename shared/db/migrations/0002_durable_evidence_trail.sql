@@ -26,10 +26,14 @@ ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS coverage_percent REAL;
 ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS coverage_status TEXT;
 -- scene_age_days already added in 0001_baseline_drift.sql (it was confirmed
 -- ABSENT from live Neon entirely, not merely unwritten — see that file and
--- root CLAUDE.md). Re-stated here with IF NOT EXISTS for idempotency /
--- readability of this migration as a self-contained diff of the durable-
--- evidence-trail feature.
-ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS scene_age_days INTEGER;
+-- root CLAUDE.md) as DOUBLE PRECISION, matching agent.py's own
+-- _persist_satellite_result inline ALTER (fractional days, e.g. 1.5).
+-- Re-stated here with IF NOT EXISTS for idempotency / readability of this
+-- migration as a self-contained diff of the durable-evidence-trail feature;
+-- this statement is a no-op given 0001 already ran, so the type here MUST
+-- match 0001's (DOUBLE PRECISION) or the IF NOT EXISTS guard makes this
+-- line's own type declaration irrelevant/misleading.
+ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS scene_age_days DOUBLE PRECISION;
 ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS index_calibrated BOOLEAN;
 ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS index_units TEXT;
 ALTER TABLE satellite_results ADD COLUMN IF NOT EXISTS selection_reason TEXT;
