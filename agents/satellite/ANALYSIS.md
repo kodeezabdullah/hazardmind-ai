@@ -159,6 +159,26 @@ finally:
 
 ### 2.3 `process_satellite_imagery` — the tiered coverage search (processor.py:2163-2448)
 
+> **⚠️ SUPERSEDED 2026-07-28 (branch `fix/coverage-tolerance`) — see
+> CLAUDE.md's "Coverage Tolerance Fix Pass" section for the current
+> behavior.** The diagram and "Key fact" note directly below describe the
+> pipeline's behavior BEFORE this date and are kept as history, per this
+> repo's convention of annotating past behavior rather than erasing it (see
+> the "Cross-Agent Honesty Fix Pass" entries elsewhere in this file for the
+> same pattern). They no longer describe what the code does. In short: the
+> exact-100%-or-fail rule below is now a caller-controlled band
+> (`min_coverage_percent`, clamped into `[COVERAGE_FLOOR=80,
+> COVERAGE_CEILING=100]`) with three outcomes (`target_met` /
+> `below_target_coverage` / hard-fail below the floor) instead of two
+> (`covered==100.0` / hard-fail below 100.0); the tier loop now also
+> enforces whole-search budgets (`max_scenes`/`max_download_gb`/
+> `max_search_seconds`), stops chasing a gap no remaining candidate can
+> close (weather-limited or footprint-non-intersecting), and stops on
+> marginal returns (< 2 coverage points gained). The per-satellite tier
+> WINDOWS referenced below (tier2 +-3d / tier3 +-7d) also changed for
+> Sentinel-1 specifically (now a single +-10d window) — see CLAUDE.md for
+> the measured-revisit rationale; Sentinel-2's windows are unchanged.
+
 ```
 process_satellite_imagery(selection, scene_metadata, bbox, merged_polygon, event_id, token, disaster_type, ...)
 ├─ dedupe_by_acquisition(scenes)                     [collapses GRD/GRD-COG twins of one acquisition]
@@ -181,10 +201,16 @@ process_satellite_imagery(selection, scene_metadata, bbox, merged_polygon, event
                                           "coverage_percent": best interior %, "gaps": [...]}
 ```
 
-**Key fact, confirmed in code:** there is no partial-coverage risk output.
-Either some tier's cumulative mosaic reaches exactly 100% interior
-valid-pixel coverage, or the whole call fails with `insufficient_coverage`
-and gap geometry.
+**Key fact, confirmed in code AS OF THE ORIGINAL (pre-2026-07-28) VERSION
+ONLY — see the superseded note above:** there was no partial-coverage risk
+output. Either some tier's cumulative mosaic reached exactly 100% interior
+valid-pixel coverage, or the whole call failed with `insufficient_coverage`
+and gap geometry. As of 2026-07-28 this is no longer true: a run between
+`COVERAGE_FLOOR` (80%) and the caller's target now DOES produce a risk
+output — explicitly flagged `coverage_status:"below_target_coverage"`, never
+silently. The underlying principle (never report a partial analysis as
+complete WITHOUT saying so) is preserved; only the "how" changed, from
+refusing to answer to answering honestly with the limitation stated.
 
 ---
 
