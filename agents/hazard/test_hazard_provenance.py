@@ -226,48 +226,35 @@ def test_usgs_fetch_failure_flagged_distinctly():
 
 def test_evidence_basis_survives_into_db_write_confirmed_by():
     """agent.write_to_db's confirmed_by JSONB must carry evidence_basis per
-    hazard_type row, not just confidence_scores."""
-    import json as _json
+    hazard_type row, not just confidence_scores.
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import agent as hazard_agent
+    NOTE (TESTING_GAP_AUDIT.md, 2026-07-28): this test previously imported
+    `agent as hazard_agent` but never called it — it defined a local
+    `_confirmed_by` closure that hand-copied write_to_db's inner closure
+    logic and tested the COPY, not the real function. If the real
+    write_to_db's _confirmed_by ever drifted from this hand-copied twin,
+    this test would keep passing while the DB row silently stopped carrying
+    evidence_basis (the exact CHANGE 6 defect class). The real end-to-end
+    check — calling agent.analyze_hazard for real with a faked asyncpg that
+    records the REAL confirmed_by JSONB write_to_db sends — now lives in
+    agents/hazard/test_field_survival.py's
+    test_evidence_basis_survives_real_write_to_db. This test is retired in
+    favour of that one rather than deleted outright, so the retirement
+    reason stays discoverable in this suite's own history."""
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    import test_field_survival as real_test
 
-    raw_result = {
-        "event_id": "test-event",
-        "flood_risk": "LOW",
-        "earthquake_risk": "LOW",
-        "landslide_risk": "LOW",
-        "overall_severity": "LOW",
-        "confidence_scores": {"flood": 0.5, "earthquake": 0.85, "landslide": 0.8},
-        "evidence_basis": {
-            "earthquake": {"eq_count": 0, "usgs_fetch_failed": False},
-            "landslide": {"dem_available": True, "slope_estimate": 3.2},
-        },
-    }
+    real_test.PASS.clear()
+    real_test.FAIL.clear()
+    real_test.test_evidence_basis_survives_real_write_to_db()
 
-    # Exercise the confirmed_by builder in isolation (no real DB connection):
-    # replicate write_to_db's inner _confirmed_by closure logic directly
-    # against the same evidence_basis shape it would receive.
-    confidence_scores = raw_result["confidence_scores"]
-    evidence_basis = raw_result["evidence_basis"]
-
-    def _confirmed_by(hazard_type):
-        return _json.dumps({
-            "confidence_scores": confidence_scores,
-            "evidence_basis": evidence_basis.get(hazard_type),
-        })
-
-    landslide_row = _json.loads(_confirmed_by("landslide"))
-    if landslide_row.get("evidence_basis", {}).get("dem_available") is True:
-        ok("confirmed_by for the landslide row carries dem_available")
+    if real_test.FAIL:
+        bad(f"real evidence_basis survival check failed: {real_test.FAIL}")
     else:
-        bad(f"confirmed_by missing dem_available: {landslide_row}")
-
-    earthquake_row = _json.loads(_confirmed_by("earthquake"))
-    if earthquake_row.get("evidence_basis", {}).get("usgs_fetch_failed") is False:
-        ok("confirmed_by for the earthquake row carries usgs_fetch_failed")
-    else:
-        bad(f"confirmed_by missing usgs_fetch_failed: {earthquake_row}")
+        for msg in real_test.PASS:
+            ok(f"[via test_field_survival.py] {msg}")
 
 
 if __name__ == "__main__":

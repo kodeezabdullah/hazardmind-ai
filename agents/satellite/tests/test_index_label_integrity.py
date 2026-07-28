@@ -109,22 +109,68 @@ def test_ndwi_still_validated_when_calibrated():
 
 
 def test_validation_input_index_type_matches_result():
-    """Simulates agent.py's validation_input construction contract: the dict
-    handed to cross_validator must carry the SAME index_type the pipeline
-    computed — never a separately-set/defaulted value. This mirrors the
-    assertion added in agent.py's run_pipeline right after validation_input is
-    built."""
-    for computed_index_type in ("SAR", "NDWI", "NDVI"):
-        result = {"index_type": computed_index_type, "mean_index": 0.2}
-        validation_input = {
-            "index_type": result["index_type"],
-            "mean_index": result.get("mean_index"),
-        }
+    """agent.py's validation_input dict (built right before cross_validator
+    is called, agent.py ~L922) must carry the SAME index_type
+    process_satellite_imagery actually computed — never a separately-set/
+    defaulted value.
+
+    NOTE (TESTING_GAP_AUDIT.md, 2026-07-28): this test used to hand-build a
+    dict mirroring agent.py's construction and assert the assertion logic
+    works on the simulation — it never called agent.run_pipeline, so a
+    divergence in the REAL dict construction (exactly the islamabad-findings
+    #1 defect class: a field landing under the wrong key) would not have
+    been caught. Rewritten to call the real agent.run_pipeline() with
+    cross_validator.validate_all patched to capture the REAL
+    validation_input it receives, for both a SAR and an NDWI run."""
+    import asyncio
+    import json
+    import os
+    import sys as _sys
+
+    tests_dir = os.path.dirname(os.path.abspath(__file__))
+    if tests_dir not in _sys.path:
+        _sys.path.insert(0, tests_dir)
+    import test_verify_islamabad_fixes as t
+    import agent as satellite_agent
+
+    for computed_index_type, index_calibrated in (("SAR", False), ("NDWI", True)):
+        captured = {}
+
+        class _CapturingValidator:
+            def validate_all(self, validation_input, disaster_type, bbox, tracker):
+                captured["validation_input"] = validation_input
+                tracker.add_evidence("stub", 0.9, weight=1.0)
+                return [{"source": "STUB", "status": "CONFIRMED", "detail": "stub"}]
+
+        search_calls = []
+        mocks = t._common_mocks(search_calls)
+        mocks["process_satellite_imagery"] = lambda *a, **k: t._process_result(
+            index_type=computed_index_type, index_calibrated=index_calibrated,
+        )
+        mocks["cross_validator"] = _CapturingValidator()
+        restore = t._install(mocks)
         try:
-            assert validation_input["index_type"] == result["index_type"]
-            ok(f"validation_input.index_type matches computed index_type={computed_index_type!r}")
-        except AssertionError:
-            bad(f"validation_input.index_type diverged for {computed_index_type!r}")
+            params = satellite_agent.ProcessDisasterInput(
+                event_id=f"evt-index-label-{computed_index_type}",
+                location="Islamabad, Pakistan", disaster_type="flood", magnitude=0,
+            )
+            raw = asyncio.run(satellite_agent.run_pipeline(params))
+        finally:
+            restore()
+
+        result = json.loads(raw)
+        if result.get("status") != "complete":
+            bad(f"pipeline did not complete for {computed_index_type}: {result}")
+            continue
+
+        validation_input = captured.get("validation_input") or {}
+        if validation_input.get("index_type") == computed_index_type:
+            ok(f"the REAL validation_input passed to cross_validator carries "
+               f"index_type={computed_index_type!r}, matching what "
+               f"process_satellite_imagery actually computed")
+        else:
+            bad(f"validation_input.index_type diverged for "
+                f"{computed_index_type!r}: got {validation_input.get('index_type')!r}")
 
 
 if __name__ == "__main__":
