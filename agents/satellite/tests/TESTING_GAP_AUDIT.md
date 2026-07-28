@@ -200,3 +200,19 @@ regression. hazard: `test_hazard_provenance.py` 17/17,
 pass. impact: `test_field_survival.py` (new) 3/3. report:
 `test_confidence_aggregation.py` 8/8, `test_field_survival.py` (new) 4/4.
 No live e2e was run, per the task's scope.
+
+## PROJ_LIB conflict resolved (2026-07-28, coherence pass on feat/durable-evidence-trail)
+
+The "`test_bug_fixes.py`/`test_clip_window.py` still fail" note above
+undercounted the real scope (8 failures, all in `test_bug_fixes.py` and one
+in `test_correctness_fixes_20260727.py`; `test_clip_window.py` itself was not
+actually failing) and treated it as an environment quirk to live with rather
+than something fixable. It is fixable: GDAL/rasterio reads `PROJ_LIB` at
+`import rasterio` time and caches it, so once a bad system `proj.db` has been
+read in a process, no later env-var reassignment helps — the fix has to run
+before rasterio's first import. `agents/satellite/tests/conftest.py` now
+pins `PROJ_LIB`/`PROJ_DATA` to rasterio's own bundled `proj_data` directory
+(located via a plain filesystem walk, without importing rasterio first) as
+the very first thing pytest does in this directory. All 8 tests now pass
+without any manual env setup. See root `CLAUDE.md`'s "PROJ_LIB RESOLVED"
+entry for the full root-cause writeup.

@@ -132,12 +132,85 @@ def test_satellite_confidence_value_is_actually_read_not_ignored():
         bad(f"0.95 missing from collected confidence values: {values}")
 
 
+def test_roads_blocked_km_precision_not_lost_via_legacy_column():
+    """Coherence-pass fix (feat/durable-evidence-trail, 2026-07-28):
+    build_structured_report_context previously read impact.get("roads_blocked")
+    (the legacy INTEGER mirror, int(round(roads_blocked_km))) and labelled it
+    "roads_blocked_km" in the report context -- silently truncating precision
+    (a real 4.6 km value would report as 5). roads_blocked_km is CANONICAL
+    (see root CLAUDE.md's "roads_blocked vs roads_blocked_km RESOLVED" entry
+    and shared/db/schema.sql's column comment); this proves the real
+    db_client.build_structured_report_context function now prefers it, via a
+    realistic row dict shaped like what impact_data actually returns (both
+    columns present, written from the same source per H#14), not a
+    hand-built context simulating the fix."""
+    from db_client import build_structured_report_context, db_context_to_report_context
+
+    impact_row = {
+        "event_id": "evt-roads-blocked-precision",
+        "total_affected": 100,
+        "high_risk_people": 20,
+        "medium_risk_people": 50,
+        "hospitals_at_risk": 1,
+        "schools_at_risk": 2,
+        "roads_blocked": 5,        # legacy mirror: int(round(4.6)) = 5
+        "roads_blocked_km": 4.6,   # canonical
+        "bridges_at_risk": 0,
+        "vulnerability_score": "MEDIUM",
+        "evacuation_routes": [],
+        "estimated_evacuation_time": "2 hours",
+        "overall_confidence": 0.7,
+    }
+
+    db_context = build_structured_report_context(
+        event_id="evt-roads-blocked-precision",
+        event={"event_id": "evt-roads-blocked-precision"},
+        satellite_results=[],
+        hazard_zones=[],
+        impact_data=impact_row,
+    )
+    context = db_context_to_report_context(db_context)
+
+    got = context["impact"]["roads_blocked_km"]
+    if got == 4.6:
+        ok(f"roads_blocked_km={got!r} preserved from the canonical column "
+           f"via the real build_structured_report_context (not truncated "
+           f"to the legacy roads_blocked=5 mirror)")
+    else:
+        bad(f"expected roads_blocked_km=4.6 (canonical), got {got!r} "
+            f"-- precision lost via the legacy roads_blocked mirror")
+
+    # Pre-H#14 row: roads_blocked_km was never written (column added after
+    # roads_blocked existed) -- must fall back to the legacy column rather
+    # than reporting 0/None and silently discarding a real historical value.
+    old_row = dict(impact_row)
+    old_row["roads_blocked_km"] = None
+    old_row["roads_blocked"] = 9
+
+    old_db_context = build_structured_report_context(
+        event_id="evt-roads-blocked-legacy-fallback",
+        event={"event_id": "evt-roads-blocked-legacy-fallback"},
+        satellite_results=[],
+        hazard_zones=[],
+        impact_data=old_row,
+    )
+    old_context = db_context_to_report_context(old_db_context)
+    got_old = old_context["impact"]["roads_blocked_km"]
+    if got_old == 9:
+        ok(f"pre-H#14 row (roads_blocked_km=NULL) correctly falls back to "
+           f"the legacy roads_blocked=9 column via the real function")
+    else:
+        bad(f"expected fallback to legacy roads_blocked=9 for a pre-H#14 "
+            f"row, got {got_old!r}")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("TEST: report field survival (islamabad-findings audit follow-up)")
     print("=" * 70)
     test_satellite_zero_confidence_via_real_run_report_pipeline_cannot_yield_high()
     test_satellite_confidence_value_is_actually_read_not_ignored()
+    test_roads_blocked_km_precision_not_lost_via_legacy_column()
     print("=" * 70)
     print(f"SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 70)

@@ -113,17 +113,29 @@ def _normalise_satellite_payload(payload: dict, event_id: str) -> dict:
     }
 
 
-async def write_to_db(result: dict) -> None:
+async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> None:
     """Write hazard results to the hazard_zones table (matches shared/db/schema.sql).
 
     The schema is one row per hazard type, so we write a flood, earthquake, and
     landslide row for the event. Columns: risk_level, hazard_type, severity,
     confirmed_by, flood_depth_estimate, earthquake_mmi, landslide_probability,
-    overall_confidence.
+    overall_confidence, diagnostics.
+
+    ``primary_hazard_risk`` (H#10): the caller now computes this BEFORE
+    calling write_to_db (agent.analyze_hazard, ordering fix per
+    TESTING_GAP_AUDIT.md/test_field_survival.py's
+    test_primary_hazard_risk_reaches_payload_but_not_confirmed_by finding —
+    previously write_to_db(raw_result) ran before primary_hazard_risk was
+    even computed, so it could never reach confirmed_by/diagnostics no
+    matter what this function did). Optional so any other caller that still
+    only wants the pre-existing confirmed_by shape keeps working unchanged.
     """
     confidence_scores = result.get("confidence_scores", {})
     evidence_basis = result.get("evidence_basis") or {}
+    raw_diagnostics = result.get("raw_diagnostics") or {}
     severity = result["overall_severity"]
+    satellite_confidence = result.get("satellite_confidence")
+    confidence_cap_applied = result.get("confidence_cap_applied")
 
     # confirmed_by carries confidence_scores (unchanged) plus, additively, the
     # evidence provenance (real DEM slope / USGS fetch status) for the
@@ -138,6 +150,24 @@ async def write_to_db(result: dict) -> None:
             }
         )
 
+    # diagnostics (durable-evidence-trail, feat/durable-evidence-trail): the
+    # cross-cutting fields that were previously computed but never reached
+    # confirmed_by (satellite_confidence, confidence_cap_applied,
+    # primary_hazard_risk — see TESTING_GAP_AUDIT.md), plus the full raw
+    # third-party evidence trace for THIS row's hazard_type (dem_query/
+    # dem_samples/... for landslide, usgs_query/events_returned/... for
+    # earthquake, index/threshold detail for flood), so any deterministic
+    # decision is re-derivable from the DB row alone.
+    def _diagnostics(hazard_type: str) -> str:
+        return json.dumps(
+            {
+                "satellite_confidence": satellite_confidence,
+                "confidence_cap_applied": confidence_cap_applied,
+                "primary_hazard_risk": primary_hazard_risk,
+                "raw": raw_diagnostics.get(hazard_type),
+            }
+        )
+
     rows = [
         {
             "hazard_type": "flood",
@@ -147,6 +177,7 @@ async def write_to_db(result: dict) -> None:
             "earthquake_mmi": None,
             "landslide_probability": None,
             "confirmed_by": _confirmed_by("flood"),
+            "diagnostics": _diagnostics("flood"),
         },
         {
             "hazard_type": "earthquake",
@@ -156,6 +187,7 @@ async def write_to_db(result: dict) -> None:
             "earthquake_mmi": result.get("earthquake_mmi"),
             "landslide_probability": None,
             "confirmed_by": _confirmed_by("earthquake"),
+            "diagnostics": _diagnostics("earthquake"),
         },
         {
             "hazard_type": "landslide",
@@ -165,6 +197,7 @@ async def write_to_db(result: dict) -> None:
             "earthquake_mmi": None,
             "landslide_probability": result.get("landslide_probability"),
             "confirmed_by": _confirmed_by("landslide"),
+            "diagnostics": _diagnostics("landslide"),
         },
     ]
 
@@ -177,8 +210,9 @@ async def write_to_db(result: dict) -> None:
                 INSERT INTO hazard_zones (
                     event_id, risk_level, hazard_type, severity,
                     confirmed_by, flood_depth_estimate, earthquake_mmi,
-                    landslide_probability, overall_confidence, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    landslide_probability, overall_confidence, diagnostics,
+                    created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ON CONFLICT (event_id, hazard_type) DO UPDATE SET
                     risk_level = EXCLUDED.risk_level,
                     severity = EXCLUDED.severity,
@@ -187,6 +221,7 @@ async def write_to_db(result: dict) -> None:
                     earthquake_mmi = EXCLUDED.earthquake_mmi,
                     landslide_probability = EXCLUDED.landslide_probability,
                     overall_confidence = EXCLUDED.overall_confidence,
+                    diagnostics = EXCLUDED.diagnostics,
                     created_at = EXCLUDED.created_at
                 """,
                 result["event_id"],
@@ -198,6 +233,7 @@ async def write_to_db(result: dict) -> None:
                 row["earthquake_mmi"],
                 row["landslide_probability"],
                 row["overall_confidence"],
+                row["diagnostics"],
                 created_at,
             )
     finally:
@@ -256,7 +292,7 @@ async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: 
         # UNKNOWN/0.0-confidence rows to hazard_zones so the DB reflects
         # "assessed, could not determine" rather than having no row at all.
         if raw_result.get("status") == "insufficient_data":
-            await write_to_db(raw_result)
+            await write_to_db(raw_result, primary_hazard_risk="UNKNOWN")
             return {
                 "agent": "hazardmind-hazard",
                 "event_id": event_id,
@@ -276,10 +312,18 @@ async def analyze_hazard(satellite_payload: dict, event_id: str, disaster_type: 
                 "error": raw_result.get("error") or "insufficient data for hazard analysis",
             }
 
-        await write_to_db(raw_result)
-
         primary_key = _PRIMARY_RISK_KEY.get(str(disaster_type or "").lower(), "flood_risk")
         primary_hazard_risk = raw_result.get(primary_key, "UNKNOWN")
+
+        # ORDERING FIX (durable-evidence-trail, 2026-07-28): primary_hazard_risk
+        # must be computed BEFORE write_to_db so it can actually reach
+        # confirmed_by/diagnostics. Previously write_to_db(raw_result) ran
+        # first (see the insufficient_data branch above, which still has this
+        # ordering since it hardcodes "UNKNOWN" as its own primary_hazard_risk
+        # and needs no computed value) — on the success path this meant
+        # primary_hazard_risk could never reach the DB row no matter what
+        # write_to_db did with it, per TESTING_GAP_AUDIT.md's finding.
+        await write_to_db(raw_result, primary_hazard_risk=primary_hazard_risk)
 
         payload = {
             "agent": "hazardmind-hazard",

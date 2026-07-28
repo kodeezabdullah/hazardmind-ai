@@ -266,7 +266,16 @@ class PipelineState(TypedDict):
 
 ## Database Schema (Current Live)
 
-⚠️ `shared/db/schema.sql` is **stale** — the live Neon DB has more columns than this file declares. Treat this as a floor, not a ceiling.
+**RESOLVED 2026-07-28 (durable-evidence-trail pass):** `shared/db/schema.sql` is
+now kept in sync with live Neon and is trustworthy again — it was rebuilt from
+a real `information_schema.columns` introspection and now matches live
+exactly (including the two structural corrections below: `satellite_results`
+and `impact_data` both have an INTEGER `SERIAL` PK on live Neon, not the UUID
+PK this file used to claim). Going forward, any column change must land in
+`shared/db/migrations/` (see the "Rules For Claude" entry on migrations) AND
+update this file in the same change — do not let it drift again. The
+narrative below (the historical mismatch findings) is kept for history, not
+because schema.sql is untrustworthy today.
 
 **`disaster_events`** — `event_id UUID PK`, `disaster_type`, `location`, `bbox FLOAT[]`, `created_at`. **Live DB also has** (not in schema.sql, confirmed by `backend/db.py` usage): `status`, `step`, `progress`, `magnitude`, `updated_at`, `band_room_id` (self-migrated via `ADD COLUMN IF NOT EXISTS` — this one becomes dead post-migration).
 
@@ -297,6 +306,37 @@ on ANY Neon instance, present or future. See `agents/impact/ANALYSIS.md` and
 resolves.
 
 **`final_reports`** — `id SERIAL`, `event_id`, `pdf_url`, `map_url`, `executive_summary`, `agent_log JSONB`, `total_time_seconds`, `confidence_level`, `created_at`. Matches live code.
+
+**`roads_blocked` vs `roads_blocked_km` RESOLVED (2026-07-28, coherence pass
+on `feat/durable-evidence-trail`).** H#14 (row above) added `roads_blocked_km`
+alongside the pre-existing `roads_blocked` but left which one is canonical
+implicit. Resolved:
+- **`roads_blocked_km` (DOUBLE PRECISION) is CANONICAL.** Correct name,
+  correct precision (1 decimal). All new readers must use this column.
+- **`roads_blocked` (INTEGER) is a write-time DERIVED LEGACY MIRROR**
+  (`int(round(roads_blocked_km))`), written in the SAME transaction from the
+  SAME source value as `roads_blocked_km` (`agents/impact/services/db.py`) —
+  the two cannot diverge within one run. It exists only so pre-H#14 rows
+  (written before `roads_blocked_km` existed) remain readable by old
+  callers — it is not a second source of truth.
+- **A real bug was found and fixed in this pass:** `agents/report/db_client.py`
+  read `impact.get("roads_blocked")` (the lossy INTEGER) and labelled it
+  `roads_blocked_km` in the report context — silently truncating precision
+  (e.g. a real `4.6` km value would report as `5`). Fixed to prefer the real
+  `roads_blocked_km` column (added to both of `_fetch_impact_data`'s
+  SELECTs), falling back to `roads_blocked` only for a pre-H#14 row where
+  `roads_blocked_km` was never written. `frontend/lib/loadHazardResult.ts`
+  already had this preference right (`roads_blocked_km` primary,
+  `roads_blocked` fallback) — only the report agent's read was wrong.
+- **Drop condition:** `roads_blocked` may only be dropped once (a) no
+  pre-H#14 rows remain in scope, AND (b) `loadHazardResult.ts`'s own
+  `roads_blocked` fallback read is removed — both conditions, not either.
+  Until then it stays, populated, unread by any new code.
+- **Do not swap which one is canonical.** `roads_blocked_km` stays canonical
+  even under pressure to consolidate the other way — its name and precision
+  are the correct ones, `roads_blocked`'s are not. The same note lives as a
+  column comment in `shared/db/schema.sql` so a schema-only reader doesn't
+  need this file to know which column to trust.
 
 ## Environment Variables (Complete List)
 
@@ -628,6 +668,28 @@ pre-existing environment issue, not a code regression). No live e2e was run
 this session, per the task's explicit scope — that is the natural next step
 once this lands.
 
+**PROJ_LIB RESOLVED (2026-07-28, coherence pass on `feat/durable-evidence-trail`).**
+The count above ("`test_bug_fixes.py`/`test_clip_window.py` fail") undercounted
+the real scope: it was **8 failures**, all in `test_bug_fixes.py` (7) and one
+in `test_correctness_fixes_20260727.py::test_scene_id_threaded_into_merged_result`
+(1) — `test_clip_window.py` itself was not actually among the failures, despite
+being named alongside `test_bug_fixes.py` in the passage above. Root cause,
+found precisely: this dev box's shell exports `PROJ_LIB` pointing at
+PostgreSQL/PostGIS's older `proj.db`. GDAL/rasterio reads and caches this at
+`import rasterio` time (module/driver-registration, not first CRS lookup) —
+once PROJ has initialized against a bad `proj.db` in a process, no later
+`os.environ["PROJ_LIB"]` reassignment can undo it; the fix has to land before
+rasterio is ever imported in that process. Fixed via
+`agents/satellite/tests/conftest.py`, which computes rasterio's own bundled
+`proj_data` directory path via a plain filesystem walk (no `import rasterio`)
+and pins `PROJ_LIB`/`PROJ_DATA` to it before any test module runs. All 8
+previously-failing tests now pass with no manual environment setup, on a
+shell that has the conflicting system `PROJ_LIB` exported. Full satellite
+suite re-verified: `test_bug_fixes.py`/`test_clip_window.py`/
+`test_correctness_fixes_20260727.py` 34/34 (was 26/34), full `tests/`
+directory 82/82. See `shared/db/migrations/` commit history for the rest of
+this pass's changes.
+
 **Threading.** `min_coverage_percent`/`max_scenes`/`max_download_gb`/
 `max_search_seconds` are optional fields on `backend/models.py`'s
 `AnalyzeRequest`, threaded through `backend/router.py`'s `disaster_data` →
@@ -707,4 +769,5 @@ cd agents/report && python agent.py demo-peshawar-flood --contract-test --no-llm
 - **`PipelineState` is the source of truth** for inter-agent data once migrated — not a Band room, not a re-read from DB (DB writes become a side effect, not the hand-off mechanism, though DB remains the durable record).
 - **If a file is marked dead code, delete it — don't refactor it.** (`stance_engine.py`, `services/featherless.py`, `services/criticality.py`, `shared/utils/band_client.py`, most of `frontend/components/`.)
 - **Any fix that adds a field to a result dict requires a survival assertion, not just a correctness assertion.** Proving a function computes a field correctly is not the same as proving it reaches its persistence point. Add a test that calls the agent's real entry point (`node.py`'s node function, or `agent.py`'s `run_pipeline`/`analyze_hazard`/`run_impact_analysis`, or `run_report_pipeline`) and asserts the new field is present in (a) the structured result, (b) `PipelineState` where it should cross an agent boundary, and (c) the DB row where it's meant to persist. Where it legitimately doesn't reach one of those levels, assert that absence explicitly — an absent assertion reads as an oversight, not a documented limit. Never fake this by grepping a function's source text or hand-copying its logic into the test; both drift silently from the real code while the test keeps passing. See `agents/satellite/tests/TESTING_GAP_AUDIT.md` for the incident this rule is based on (CHANGE 6 passed 12 tests while being invisible in production) and its 2026-07-28 follow-up.
+- **Any future column change goes through a migration file in `shared/db/migrations/`, never an inline `ALTER TABLE` in application code.** This repo's DB schema drifted from `shared/db/schema.sql` for exactly this reason — every prior schema change (`scene_age_days`, `impact_data.overall_confidence`, `roads_blocked_km`, etc.) was an inline `ADD COLUMN IF NOT EXISTS` buried in a write function, with no file recording *when* or *why* it happened. As of the durable-evidence-trail pass (2026-07-28), `shared/db/migrations/` holds numbered, additive, idempotent (`IF NOT EXISTS` everywhere) `.sql` files — `0001_baseline_drift.sql` captures everything that drifted in before this rule existed, `0002_durable_evidence_trail.sql` is the first change made under it. `shared/db/schema.sql` is the current-state snapshot for humans/tools to read; `migrations/` is the ordered change log — update both in the same change (schema.sql for what it now looks like, a new numbered migration file for how it got there).
 - For anything not covered here, check `CODEBASE.md` before re-reading source files — it has file-by-file detail, exact algorithms, and line numbers already extracted.

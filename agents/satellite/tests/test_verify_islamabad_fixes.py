@@ -133,6 +133,17 @@ def _process_result(**overrides):
         "gap_area_km2": 1.35,
         "gap_attribution": {"nodata": 40, "cloud": 120},
         "gap_limited_by": None,
+        # gap GEOMETRY itself (not just the count/area/attribution scalars
+        # above) — processor.py's _finish_success sets merged_result["gaps"]
+        # on every success path, but agent.py's structured{} construction
+        # never copied it (real bug, fixed feat/durable-evidence-trail): it
+        # was always None in _persist_satellite_result's diagnostics dict
+        # despite the write path assuming it would be populated. This mirrors
+        # a real gap polygon shape (see processor.py's _gap_geometry).
+        "gaps": [
+            {"area_km2": 0.9, "bbox": [73.02, 33.51, 73.03, 33.52], "cause": "cloud"},
+            {"area_km2": 0.45, "bbox": [73.05, 33.55, 73.06, 33.56], "cause": "nodata"},
+        ],
         "bounds": {"west": 73.0, "south": 33.5, "east": 73.1, "north": 33.6},
         "png_paths": {"true_color": "tc.png", "index_map": "im.png", "classification": "cl.png"},
         "geojson": {"type": "FeatureCollection", "features": []},
@@ -526,12 +537,30 @@ _STRUCTURED_SURVIVING_FIELDS = (
 )
 
 # Of those, only these are also columns in the satellite_results INSERT
-# (agent.py's _persist_satellite_result, L128-156) — confirmed by reading the
-# INSERT's column list, not by inference.
-_DB_PERSISTED_FIELDS = ("total_zones", "scene_id", "scene_age_days")
+# (agent.py's _persist_satellite_result) — confirmed by reading the INSERT's
+# column list, not by inference.
+#
+# UPDATED (feat/durable-evidence-trail, 2026-07-28): this used to be only
+# ("total_zones", "scene_id", "scene_age_days") — 11 of the 14 hardening-
+# effort fields lived only in structured/PipelineState with no DB column at
+# all (satellite's own confidence had NO column whatsoever). The durable-
+# evidence-trail migration (shared/db/migrations/0002_durable_evidence_trail.sql)
+# added real columns for confidence/confidence_basis/evidence_count/
+# coverage_percent/coverage_status/index_calibrated/index_units/
+# selection_reason/scene_cloud_percent/aoi_cloud_percent/scl_reused, so all
+# of those now persist too.
+_DB_PERSISTED_FIELDS = (
+    "total_zones", "scene_id", "scene_age_days",
+    "confidence", "confidence_basis", "evidence_count",
+    "coverage_percent", "coverage_status",
+    "index_calibrated", "index_units", "selection_reason",
+    "scene_cloud_percent", "aoi_cloud_percent", "scl_reused",
+)
 
 # The remaining structured/PipelineState fields were never added as DB
-# columns during this hardening effort — real gap, asserted explicitly.
+# COLUMNS (they instead go into the new `diagnostics` JSONB column — see
+# test_diagnostics_jsonb_roundtrips_gap_and_coverage_detail below, which
+# proves THAT survival path instead of asserting an absence here).
 _STRUCTURED_ONLY_NOT_DB_FIELDS = tuple(
     f for f in _STRUCTURED_SURVIVING_FIELDS if f not in _DB_PERSISTED_FIELDS
 )
@@ -599,9 +628,11 @@ def test_all_hardening_fields_survive_structured_and_state():
 
 
 def test_db_persisted_fields_survive_real_write():
-    print("\n[Field survival] total_zones/scene_id/scene_age_days survive "
-          "into the REAL satellite_results INSERT; the remaining "
-          "hardening-effort fields do NOT (real, documented gap)")
+    print("\n[Field survival] every durable-evidence-trail column (confidence, "
+          "confidence_basis, evidence_count, coverage_percent, coverage_status, "
+          "index_calibrated, index_units, selection_reason, scene_cloud_percent, "
+          "aoi_cloud_percent, scl_reused, scene_id, total_zones, scene_age_days) "
+          "survives into the REAL satellite_results INSERT")
     import types as _types
 
     sink = {}
@@ -609,14 +640,31 @@ def test_db_persisted_fields_survive_real_write():
     class _RecordingConn:
         async def execute(self, sql, *args):
             if sql.strip().startswith("INSERT INTO satellite_results"):
-                # Positional args per _persist_satellite_result's INSERT:
-                # event_id, satellite_type, cloud_cover, scene_id,
-                # true_color_url, index_url, classification_url, geojson_url,
+                # Positional args per _persist_satellite_result's INSERT
+                # (agent.py, feat/durable-evidence-trail): event_id,
+                # satellite_type, cloud_cover, scene_id, true_color_url,
+                # index_url, classification_url, geojson_url,
                 # affected_area_km2, total_zones, bounds, bbox, risk_cities,
-                # scene_age_days
+                # scene_age_days, confidence, confidence_basis,
+                # evidence_count, coverage_percent, coverage_status,
+                # index_calibrated, index_units, selection_reason,
+                # scene_cloud_percent, aoi_cloud_percent, scl_reused,
+                # diagnostics
                 sink["scene_id"] = args[3]
                 sink["total_zones"] = args[9]
                 sink["scene_age_days"] = args[13]
+                sink["confidence"] = args[14]
+                sink["confidence_basis"] = args[15]
+                sink["evidence_count"] = args[16]
+                sink["coverage_percent"] = args[17]
+                sink["coverage_status"] = args[18]
+                sink["index_calibrated"] = args[19]
+                sink["index_units"] = args[20]
+                sink["selection_reason"] = args[21]
+                sink["scene_cloud_percent"] = args[22]
+                sink["aoi_cloud_percent"] = args[23]
+                sink["scl_reused"] = args[24]
+                sink["diagnostics"] = args[25]
 
         async def close(self):
             pass
@@ -650,12 +698,26 @@ def test_db_persisted_fields_survive_real_write():
         "total_zones": 7,
         "scene_age_days": 2.5,
         "affected_area_km2": 3.0,
-        # These ride in structured/PipelineState but are NOT INSERT columns —
-        # if this ever changes, this test must be updated deliberately.
+        "confidence": 0.77,
         "confidence_basis": "evidence_supports",
         "evidence_count": 3,
+        "coverage_percent": 96.4,
+        "coverage_status": "target_met",
+        "index_calibrated": True,
+        "index_units": "NDWI_ratio",
         "selection_reason": "aoi_scl_measured",
+        "scene_cloud_percent": 18.5,
+        "aoi_cloud_percent": 5.2,
         "scl_reused": True,
+        "gap_count": 0,
+        "gap_area_km2": 0.0,
+        "gap_attribution": {"nodata": 0, "cloud": 0},
+        "gap_limited_by": None,
+        "coverage_tier": 1,
+        "temporal_spread_days": 0,
+        "acquisition_count": 1,
+        "bytes_downloaded": 123456,
+        "processing_level": "L2A",
     }
     error = agent._persist_satellite_result("evt-db-survival", structured)
 
@@ -664,50 +726,75 @@ def test_db_persisted_fields_survive_real_write():
     else:
         bad(f"_persist_satellite_result unexpectedly failed: {error}")
 
-    if sink.get("scene_id") == "scene-survival-test":
-        ok("scene_id survives into the real satellite_results INSERT")
+    expected_scalar = {
+        "scene_id": "scene-survival-test",
+        "total_zones": 7,
+        "scene_age_days": 2.5,
+        "confidence": 0.77,
+        "confidence_basis": "evidence_supports",
+        "evidence_count": 3,
+        "coverage_percent": 96.4,
+        "coverage_status": "target_met",
+        "index_calibrated": True,
+        "index_units": "NDWI_ratio",
+        "selection_reason": "aoi_scl_measured",
+        "scene_cloud_percent": 18.5,
+        "aoi_cloud_percent": 5.2,
+        "scl_reused": True,
+    }
+    all_scalar_ok = True
+    for field, expected in expected_scalar.items():
+        actual = sink.get(field)
+        if actual != expected:
+            all_scalar_ok = False
+            bad(f"{field} did not survive into the real INSERT: expected "
+                f"{expected!r}, got {actual!r}")
+    if all_scalar_ok:
+        ok(f"all {len(expected_scalar)} durable-evidence-trail scalar columns "
+           f"(confidence/confidence_basis/evidence_count/coverage_percent/"
+           f"coverage_status/index_calibrated/index_units/selection_reason/"
+           f"scene_cloud_percent/aoi_cloud_percent/scl_reused/scene_id/"
+           f"total_zones/scene_age_days) survive into the real "
+           f"satellite_results INSERT (previously 11 of these had NO DB "
+           f"column at all)")
+
+    # diagnostics JSONB round-trip: confirm the full structure (gap detail,
+    # coverage tier/temporal spread/acquisition count, bytes, processing
+    # level) is what actually got written, not just a subset.
+    diagnostics_json = sink.get("diagnostics")
+    diagnostics = json.loads(diagnostics_json) if isinstance(diagnostics_json, str) else diagnostics_json
+    expected_diag_keys = {
+        "gap_count", "gap_area_km2", "gap_attribution", "gap_limited_by",
+        "coverage_tier", "temporal_spread_days", "acquisition_count",
+        "bytes_downloaded", "processing_level",
+    }
+    if diagnostics and expected_diag_keys.issubset(diagnostics.keys()):
+        ok(f"diagnostics JSONB round-trips its full structure: "
+           f"{sorted(expected_diag_keys)} all present, "
+           f"gap_attribution={diagnostics.get('gap_attribution')!r}, "
+           f"coverage_tier={diagnostics.get('coverage_tier')!r}")
     else:
-        bad(f"scene_id did not survive into the INSERT: {sink}")
-
-    if sink.get("total_zones") == 7:
-        ok("total_zones survives into the real satellite_results INSERT")
-    else:
-        bad(f"total_zones did not survive into the INSERT: {sink}")
-
-    if sink.get("scene_age_days") == 2.5:
-        ok("scene_age_days survives into the real satellite_results INSERT "
-           "(islamabad-findings #4, confirmed via the real write path)")
-    else:
-        bad(f"scene_age_days did not survive into the INSERT: {sink}")
-
-    # Real gap: confidence_basis/evidence_count/selection_reason/scl_reused
-    # (and every other _STRUCTURED_ONLY_NOT_DB_FIELDS entry) are not INSERT
-    # columns at all — the INSERT's own column list (agent.py L135-139)
-    # names only 14 fixed columns, none of which are these. Confirmed
-    # structurally: the fake connection only ever captures the 3 positions
-    # above, so there is nothing further to look for in `sink`.
-    ok(f"confirmed (by reading _persist_satellite_result's INSERT column "
-       f"list): {_STRUCTURED_ONLY_NOT_DB_FIELDS} are NOT persisted to "
-       f"satellite_results — real gap, not a silently-passing assumption")
+        bad(f"diagnostics JSONB missing expected keys: {diagnostics}")
 
 
-def test_gap_fields_survive_success_path_structured_but_not_db():
-    """REAL BUG FOUND BY THIS AUDIT PASS, FIXED HERE: processor.py's
+def test_gap_fields_survive_success_path_structured_and_diagnostics_jsonb():
+    """REAL BUG FOUND BY A PRIOR AUDIT PASS, FIXED THERE: processor.py's
     _finish_success computes gap_count/gap_area_km2/gap_attribution/
     gap_limited_by/coverage_status on EVERY success path (target_met AND
     below_target_coverage — see processor.py ~L3056-3069), but agent.py
     previously only ever copied them into a payload on the
-    insufficient_coverage FAILURE branch (_coverage_failure). A "complete"
-    run with below-target coverage silently dropped its own gap telemetry
-    before it ever reached structured/PipelineState/the DB. Fixed in
-    agent.py's structured{} construction (this session); this test proves
-    the fix via a real agent.run_pipeline() call, and pins the remaining,
-    unfixed half of the gap: these fields still aren't columns in the
-    satellite_results INSERT."""
+    insufficient_coverage FAILURE branch (_coverage_failure). Fixed in an
+    earlier session; this test proves the fix via a real
+    agent.run_pipeline() call.
+
+    UPDATED (feat/durable-evidence-trail): these fields previously reached
+    structured/PipelineState but had NO DB column at all — this test now
+    also proves they reach the durable diagnostics JSONB column via a real
+    _persist_satellite_result() call, closing what was a real, documented
+    gap in the prior pass."""
     print("\n[Field survival] coverage_status/gap_count/gap_area_km2/"
-          "gap_attribution/gap_limited_by now survive into a real "
-          "complete-status structured result (previously silently dropped "
-          "on every success path)")
+          "gap_attribution/gap_limited_by survive into a real complete-status "
+          "structured result AND into the durable diagnostics JSONB column")
     search_calls = []
     mocks = _common_mocks(search_calls)
     restore = _install(mocks)
@@ -743,15 +830,87 @@ def test_gap_fields_survive_success_path_structured_but_not_db():
             f"gap_area_km2={result.get('gap_area_km2')!r}, "
             f"gap_attribution={result.get('gap_attribution')!r}")
 
-    # Real, still-open gap: satellite_results' INSERT (agent.py
-    # _persist_satellite_result) does not name any of these columns —
-    # confirmed by reading the same INSERT column list checked in
-    # test_db_persisted_fields_survive_real_write.
-    ok("confirmed (by reading _persist_satellite_result's INSERT column "
-       "list): coverage_status/gap_count/gap_area_km2/gap_attribution/"
-       "gap_limited_by reach structured/PipelineState but are NOT "
-       "persisted to satellite_results — real gap, flagged not fixed "
-       "(out of scope: would need a schema change)")
+    # gap GEOMETRY (durable-evidence-trail): processor.py sets it on every
+    # success path but agent.py's structured{} construction never copied it
+    # — a real bug this pass fixed (structured["gaps"] was always None
+    # before the fix, so _persist_satellite_result's diagnostics dict could
+    # never carry gap geometry no matter what processor computed).
+    if result.get("gaps") == _process_result()["gaps"]:
+        ok(f"gap geometry (structured['gaps']) survives into a real "
+           f"successful structured result: {result['gaps']!r}")
+    else:
+        bad(f"gap geometry missing/wrong in a real successful structured "
+            f"result: gaps={result.get('gaps')!r}")
+
+    # coverage_status/coverage_percent are now real DB COLUMNS (durable-
+    # evidence-trail); gap_count/gap_area_km2/gap_attribution/gap_limited_by
+    # went into the diagnostics JSONB instead (queried rarely, not
+    # filtered/sorted/aggregated on) — confirmed via a real
+    # _persist_satellite_result() call against a fake DB that records the
+    # actual INSERT parameters, not by re-reading agent.py's source.
+    import types as _types
+    sink = {}
+
+    class _RecordingConn2:
+        async def execute(self, sql, *args):
+            if sql.strip().startswith("INSERT INTO satellite_results"):
+                sink["coverage_status"] = args[18]
+                sink["diagnostics"] = args[25]
+
+        async def close(self):
+            pass
+
+        def transaction(self):
+            class _Txn:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Txn()
+
+    fake_asyncpg = _types.ModuleType("asyncpg")
+
+    async def _connect(url):
+        return _RecordingConn2()
+
+    fake_asyncpg.connect = _connect
+    sys.modules["asyncpg"] = fake_asyncpg
+    os.environ["NEON_DATABASE_URL"] = "postgres://fake/db"
+
+    import importlib
+    importlib.reload(agent)
+    agent._persist_satellite_result("evt-gap-fields-db", result)
+
+    if sink.get("coverage_status") == "below_target_coverage":
+        ok("coverage_status survives as a real DB column via a real write call")
+    else:
+        bad(f"coverage_status missing/wrong in the real INSERT: {sink}")
+
+    diagnostics_json = sink.get("diagnostics")
+    diagnostics = json.loads(diagnostics_json) if isinstance(diagnostics_json, str) else diagnostics_json
+    if (
+        diagnostics
+        and diagnostics.get("gap_count") == 2
+        and diagnostics.get("gap_area_km2") == 1.35
+        and diagnostics.get("gap_attribution") == {"nodata": 40, "cloud": 120}
+    ):
+        ok(f"gap_count/gap_area_km2/gap_attribution survive into the real "
+           f"diagnostics JSONB column: {diagnostics}")
+    else:
+        bad(f"gap telemetry missing/wrong in the real diagnostics JSONB "
+            f"write: {diagnostics}")
+
+    # gap GEOMETRY inside diagnostics — the specific field this pass fixed
+    # (previously always None: structured never carried "gaps" so
+    # _persist_satellite_result's diagnostics.get("gaps") had nothing to read).
+    if diagnostics and diagnostics.get("gaps") == _process_result()["gaps"]:
+        ok(f"gap geometry (diagnostics['gaps']) survives into the real "
+           f"diagnostics JSONB write: {diagnostics.get('gaps')!r}")
+    else:
+        bad(f"gap geometry missing/wrong in the real diagnostics JSONB "
+            f"write: gaps={diagnostics.get('gaps') if diagnostics else None!r}")
 
 
 if __name__ == "__main__":
@@ -766,7 +925,7 @@ if __name__ == "__main__":
     test_fractional_water_percent_normalised_not_misread_as_100x()
     test_all_hardening_fields_survive_structured_and_state()
     test_db_persisted_fields_survive_real_write()
-    test_gap_fields_survive_success_path_structured_but_not_db()
+    test_gap_fields_survive_success_path_structured_and_diagnostics_jsonb()
     print("=" * 70)
     print(f"SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 70)

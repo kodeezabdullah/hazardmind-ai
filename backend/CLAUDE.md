@@ -19,6 +19,7 @@ LangGraph `StateGraph` (backend/graph.py)
 POST /analyze         -> Start pipeline
 GET  /status/{id}     -> Check progress
 GET  /results/{id}    -> Final results
+GET  /results/{id}/evidence -> Full durable-evidence trail (diagnostics/confidence/provenance, feat/durable-evidence-trail)
 GET  /pipeline-log/{id} -> errors/anomalies/confidence_scores trail
 GET  /health          -> Health check
 
