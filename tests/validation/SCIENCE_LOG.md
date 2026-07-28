@@ -20,6 +20,7 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 2 | Phase 1a SCL masking in index | 439d5c0 | Kanalia S2 | 0.9722 | 0.9839 | 0.9880 | 0.9859 | 0.7092 (supports) | metrics identical (clear-sky scene: ~0 SCL-invalid px to mask); conf -0.005 (noise) | **KEPT** | no regression; correctness change guards cloudy events this set cannot exercise |
 | 2 | Phase 1a | 439d5c0-dirty | Paiporta S2 ×2 | undefined (0 zones, unchanged) | — | — | — | 0.4237 (**evidence_weak** — first live 0b-2 label) | basis label now informative | KEPT | — |
 | 2 | Phase 1a | 439d5c0-dirty | Insh S2 | undefined (0 zones, unchanged) | — | — | — | 0.3234 (**evidence_weak**) | — | KEPT | — |
+| 3 | Phase 1b MNDWI (Xu 2006), thresholds held | 55d555a | Kanalia S2 | 0.9726 | 0.9866 | 0.9856 | 0.9861 | 0.700 (weak — sits exactly at the 0.70 verification boundary; 1a was 0.7092/supports, a rounding-boundary artifact not a signal change) | precision +0.0027, recall -0.0024, F1 +0.0002 | **KEPT** | small clean win on a RURAL event (little built-up to suppress — the formula's target class); lower bound: NDWI-era 0.3/0.5 cuts don't fit MNDWI's distribution (22.24% of AOI lands in the 0.0-0.3 wet_soil band vs 0.01% above 0.3) — Phase 2's adaptive threshold is where the rest of this change's value unlocks. Measured on the Kanalia gate per the leaner cadence (change cannot create zones at the degenerate events; full sweep reserved for Phase 2/3). |
 
 ## Cumulative download cost (this session)
 
@@ -30,7 +31,8 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | Phase 0b measurement: Insh S2 | 408 |
 | Pre-0b pinned-AOI re-baseline: Kanalia S2 | 414 |
 | Phase 1a measurement: Kanalia + Paiporta ×2 + Insh | 1,674 |
-| **Running total** | **3,762 MB (~3.8 GB)** |
+| Phase 1b measurement: Kanalia gate | 414 |
+| **Running total** | **4,176 MB (~4.2 GB)** |
 
 ---
 
