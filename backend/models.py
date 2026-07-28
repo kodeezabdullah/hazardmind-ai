@@ -50,3 +50,26 @@ class PipelineLogResponse(BaseModel):
     errors: List[dict]
     anomalies: List[dict]
     confidence_scores: dict
+
+
+class EvidenceResponse(BaseModel):
+    """Full durable-evidence trail for a past event (feat/durable-evidence-trail).
+
+    Distinct from ResultsResponse: /results returns the summary fields a
+    frontend renders; this returns every diagnostics/confidence/provenance
+    field the durable-evidence-trail migration added, across satellite,
+    hazard (one entry per hazard_type) and impact — so a past run can be
+    audited (e.g. "why LOW?") without re-running the pipeline. A NULL/None
+    value anywhere in these dicts means "not recorded" (the row predates
+    this migration, or the field never reached a DB column) — never coerce
+    it to 0/False; callers must render it as unknown.
+    """
+
+    job_id: str
+    disaster_type: Optional[str] = None
+    location: Optional[str] = None
+    status: str
+    step: str
+    satellite: Optional[dict] = None
+    hazard_zones: Optional[List[dict]] = None
+    impact: Optional[dict] = None

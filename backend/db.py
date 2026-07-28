@@ -171,6 +171,41 @@ async def get_pipeline_log(event_id: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+async def get_event_evidence(event_id: str) -> Optional[dict]:
+    """Return the full durable-evidence trail for a past event: every
+    diagnostics/confidence/provenance field the durable-evidence-trail
+    migration added, across all 4 stage tables, not just the summary fields
+    GET /results returns. A NULL in any of these columns means "not
+    recorded" (the run predates this migration, or the field legitimately
+    never reached a DB column) — never coerce it to 0/False here; the
+    caller (frontend/report/any consumer) must handle NULL as unknown.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                e.event_id,
+                e.disaster_type,
+                e.location,
+                e.status,
+                e.step,
+                to_jsonb(s) - 'event_id' AS satellite,
+                (
+                    SELECT jsonb_agg(to_jsonb(h) - 'event_id' ORDER BY h.hazard_type)
+                    FROM hazard_zones h WHERE h.event_id = e.event_id
+                ) AS hazard_zones,
+                to_jsonb(i) - 'event_id' AS impact
+            FROM disaster_events e
+            LEFT JOIN satellite_results s ON s.event_id = e.event_id
+            LEFT JOIN impact_data i ON i.event_id = e.event_id
+            WHERE e.event_id = $1
+            """,
+            event_id,
+        )
+        return dict(row) if row else None
+
+
 async def get_event_results(event_id: str) -> Optional[dict]:
     """Return the complete results by joining all 5 pipeline tables."""
     pool = await get_pool()

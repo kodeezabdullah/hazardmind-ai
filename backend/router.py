@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from db import (
     count_active_events,
     create_disaster_event,
+    get_event_evidence,
     get_event_results,
     get_event_status,
     get_pipeline_log,
@@ -18,6 +19,7 @@ from orchestrator import OrchestratorAgent
 from models import (
     AnalyzeRequest,
     AnalyzeResponse,
+    EvidenceResponse,
     PipelineLogResponse,
     ResultsResponse,
     StatusResponse,
@@ -128,6 +130,41 @@ async def get_results(job_id: str):
         hazard=event["hazard"],
         impact=event["impact"],
         report=event["report"],
+    )
+
+
+@router.get("/results/{job_id}/evidence", response_model=EvidenceResponse)
+async def get_results_evidence(job_id: str):
+    """Return the full durable-evidence trail for a past event.
+
+    A new, additive endpoint rather than an expansion of GET /results:
+    /results is the summary the frontend already renders on every poll, and
+    its ResultsResponse shape is a load-bearing contract other readers may
+    already depend on. The evidence trail (confidence/coverage/provenance/
+    diagnostics — everything the durable-evidence-trail migration added) is
+    materially larger and is read far less often (an audit/"why LOW?" case,
+    not every poll), so it gets its own endpoint instead of bloating every
+    /results response with fields most callers never look at.
+
+    Available regardless of whether the event has finished (satellite/
+    hazard/impact rows are readable as soon as each stage completes) — this
+    endpoint does not gate on status == "complete" the way /results does,
+    since an evidence trail for a partially-run event is still useful for
+    debugging why a stage failed.
+    """
+    event = await get_event_evidence(job_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    return EvidenceResponse(
+        job_id=str(event["event_id"]),
+        disaster_type=event.get("disaster_type"),
+        location=event.get("location"),
+        status=event["status"],
+        step=event["step"],
+        satellite=event.get("satellite"),
+        hazard_zones=event.get("hazard_zones"),
+        impact=event.get("impact"),
     )
 
 
