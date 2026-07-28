@@ -97,6 +97,9 @@ def test_ndwi_still_validated_when_calibrated():
         "index_calibrated": True,
         "index_units": "NDWI_ratio",
         "mean_index": 0.4,
+        # Phase 0b: the physics check now judges the within-water mean, so the
+        # contract payload carries it (calculate_indices always produces it).
+        "affected_mean_index": 0.45,
         "water_percent": 30.0,
         "coverage_percent": 100,
     }

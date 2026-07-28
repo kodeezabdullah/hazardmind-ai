@@ -964,6 +964,10 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "index_calibrated": result.get("index_calibrated"),
             "index_units": result.get("index_units"),
             "mean_index": result.get("mean_index"),
+            # Phase 0b — the physics check compares THIS (mean over the
+            # classified water pixels), not the whole-AOI mean, against water
+            # thresholds. Whole-AOI mean_index stays as context only.
+            "affected_mean_index": result.get("affected_mean_index"),
             "water_percent": result.get("water_percent"),
             "coverage_percent": result.get("valid_percent"),
             "valid_percent": result.get("valid_percent"),
@@ -985,6 +989,7 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # INTEGRATION POINT 4 — expert interpretation of the raw GIS numbers.
         index_stats = {
             "mean_index": result.get("mean_index"),
+            "affected_mean_index": result.get("affected_mean_index"),
             "water_percent": result.get("water_percent"),
             "class_counts": result.get("class_counts"),
             "valid_percent": result.get("valid_percent"),
@@ -1074,6 +1079,12 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "index_type": result["index_type"],
             "water_percent": result["water_percent"],
             "mean_index": result["mean_index"],
+            # Phase 0b — mean index over classified-affected pixels only (the
+            # within-water mean for flood). None when nothing was classified.
+            # This is the value the index-physics check and every downstream
+            # LLM prompt should compare against water thresholds; the
+            # whole-AOI mean_index above is context, never counter-evidence.
+            "affected_mean_index": result.get("affected_mean_index"),
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
             # The satellite_results INSERT names these columns; total_zones was

@@ -1878,6 +1878,20 @@ def calculate_indices(
     mean_value = (
         round(float(np.nanmean(index[valid])), 4) if valid_count else 0.0
     )
+    # Phase 0b (science/full-pass): mean index over the CLASSIFIED-AFFECTED
+    # pixels only (for flood: the within-water mean). The whole-AOI
+    # `mean_value` stays negative until ~43% of the AOI is water, so any
+    # physics check comparing IT against a water threshold fires on every
+    # realistic partial flood. The correct support for that comparison is the
+    # affected-pixel population — if the classification is physically sound,
+    # THIS mean sits above the water threshold regardless of flooded fraction.
+    # None (not 0.0) when nothing was classified affected: "no affected
+    # pixels" and "affected pixels averaging 0" are different claims.
+    affected_mean_index = (
+        round(float(np.nanmean(index[affected_mask])), 4)
+        if affected_count
+        else None
+    )
 
     # Per-class pixel counts (skip class 0 / nodata) for reporting.
     class_counts = {}
@@ -1900,6 +1914,7 @@ def calculate_indices(
         "classification_array": classification,
         "water_percent": water_percent,
         "mean_value": mean_value,
+        "affected_mean_index": affected_mean_index,
         "threshold_used": threshold,
         "class_counts": class_counts,
         # BUG 5 calibration contract (see the branch above).
@@ -2536,6 +2551,9 @@ def _render_clip(
         "index_type": indices["index_type"],
         "water_percent": indices["water_percent"],
         "mean_index": indices["mean_value"],
+        # Phase 0b: mean index over classified-affected pixels only (the
+        # within-water mean on the flood path); None when nothing classified.
+        "affected_mean_index": indices.get("affected_mean_index"),
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         # BUG 5 — calibration contract rides through to the result dict.
