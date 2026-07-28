@@ -464,8 +464,17 @@ def _install_stubs(monkeypatch_targets):
 
 
 def test_bug3_partial_coverage_fails_not_risk():
-    print("\n[BUG 3] a mosaic reaching only 95% returns status=failed, no risk")
-    # Two scenes, same date/orbit; the cumulative clip never exceeds 95% valid.
+    print("\n[BUG 3 / coverage-tolerance] a mosaic below COVERAGE_FLOOR (80%) "
+          "returns status=failed, no risk")
+    # UPDATED 2026-07-28 (fix/coverage-tolerance): the old rule required
+    # EXACTLY 100% or hard-failed, so a 95% mosaic was the "fails honestly"
+    # case. Coverage is now a caller-controlled quality band (see
+    # processor.py's DEFAULT_MIN_COVERAGE_PERCENT=90 / COVERAGE_FLOOR=80) —
+    # 95% is now well above even the default TARGET and legitimately
+    # succeeds as "complete" (see test_coverage_tolerance.py's
+    # test_97_percent_completes_with_penalty for that case). This test now
+    # exercises the real hard-fail case: coverage below the 80% FLOOR, which
+    # still returns status=failed/insufficient_coverage exactly as before.
     s1 = _scene("S2_..._20260710T0_T43SCT_a.SAFE", "2026-07-10T05:46:41Z", 91, pid="a")
     s2 = _scene("S2_..._20260710T0_T43SCT_b.SAFE", "2026-07-10T05:46:41Z", 91, pid="b")
 
@@ -476,10 +485,10 @@ def test_bug3_partial_coverage_fails_not_risk():
         return {"_stacked": {}, "shape": (10, 10), "n": len(scenes)}
 
     def fake_compute_coverage(clipped):
-        # Never reaches 100%: best interior is 95%.
+        # Never reaches the floor: best interior is 70% (< COVERAGE_FLOOR=80).
         return {
-            "interior_coverage_percent": 95.0,
-            "full_aoi_coverage_percent": 94.0,
+            "interior_coverage_percent": 70.0,
+            "full_aoi_coverage_percent": 69.0,
             "covered": False,
             "gaps": [{"pixels": 50, "area_km2": 0.5,
                       "bbox": {"west": 73.0, "south": 33.5,

@@ -53,6 +53,11 @@ async def analyze(request: AnalyzeRequest):
         "location": request.location,
         "disaster_type": request.disaster_type,
         "magnitude": request.magnitude,
+        # Coverage-tolerance / search-budget overrides (fix/coverage-tolerance).
+        "min_coverage_percent": request.min_coverage_percent,
+        "max_scenes": request.max_scenes,
+        "max_download_gb": request.max_download_gb,
+        "max_search_seconds": request.max_search_seconds,
     }
 
     await create_disaster_event(

@@ -388,6 +388,278 @@ Not done (explicitly out of scope, science-model gaps): H#7 (SAR
 calibration), H#8 (population exposure model), H#9/H#13/H#15/H#16 (lower
 system-level severity per `SYSTEM_ANALYSIS.md`'s own ranking, not touched).
 
+## Coverage Tolerance Fix Pass (2026-07-28, branch `fix/coverage-tolerance`)
+
+`agents/satellite/processor.py`'s `process_satellite_imagery` previously
+demanded **exactly 100.0% interior-AOI valid-pixel coverage** or hard-failed
+with `status:"failed", reason:"insufficient_coverage"` — see
+`agents/satellite/ANALYSIS.md` §2.3's original "100%-or-fail" description
+(now annotated as superseded, not deleted). That rule existed to stop the
+pipeline from silently reporting a partial AOI as a complete analysis — a
+real goal — but enforced it by refusing to answer instead of answering
+honestly with the limitation stated. It also turned ordinary cloud cover into
+an unbounded search: a live run on a 2.4x2.7 km town took 6 hours across 4
+scenes, because cloud gaps cannot be downloaded away — if the sky was covered
+that week, no amount of additional scenes closes the gap, so the old rule
+could never terminate successfully in exactly the weather conditions where
+flood analysis matters most.
+
+**Coverage is now a caller-controlled quality band, not a single cliff**
+(`processor.py`'s `DEFAULT_MIN_COVERAGE_PERCENT`/`COVERAGE_FLOOR`/
+`COVERAGE_CEILING` = 90/80/100). A caller-supplied `min_coverage_percent` is
+clamped server-side into `[80, 100]` — non-negotiable in both directions: a
+caller cannot ask for less than 80% (too poorly sampled to mean anything) or
+more than 100% (meaningless). The achieved `interior_coverage_percent` bands
+into one of three outcomes:
+- **`>= min_coverage_percent`** → `status:"complete"`,
+  `coverage_status:"target_met"`, a small proportional confidence penalty for
+  any shortfall from 100 (`(100 - coverage) * COVERAGE_PENALTY_SCALE`, fed to
+  the `ConfidenceTracker` as reduced evidence, not a hardcoded cliff).
+- **`>= COVERAGE_FLOOR` and `< min_coverage_percent`** → still
+  `status:"complete"`, but `coverage_status:"below_target_coverage"`, a
+  doubled penalty, a HIGH-severity tracker concern, and an entry in
+  `coverage_anomalies`.
+- **`< COVERAGE_FLOOR`** → `status:"failed"`, `reason:"insufficient_coverage"`
+  — the same hard-stop shape as before, just floor-driven (80.0) instead of
+  100.0-driven.
+The rule that matters — never report a partial analysis as complete without
+saying so — is unchanged; only the enforcement mechanism moved from refusal
+to explicit, always-present reporting. Every run now carries
+`coverage_percent`, `coverage_status`, `gap_count`, `gap_area_km2`,
+`gap_attribution` (nodata vs cloud pixel/area split) and `gaps` (geometry) on
+**every** path, not just the failure path as before.
+
+**Hard search budgets, independent of coverage** — the actual runaway-cost
+fix. `max_scenes` (default 3), `max_download_gb` (default 4.0),
+`max_search_seconds` (default 900.0) bound the WHOLE tiered search (across
+all tiers, not per-tier; the pre-existing `DOOMED_DOWNLOAD_LIMIT` only ever
+aborted a single tier on consecutive failures, never the total search cost).
+Exhausting any budget stops immediately (no new download starts) and returns
+the best coverage achieved so far, banded the same way as above —
+`budget_exhausted` names which limit tripped (`"max_scenes"` /
+`"max_download_gb"` / `"max_search_seconds"`). One `[BUDGET]` log line per
+scene attempt shows the running total against each limit before it's spent.
+
+**Un-closeable gaps stop being chased (CHANGE 3).** Before attempting a
+candidate scene, its footprint must genuinely intersect the remaining gap
+geometry (`_scene_intersects_gaps`, a real shapely intersection test against
+the gap bboxes, not "try it and see"). When the remaining gap is
+cloud-attributed (`gap_cause["cloud"] > gap_cause["nodata"]`) and no
+remaining candidate has materially lower cloud cover than what was already
+tried (a 5-point margin), the search stops and reports
+`gap_limited_by:"cloud"` rather than continuing to burn budget on scenes that
+can't help. This uses whichever cloud figure is available per-scene — the
+AOI-restricted one from CHANGE 6 when present, else the scene-level catalogue
+figure (`_scene_cloud_for_gap_check`).
+
+**Marginal-return stopping (CHANGE 4).** The pre-existing near-zero (0.01)
+doomed-streak check (raw duplicate-contribution detection) is unchanged. A
+NEW, separate check: once an acquisition is accepted (gained > 0.01) but
+gains less than `MIN_MARGINAL_COVERAGE_GAIN` (2.0 percentage points), the
+search stops entirely (not just skips that scene) — `marginal_return_stop` in
+`coverage_anomalies`, banded per the coverage rules above.
+
+**Per-satellite tier windows (CHANGE 5, `sentinel.py`).**
+`COVERAGE_TIERS_S2` (0/±3/±7/±14 days, unchanged) and `COVERAGE_TIERS_S1`
+(0/±10/±14 — the old ±3/±7 intermediate steps collapsed into one ±10-day
+same-orbit window). S1's same-relative-orbit revisit over Pakistan was
+measured ~11 days (live CDSE query, 2026-07-27 — see
+`agents/satellite/CLAUDE.md`'s "Tier-window revisit analysis" and the
+confirming live-e2e finding in this file's "S1 coverage tiers 1-3
+exactly-0.000%" entry above), so any tier narrower than one revisit cycle is
+a structural near-no-op for S1 — there was nothing for ±3/±7 to find, ever,
+regardless of window tuning. S2's combined-constellation ~5-day revisit
+already matched its existing tiers; left untouched. `build_coverage_tiers`
+now selects the right tuple via `coverage_tiers_for(satellite_type)`;
+`COVERAGE_TIERS` is kept as a back-compat alias for the S2 tuple. Re-measure
+the S1 figure once the post-June-2026 constellation configuration
+(Sentinel-1A retired 2026-06-29) has a clean 90-day history — the 6-day
+S1C/1D repeat cycle is Europe-concentrated per ESA/ASF planning and does not
+yet apply globally.
+
+**AOI-restricted cloud measurement (CHANGE 6) — COMPLETE (2026-07-28,
+second pass).** `CLOUD_COVER_THRESHOLD` (30%) was applied to the scene's
+whole-tile cloud percentage, not the AOI — a scene can be 45% cloudy across
+its full footprint and completely clear over a small town (or vice versa); a
+real run selected the uncalibrated SAR path on a 45.9% scene-level reading
+without ever checking whether the AOI itself was obscured, when the optical
+path may have been perfectly usable.
+
+The first pass on this branch left the SCL pre-fetch itself undone (documented
+as a partial implementation, with `select_satellite`/`_peek_cloud_cover`
+staying a download-free metadata-only catalogue query). This pass closes that
+gap without the restructure that first pass thought it needed: instead of
+teaching `sentinel.select_satellite` to download (which would still cycle
+back into `processor.py`), the orchestration moved up a level, into
+`agents/satellite/agent.py`, which already imports from both modules:
+
+1. `agent.py` queries the S2 catalogue for the best candidate
+   (`sentinel.search_imagery(bbox, SENTINEL_2, aoi_geom=merged)`) FIRST, even
+   when the disaster hint points at S1 — the query is free and a real scene
+   object (with an `Id`) is required to peek at all. No S2 candidate in the
+   window → S1 is selected immediately, `selection_reason="no_s2_candidates"`,
+   nothing to measure.
+2. The candidate's scene-level `cloudCover` attribute decides whether a peek
+   is worth its cost, via `processor.peek_needed()`:
+   - `< PEEK_CLEAR_BELOW = 15.0` → clearly clear, select S2, no peek.
+   - `> PEEK_CLOUDY_ABOVE = 50.0` → clearly cloudy, select S1, no peek.
+   - in between → genuinely ambiguous, peek.
+   **Basis for the two cut points** (`processor.py`, next to the constants):
+   below 15% the scene-level reading already has enough margin under the 30%
+   threshold that a materially worse AOI-local reading is unlikely to flip
+   the decision; above 50% an AOI clear enough to flip the decision back to
+   S2 would be a large, unusual divergence, so the default (weather-independent
+   SAR) is taken rather than paying for a peek on every heavily overcast
+   scene. This mirrors the live incident this fix targets (a 45.9%
+   scene-level reading, squarely inside the ambiguous band) while not
+   spending a download on the two-thirds of scenes where the scene-level
+   figure already settles it.
+3. On a peek, `processor.peek_aoi_cloud_percent(scene, merged_polygon,
+   event_id, token_manager, remaining_download_gb=...)` downloads ONLY the
+   SCL band via the existing per-band Nodes path
+   (`_download_bands_via_nodes(..., ["SCL"], "sentinel-2")`), reuses
+   `stack_bands`/`clip_to_polygon` unchanged (both are generic over any band
+   set, so a single-band SCL "cube" clips exactly like a full one), erodes
+   the clip mask by one pixel (the same interior-AOI convention
+   `compute_coverage` uses) and measures the invalid fraction with the SAME
+   `_SCL_INVALID_CLASSES` set the coverage metric already uses. `select_satellite`
+   itself stayed synchronous and download-free, exactly as the first pass's
+   docstring said it should — it now just accepts an optional pre-computed
+   `aoi_cloud_percent`/`aoi_cloud_reason` and applies `CLOUD_COVER_THRESHOLD`
+   to the AOI figure when one is present, falling back to the scene-level
+   figure otherwise.
+4. If S2 is selected, the peeked SCL is never re-downloaded: the peek writes
+   it to the SAME bands directory `download_imagery` uses for a single
+   accepted scene (`<temp>/<event_id>/bands/SCL.jp2` — `download_imagery`
+   only switches to a per-scene `scene_<Id>` subdir once a real multi-scene
+   mosaic is assembled, `len(scenes) > 1`, which is not yet known at
+   selection time). `_download_bands_via_nodes`'s existing on-disk fast path
+   (checks every requested band is already present before any network call)
+   then finds and reuses it. If the peeked candidate instead ends up folded
+   into a multi-scene mosaic, the real download re-keys under `scene_<Id>`
+   and re-fetches SCL — a correct cache MISS in that rarer case (the peek
+   still paid for itself by deciding selection correctly), not a bug.
+   **This reuse is now directly observable, not just structurally implied.**
+   `_download_bands_via_nodes` logs an explicit `"SCL cache HIT — reusing
+   peeked band, skipping download"` or `"SCL cache MISS — downloading SCL
+   (peek reuse did not apply)"` at the exact point it checks for SCL on disk
+   (both the fully-cached fast path and the per-band download loop), and
+   records the outcome in a small module-level flag
+   (`_set_scl_reused`/`_last_scl_reused`, mirroring the existing
+   `_add_bytes_downloaded`/`_bytes_downloaded_total` pattern — safe because
+   `process_satellite_imagery`'s tier/scene loop is sequential, no concurrent
+   scene downloads within one event). `download_imagery` reads the flag right
+   after each `_download_bands_via_nodes` call and returns it as
+   `scl_reused: bool | None` (`None` when SCL was never requested at all,
+   e.g. Sentinel-1); `_attempt_clip`/`_finish_success` carry it onto the
+   accepted candidate's merged result, and `agent.py`'s `structured` result
+   dict — the same dict that is persisted and becomes `PipelineState["satellite_result"]`
+   — now carries `scl_reused` alongside `bytes_downloaded`, so it shows up in
+   the pipeline log / `/pipeline-log` trail without inventing a separate
+   logging channel.
+
+**Reporting.** `scene_cloud_percent` is always present. `aoi_cloud_percent`
+is the real measured value when a peek succeeded, `None` otherwise.
+`selection_reason` names exactly which basis decided it: `"aoi_scl_measured"`
+/ `"scene_metadata_clear"` / `"scene_metadata_cloudy"` / `"no_s2_candidates"`
+/ `"scl_unavailable_fallback"`. When `aoi_cloud_percent` and
+`scene_cloud_percent` diverge by 10 points or more, `select_satellite` logs
+it at INFO — that divergence is the entire justification for this work.
+
+**Fallbacks.** Sentinel-1 has no SCL at all and never reaches any of this
+machinery — `agent.py` only ever peeks an S2 candidate
+(`search_imagery(bbox, SENTINEL_2, ...)`), so S1 selection is unchanged in
+every respect (verified by `test_s1_selection_path_unchanged`). A failed peek
+(SCL absent, download/stack/clip failure) returns
+`{"aoi_cloud_percent": None, "reason": "scl_..._failed"}` and selection falls
+back to the scene-level figure with `selection_reason="scl_unavailable_fallback"`
+— a peek is an optimisation, never a requirement, and never aborts the run.
+
+**Budget interaction.** The peek's SCL download goes through the SAME
+`_stream_to_file_with_retry` → `_add_bytes_downloaded` path every other
+download uses, so it counts against `max_download_gb` by construction, not by
+a separate accounting path. `agent.py` also checks the remaining budget
+BEFORE attempting a peek (`remaining_download_gb`) and skips the peek
+entirely — falling back to the scene-level figure — if the budget is already
+exhausted, per `peek_aoi_cloud_percent`'s own `budget_exhausted` early return.
+
+**Measured SCL download size:** not measured against live CDSE this session
+(no live e2e was run, per the task's own scope — offline/mocked coverage
+only). `agents/satellite/CLAUDE.md`'s 2026-07-27 log records a live 4-band S2
+download (B03/B08/B11/TCI) totalling 407 MB; SCL is a single 20 m band in that
+same set (comparable to B11, the other 20 m band in that run, ~34 MB) — so a
+single peek is expected to cost roughly that order of magnitude, a small
+fraction of the ~400 MB a full per-band scene download costs. This estimate
+should be confirmed against a real run before relying on it for capacity
+planning.
+
+**What this did NOT need, contrary to the first pass's assessment:** no
+import-cycle-breaking restructure and no async `select_satellite`. The
+orchestration (when to query, when to peek, when to reuse the token) lives in
+`agent.py`, which already sits above both `sentinel.py` and `processor.py` in
+the import graph — `sentinel.py` stays synchronous and pure-metadata, and
+`processor.py` stays the only module that touches the network for band data,
+unchanged from before this pass.
+
+`CHANGE 3`'s cloud-gap comparison (`_scene_cloud_for_gap_check`) already
+preferred an AOI-restricted figure the moment one exists
+(`scene["_aoi_cloud"]`) — nothing further was needed there; it was written
+ahead of this gap closing.
+
+**Tests:** `agents/satellite/tests/test_coverage_tolerance.py` gained 19 new
+checks (58 total in that file, up from 28) covering: peek_needed's two cut
+points and the ambiguous band between them, AOI-vs-scene-level conflict
+resolution in both directions, a failed SCL download falling back cleanly, the
+SCL-reuse path (asserted structurally — same `event_id`-keyed directory,
+single call to `_download_bands_via_nodes`), peek bytes counting against the
+global download-byte total, an exhausted byte budget skipping the peek
+outright, the S1 path staying provably unchanged, and (added in a follow-up
+within this same pass) the explicit SCL cache HIT/MISS log lines and the
+`scl_reused` flag's propagation from `_download_bands_via_nodes` through
+`download_imagery` into the merged result. Full offline suite re-run:
+`test_coverage_tolerance.py` 58/58,
+`test_correctness_fixes_20260727.py` 18/19 (the 1 failure — a `scene_id`
+source-grep check unrelated to this change — confirmed pre-existing via
+`git stash`, present identically before and after this session's edits),
+`test_index_label_integrity.py` 6/6. `test_bug_fixes.py`/`test_clip_window.py`
+fail in this dev environment on an unrelated `PROJ_LIB` conflict (system
+PostgreSQL/PostGIS's `proj.db` shadowing rasterio's bundled proj data — a
+pre-existing environment issue, not a code regression). No live e2e was run
+this session, per the task's explicit scope — that is the natural next step
+once this lands.
+
+**Threading.** `min_coverage_percent`/`max_scenes`/`max_download_gb`/
+`max_search_seconds` are optional fields on `backend/models.py`'s
+`AnalyzeRequest`, threaded through `backend/router.py`'s `disaster_data` →
+`backend/orchestrator.py`'s initial `PipelineState` →
+`shared/pipeline_state.py`'s TypedDict → `agents/satellite/node.py` →
+`agents/satellite/agent.py`'s `ProcessDisasterInput` →
+`process_satellite_imagery`'s kwargs (via the new
+`_coverage_budget_kwargs()` helper). None of the four defaults are
+hardcoded anywhere along that chain except as `process_satellite_imagery`'s
+own parameter defaults — every upstream layer either passes the caller's
+value through or omits the kwarg, letting the innermost function's default
+win.
+
+**Not attempted this session (explicitly out of scope, per the task):** a
+true mid-run interactive gate (pausing at, say, 87% coverage to ask a human
+whether to proceed) needs LangGraph's `interrupt()` plus a persistent
+checkpointer (`PostgresSaver`), neither of which is wired yet. What landed
+here is caller-controlled *tolerance* (set once, up front, via the API
+request), not interactive human-in-the-loop — a natural follow-on once
+`PostgresSaver` lands.
+
+**Tests:** `agents/satellite/tests/test_coverage_tolerance.py` (new, 28
+checks, offline/deterministic) plus an update to
+`test_bug_fixes.py::test_bug3_partial_coverage_fails_not_risk` (the old test
+asserted 95% hard-fails, which is now the wrong expectation since 95% is
+above the default 90% target — the test now exercises the real floor-driven
+hard-fail case at 70%). Full existing offline suite re-run alongside these
+changes: 54/54 pass, no regressions (see `agents/satellite/ANALYSIS.md` for
+the coverage-of-what-ran detail). No live e2e was run this session — that is
+the explicit next step, to be done separately against these changes with a
+clean run.
+
 ## Enterprise Gaps (Post-Migration Priority)
 
 1. **No auth on `/analyze`** — fully open endpoint that triggers paid LLM/satellite work. Highest priority once transport is stable.

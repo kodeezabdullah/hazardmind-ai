@@ -8,6 +8,15 @@ class AnalyzeRequest(BaseModel):
     location: str
     disaster_type: str = Field(..., description="flood | earthquake | landslide")
     magnitude: Optional[float] = None
+    # Coverage-tolerance / search-budget overrides (2026-07-28,
+    # fix/coverage-tolerance). All optional; defaults match
+    # agents/satellite/processor.py's own defaults, which remain the ultimate
+    # fallback when a caller supplies nothing. min_coverage_percent is
+    # clamped server-side into [80, 100] regardless of what's sent here.
+    min_coverage_percent: Optional[float] = 90.0
+    max_scenes: Optional[int] = 3
+    max_download_gb: Optional[float] = 4.0
+    max_search_seconds: Optional[float] = 900.0
 
 
 class AnalyzeResponse(BaseModel):
