@@ -307,6 +307,37 @@ resolves.
 
 **`final_reports`** — `id SERIAL`, `event_id`, `pdf_url`, `map_url`, `executive_summary`, `agent_log JSONB`, `total_time_seconds`, `confidence_level`, `created_at`. Matches live code.
 
+**`roads_blocked` vs `roads_blocked_km` RESOLVED (2026-07-28, coherence pass
+on `feat/durable-evidence-trail`).** H#14 (row above) added `roads_blocked_km`
+alongside the pre-existing `roads_blocked` but left which one is canonical
+implicit. Resolved:
+- **`roads_blocked_km` (DOUBLE PRECISION) is CANONICAL.** Correct name,
+  correct precision (1 decimal). All new readers must use this column.
+- **`roads_blocked` (INTEGER) is a write-time DERIVED LEGACY MIRROR**
+  (`int(round(roads_blocked_km))`), written in the SAME transaction from the
+  SAME source value as `roads_blocked_km` (`agents/impact/services/db.py`) —
+  the two cannot diverge within one run. It exists only so pre-H#14 rows
+  (written before `roads_blocked_km` existed) remain readable by old
+  callers — it is not a second source of truth.
+- **A real bug was found and fixed in this pass:** `agents/report/db_client.py`
+  read `impact.get("roads_blocked")` (the lossy INTEGER) and labelled it
+  `roads_blocked_km` in the report context — silently truncating precision
+  (e.g. a real `4.6` km value would report as `5`). Fixed to prefer the real
+  `roads_blocked_km` column (added to both of `_fetch_impact_data`'s
+  SELECTs), falling back to `roads_blocked` only for a pre-H#14 row where
+  `roads_blocked_km` was never written. `frontend/lib/loadHazardResult.ts`
+  already had this preference right (`roads_blocked_km` primary,
+  `roads_blocked` fallback) — only the report agent's read was wrong.
+- **Drop condition:** `roads_blocked` may only be dropped once (a) no
+  pre-H#14 rows remain in scope, AND (b) `loadHazardResult.ts`'s own
+  `roads_blocked` fallback read is removed — both conditions, not either.
+  Until then it stays, populated, unread by any new code.
+- **Do not swap which one is canonical.** `roads_blocked_km` stays canonical
+  even under pressure to consolidate the other way — its name and precision
+  are the correct ones, `roads_blocked`'s are not. The same note lives as a
+  column comment in `shared/db/schema.sql` so a schema-only reader doesn't
+  need this file to know which column to trust.
+
 ## Environment Variables (Complete List)
 
 | Variable | Service(s) | Required? |

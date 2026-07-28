@@ -103,8 +103,28 @@ CREATE TABLE IF NOT EXISTS impact_data (
     medium_risk_people INTEGER,
     hospitals_at_risk INTEGER,
     schools_at_risk INTEGER,
-    roads_blocked INTEGER,             -- legacy, deprecated; still populated for back-compat (H#14)
-    roads_blocked_km DOUBLE PRECISION, -- correctly-named/typed replacement, prefer this
+    -- roads_blocked / roads_blocked_km (resolved 2026-07-28, coherence pass
+    -- on feat/durable-evidence-trail):
+    --   * roads_blocked_km is CANONICAL. Correct name, correct precision
+    --     (DOUBLE PRECISION, 1 decimal). All new readers must use this one.
+    --   * roads_blocked (INTEGER) is a write-time DERIVED LEGACY MIRROR
+    --     (int(round(roads_blocked_km))), written in the SAME transaction
+    --     from the SAME source value as roads_blocked_km — the two can
+    --     never diverge within one run (agents/impact/services/db.py).
+    --     Kept only so pre-H#14 rows (written before roads_blocked_km
+    --     existed) remain readable by old callers; not a second source of
+    --     truth.
+    --   * Drop condition: roads_blocked may be dropped once (a) no
+    --     pre-H#14 rows remain in scope, AND (b) frontend/lib/loadHazardResult.ts's
+    --     roads_blocked fallback (its own read of this column for old rows)
+    --     is removed — whichever comes first triggers revisiting this, but
+    --     BOTH must be true before the column is actually dropped.
+    --   * Do NOT swap which one is canonical. roads_blocked_km stays
+    --     canonical even if a future maintainer is tempted to consolidate
+    --     the other way — its name and precision are correct, unlike
+    --     roads_blocked's.
+    roads_blocked INTEGER,             -- DEPRECATED legacy mirror of roads_blocked_km, see comment above
+    roads_blocked_km DOUBLE PRECISION, -- CANONICAL — all new readers must use this column
     bridges_at_risk INTEGER,
     vulnerability_score TEXT,
     evacuation_routes JSONB,

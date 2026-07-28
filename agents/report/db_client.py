@@ -243,6 +243,7 @@ async def _fetch_impact_data(conn, event_id: str) -> dict:
                 hospitals_at_risk,
                 schools_at_risk,
                 roads_blocked,
+                roads_blocked_km,
                 bridges_at_risk,
                 vulnerability_score,
                 evacuation_routes,
@@ -277,6 +278,7 @@ async def _fetch_impact_data(conn, event_id: str) -> dict:
                 hospitals_at_risk,
                 schools_at_risk,
                 roads_blocked,
+                roads_blocked_km,
                 bridges_at_risk,
                 vulnerability_score,
                 evacuation_routes,
@@ -421,7 +423,17 @@ def db_context_to_report_context(db_context: dict) -> dict:
             "medium_risk_people": impact.get("medium_risk_people") or 0,
             "hospitals_at_risk": impact.get("hospitals_at_risk") or 0,
             "schools_affected": impact.get("schools_at_risk") or 0,
-            "roads_blocked_km": impact.get("roads_blocked") or 0,
+            # roads_blocked_km is canonical (correct name, correct precision —
+            # DOUBLE PRECISION to 1 decimal); roads_blocked is the legacy
+            # INTEGER mirror (int(roads_blocked_km), same run, never
+            # disagrees — see agents/impact/services/db.py's H#14 comment).
+            # Prefer the canonical column; fall back to the legacy one only
+            # for a pre-H#14 row where roads_blocked_km was never written.
+            "roads_blocked_km": (
+                impact.get("roads_blocked_km")
+                if impact.get("roads_blocked_km") is not None
+                else impact.get("roads_blocked") or 0
+            ),
             "bridges_at_risk": impact.get("bridges_at_risk") or 0,
             "vulnerability_score": impact.get("vulnerability_score") or 0,
             "critical_facilities": [],
