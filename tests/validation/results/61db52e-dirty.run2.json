@@ -1,0 +1,33 @@
+{
+  "commit": "61db52e-dirty",
+  "commit_full": "61db52e250e8f6ed74e27ee01a721d30f23e5ab4",
+  "run_timestamp_utc": "2026-07-28T18:20:36.456839+00:00",
+  "events": [
+    {
+      "event_id": "f3cef47f-16d5-4eec-bb13-f5c30976e9fa",
+      "location": "Kanalia, Magnesia, Greece",
+      "satellite_type": null,
+      "satellite_type_reason": null,
+      "coverage_tier": null,
+      "temporal_spread_days": null,
+      "reported_confidence": null,
+      "confidence_basis": null,
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "error",
+      "pipeline_error": "insufficient_coverage: could not reach the minimum viable AOI coverage (best 0.0%; 1 uncovered region(s), 89.1165 km^2) | search budget exhausted: max_scenes | CRITICAL: Commercial imagery budget exhausted (max_scenes) with 0% coverage for Kanalia flood event. Switching to Sentinel-2/SAR fallback. Human intervention required to authorize emergency budget extension for high-res tasking.",
+      "harness_notes": [
+        "Rescoped from the full Magnesia regional-unit AOI to Kanalia (a village on the drained Lake Karla basin) for the same reason Valencia was rescoped to Paiporta -- production-representative city-scale runtime, not a 100+ km multi-tile search.",
+        "Karla basin itself (the densest flood-polygon cluster, ~19.7 km^2 in one 0.05deg grid cell) has no OSM settlement polygon -- it is farmland/former lakebed, not a town. Kanalia is the nearest actual village and is the harness's best available city-scale anchor for this cluster.",
+        "Kanalia resolves as a zero-area OSM Point; boundary.py's own _ensure_areal buffers it to a ~6km-radius disk -- this is the SAME fallback the production pipeline already uses for other point-only cities (e.g. Davao, per agents/satellite/CLAUDE.md Step 10), not a harness-specific approximation.",
+        "DEL_MONIT01 is ~1 day post-event-peak -- closest-to-peak reference product found for this activation.",
+        "No permanent-water mask available for this AOI in this pass -- Lake Karla itself was historically a real lake (drained mid-20th century, periodically reflooded), so a 'permanent water' vs 'flood' distinction is UNUSUALLY blurry here specifically -- worth flagging prominently in the report, not just the generic caveat.",
+        "No Sentinel-2 product exists for this AOI/activation -- this event scores the S1/SAR path only, same as the original emsr692_magnesia.yaml.",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 1462.686999999998,
+      "bytes_downloaded": 2889498986
+    }
+  ]
+}

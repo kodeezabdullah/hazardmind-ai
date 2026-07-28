@@ -1,0 +1,69 @@
+event_key: emsr692_kanalia
+activation_code: EMSR692
+aoi_number: 1
+aoi_name: "Kanalia (village on the drained Lake Karla basin, within Magnesia province AOI01)"
+country: Greece
+disaster_type: flood
+status: confirmed
+
+# CITY-SCALE RESCOPE (same pattern as emsr773_paiporta.yaml): the original
+# emsr692_magnesia.yaml used the full EMS "Magnesia" AOI (a Thessaly regional
+# unit, extent roughly 150km x 90km) as the pipeline's search location — not
+# how this pipeline is normally operated (production runs are city/town
+# scale), and risks the same multi-hour multi-tile search the original
+# province-wide Valencia attempt hit (see BASELINE_SESSION_NOTES.md).
+#
+# A grid search over the DEL_MONIT01 maximumWaterExtentA reference layer
+# (3690 polygons across the full Magnesia AOI) found the single densest
+# 0.05deg cell at ~(22.79E, 39.47N), ~19.7 km^2 of mapped flood extent in
+# that one cell alone — reverse-geocodes to "Dimotiki Enotita Karlas"
+# (Municipal Unit of Karla, the drained Lake Karla lakebed/basin), the area
+# best known for catastrophic Storm Daniel flooding in Magnesia. Karla
+# itself has no OSM town-scale polygon (it's farmland, not a settlement).
+# Kanalia is the nearest actual village directly on the edge of that basin.
+# Kanalia resolves in OSM/Nominatim as a zero-area Point (the same
+# point-only-city situation CLAUDE.md documents for other cities, e.g.
+# Davao) -- agents/satellite/boundary.py's own _ensure_areal buffers a
+# zero-area point to a ~6km-radius disk (_CITY_POINT_BUFFER_DEG), which is
+# what the real production pipeline does for this class of city already
+# (not a harness-only workaround) -- so this rescope produces a real,
+# pipeline-native town-scale AOI, not a synthetic one.
+# NOTE (2026-07-28, corrected after the first live run): bare "Kanalia,
+# Greece" is ambiguous -- Nominatim resolves it to a DIFFERENT village named
+# Kanalia in Karditsa prefecture (~90km from the intended one), which
+# produced an empty reference-geometry clip on the first attempt (IoU/F1
+# incorrectly reported as 0.0 rather than "undefined, no reference in this
+# AOI" -- see BASELINE_REPORT.md for that finding). "Kanalia, Magnesia,
+# Greece" disambiguates correctly to the intended village
+# (22.8862062E, 39.4984603N, in Dimotiki Enotita Karlas), confirmed by a
+# direct Nominatim search AND by verifying it's within ~3.7km of the
+# grid-search cell that found the reference data's densest flood-polygon
+# cluster (~9.5 km^2 of reference extent within a 6km buffer of this point).
+pipeline_location: "Kanalia, Magnesia, Greece"
+
+# Same reference delineation ZIP as emsr692_magnesia.yaml (same activation,
+# same AOI01 product) -- only the pipeline's OWN search location changes.
+# The reference polygons are clipped to Kanalia's ~6km buffer-disk boundary
+# at scoring time (metrics.py compares geometries directly; the harness does
+# not need a separate reference download for the sub-area).
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2023-09-05"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_MONIT01"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2023-09-06T04:39:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR692/AOI01/DEL_MONIT01/EMSR692_AOI01_DEL_MONIT01_v3.zip"
+    vector_layer_of_record: "maximumWaterExtentA"
+    search_window_center_utc: "2023-09-06T04:39:00Z"
+    search_window_days: 5
+
+caveats:
+  - "Rescoped from the full Magnesia regional-unit AOI to Kanalia (a village on the drained Lake Karla basin) for the same reason Valencia was rescoped to Paiporta -- production-representative city-scale runtime, not a 100+ km multi-tile search."
+  - "Karla basin itself (the densest flood-polygon cluster, ~19.7 km^2 in one 0.05deg grid cell) has no OSM settlement polygon -- it is farmland/former lakebed, not a town. Kanalia is the nearest actual village and is the harness's best available city-scale anchor for this cluster."
+  - "Kanalia resolves as a zero-area OSM Point; boundary.py's own _ensure_areal buffers it to a ~6km-radius disk -- this is the SAME fallback the production pipeline already uses for other point-only cities (e.g. Davao, per agents/satellite/CLAUDE.md Step 10), not a harness-specific approximation."
+  - "DEL_MONIT01 is ~1 day post-event-peak -- closest-to-peak reference product found for this activation."
+  - "No permanent-water mask available for this AOI in this pass -- Lake Karla itself was historically a real lake (drained mid-20th century, periodically reflooded), so a 'permanent water' vs 'flood' distinction is UNUSUALLY blurry here specifically -- worth flagging prominently in the report, not just the generic caveat."
+  - "No Sentinel-2 product exists for this AOI/activation -- this event scores the S1/SAR path only, same as the original emsr692_magnesia.yaml."

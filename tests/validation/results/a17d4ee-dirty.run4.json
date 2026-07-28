@@ -1,0 +1,42 @@
+{
+  "commit": "a17d4ee-dirty",
+  "commit_full": "a17d4eedf0549657febec899b868136f82e594a0",
+  "run_timestamp_utc": "2026-07-28T15:39:27.328680+00:00",
+  "events": [
+    {
+      "event_id": "c32425f4-3412-427e-9a7b-791eca687cf2",
+      "location": "Kanalia, Greece",
+      "satellite_type": "sentinel-2",
+      "satellite_type_reason": "scene_metadata_clear",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.4339,
+      "confidence_basis": "evidence_contradicts",
+      "metrics_including_permanent_water": {
+        "iou": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "predicted_area_km2": 19.003,
+        "reference_area_km2": 0.0,
+        "intersection_area_km2": 0.0,
+        "union_area_km2": 19.003
+      },
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "No permanent-water mask supplied for this event \u2014 excluding-permanent-water metrics could not be computed. Treat the including-permanent-water numbers as an upper bound, not the real flood-detection accuracy.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Rescoped from the full Magnesia regional-unit AOI to Kanalia (a village on the drained Lake Karla basin) for the same reason Valencia was rescoped to Paiporta -- production-representative city-scale runtime, not a 100+ km multi-tile search.",
+        "Karla basin itself (the densest flood-polygon cluster, ~19.7 km^2 in one 0.05deg grid cell) has no OSM settlement polygon -- it is farmland/former lakebed, not a town. Kanalia is the nearest actual village and is the harness's best available city-scale anchor for this cluster.",
+        "Kanalia resolves as a zero-area OSM Point; boundary.py's own _ensure_areal buffers it to a ~6km-radius disk -- this is the SAME fallback the production pipeline already uses for other point-only cities (e.g. Davao, per agents/satellite/CLAUDE.md Step 10), not a harness-specific approximation.",
+        "DEL_MONIT01 is ~1 day post-event-peak -- closest-to-peak reference product found for this activation.",
+        "No permanent-water mask available for this AOI in this pass -- Lake Karla itself was historically a real lake (drained mid-20th century, periodically reflooded), so a 'permanent water' vs 'flood' distinction is UNUSUALLY blurry here specifically -- worth flagging prominently in the report, not just the generic caveat.",
+        "No Sentinel-2 product exists for this AOI/activation -- this event scores the S1/SAR path only, same as the original emsr692_magnesia.yaml.",
+        "Reference geometry clipped to the pipeline's city boundary is EMPTY \u2014 no EMS-mapped flood polygons fall inside this specific city, even though nearby polygons exist in the province-wide product."
+      ],
+      "elapsed_seconds": 321.79699999999866,
+      "bytes_downloaded": 369408831
+    }
+  ]
+}

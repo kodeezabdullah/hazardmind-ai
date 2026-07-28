@@ -1,0 +1,49 @@
+{
+  "commit": "b1be94f-dirty",
+  "commit_full": "b1be94fdb3942a7909b5000481fcdd4ca8d053a7",
+  "run_timestamp_utc": "2026-07-27T10:20:26.945594+00:00",
+  "events": [
+    {
+      "event_id": "8961a784-10cd-45ae-8a13-7e04940936ab",
+      "location": "Valencia, Spain",
+      "satellite_type": null,
+      "satellite_type_reason": null,
+      "coverage_tier": null,
+      "temporal_spread_days": null,
+      "reported_confidence": null,
+      "confidence_basis": null,
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "error",
+      "pipeline_error": "insufficient_coverage: could not cover 100% of the AOI with valid pixels (best 0.0%; 0 uncovered region(s), 0 km^2) | CRITICAL: Primary optical imagery failed (0% coverage) for Valencia flood event. Switching to SAR fallback. Human oversight required for validation of flood extent.",
+      "harness_notes": [
+        "Both reference products are ~1 week after the 29 Oct event peak (a receding/late flood state, not peak).",
+        "maximumFloodExtentA (cumulative max extent) used as the reference layer, not the single-scene observedEventA, since it best matches 'area this flood affected'.",
+        "Pre-event same-relative-orbit Sentinel-1 pass not confirmed via the API \u2014 orbit TBD if bi-temporal change detection is built later.",
+        "No permanent-water mask available for this AOI in this pass \u2014 see harness's including/excluding-permanent-water split."
+      ]
+    },
+    {
+      "event_id": "2ee9a87e-4a1e-4991-b8c5-67823cb045a4",
+      "location": "Valencia, Spain",
+      "satellite_type": null,
+      "satellite_type_reason": null,
+      "coverage_tier": null,
+      "temporal_spread_days": null,
+      "reported_confidence": null,
+      "confidence_basis": null,
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "error",
+      "pipeline_error": "insufficient_coverage: could not cover 100% of the AOI with valid pixels (best 0.0%; 0 uncovered region(s), 0 km^2) | CRITICAL: Optical imagery failed for Valencia flood event (Attempt 3). Switching to SAR-based analysis. Human oversight required for validation of flood extent mapping.",
+      "harness_notes": [
+        "Both reference products are ~1 week after the 29 Oct event peak (a receding/late flood state, not peak).",
+        "maximumFloodExtentA (cumulative max extent) used as the reference layer, not the single-scene observedEventA, since it best matches 'area this flood affected'.",
+        "Pre-event same-relative-orbit Sentinel-1 pass not confirmed via the API \u2014 orbit TBD if bi-temporal change detection is built later.",
+        "No permanent-water mask available for this AOI in this pass \u2014 see harness's including/excluding-permanent-water split."
+      ]
+    }
+  ]
+}

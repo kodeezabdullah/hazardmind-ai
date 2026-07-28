@@ -167,3 +167,12 @@ tests/e2e/*.log
 tests/e2e/.venv-e2e/
 tests/e2e/report_*.md
 tests/e2e/report_*.json
+tests/e2e/*.out
+
+# Satellite validation harness: downloaded EMS reference-product ZIPs/extracts
+# (multi-hundred-MB, re-downloadable from the URLs in reference_events/*.yaml
+# — see reference_loader.py's caching) and ad hoc stdout captures from local
+# runs. results/*.json (the versioned, git-committable scored output) and
+# BASELINE_REPORT.md are NOT ignored — those are the actual deliverable.
+tests/validation/cache/
+tests/validation/*.out

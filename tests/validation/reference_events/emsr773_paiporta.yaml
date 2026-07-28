@@ -1,0 +1,55 @@
+event_key: emsr773_paiporta
+activation_code: EMSR773
+aoi_number: 1
+aoi_name: "Paiporta (city within Valencia province AOI01)"
+country: Spain
+disaster_type: flood
+status: confirmed
+
+# CITY-SCALE RESCOPE (2026-07-27): the original emsr773_valencia.yaml used the
+# full EMS "Valencia province" AOI (extent ~150km x 140km) as the pipeline's
+# search location. That is NOT how this pipeline is normally operated or
+# tuned — production runs are city-scale. Forcing a province-wide AOI made
+# the tiered coverage search need 4+ tiles per satellite path and took 50+
+# minutes per attempt, versus the pipeline's normal ~4-5 minute single-city
+# run. This file rescopes the SAME EMSR773 reference event down to Paiporta,
+# the town most severely hit by the real 2024-10-29 flood (confirmed: 68 of
+# the reference delineation's 915 polygons fall within a 5km buffer of
+# Paiporta's centroid) and confirmed via boundary.py's own resolver to return
+# a true town-scale polygon (bbox ~2.4km x 2.7km, not the province).
+# emsr773_valencia.yaml is kept for the record, not deleted, but is not run
+# as part of the normal single-city baseline going forward.
+pipeline_location: "Paiporta, Spain"
+
+# Same reference delineation ZIPs as emsr773_valencia.yaml (same activation,
+# same AOI01 products) — only the pipeline's OWN search location changes.
+# The reference polygons are clipped to Paiporta's boundary at scoring time
+# (metrics.py compares geometries directly; the harness does not need a
+# separate reference download for the sub-area).
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2024-10-29"
+
+reference_products:
+  sentinel2:
+    product_id: "DEL_MONIT02"
+    sensor: "Sentinel-2"
+    acquisition_datetime_utc: "2024-11-05T10:52:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR773/AOI01/DEL_MONIT02/EMSR773_AOI01_DEL_MONIT02_v1.zip"
+    vector_layer_of_record: "maximumFloodExtentA"
+    search_window_center_utc: "2024-11-05T10:52:00Z"
+    search_window_days: 5
+  sentinel1:
+    product_id: "DEL_MONIT03"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2024-11-06T06:00:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR773/AOI01/DEL_MONIT03/EMSR773_AOI01_DEL_MONIT03_v1.zip"
+    vector_layer_of_record: "maximumFloodExtentA"
+    search_window_center_utc: "2024-11-06T06:00:00Z"
+    search_window_days: 5
+
+caveats:
+  - "Reference products are ~1 week after the 29 Oct event peak (receding/late flood state, not peak)."
+  - "maximumFloodExtentA (cumulative max extent) used as the reference layer."
+  - "Reference geometry is the FULL Valencia-province delineation, clipped to Paiporta's town boundary at scoring time — not a separately-published city-level EMS product (none exists)."
+  - "No permanent-water mask available for this AOI in this pass."

@@ -1,0 +1,69 @@
+# SUPERSEDED for the scored baseline (2026-07-28), same pattern as
+# emsr773_valencia.yaml being superseded by emsr773_paiporta.yaml: this file
+# uses the full ~150km x 90km Magnesia regional-unit AOI as the pipeline's
+# search location, which is not how the pipeline is normally operated
+# (production runs are town/city scale) and risks the same multi-hour
+# multi-tile search the original province-wide Valencia attempt hit. Kept
+# for the record; emsr692_kanalia.yaml (rescoped to a village on the
+# Storm-Daniel-flooded Lake Karla basin) is the event actually run for the
+# scored baseline going forward. status: confirmed is left as-is below
+# (the reference data itself is still valid) but this file is not part of
+# the normal scored run set -- run_baseline.py has no separate
+# "superseded" status value, so exclude it manually with --event when
+# reproducing the baseline, same as emsr773_valencia.yaml.
+event_key: emsr692_magnesia
+activation_code: EMSR692
+aoi_number: 1
+aoi_name: "Magnesia"
+country: Greece
+disaster_type: flood
+status: confirmed
+
+pipeline_location: "Magnesia, Greece"
+
+aoi_extent_wkt: >
+  POLYGON((21.465407 39.704952, 21.719982 39.109924, 22.88329 39.140679,
+  22.822214 39.272573, 22.9454 39.294109, 22.944826 39.346231,
+  22.992373 39.342759, 23.013085 39.314989, 23.094809 39.304003,
+  23.149838 39.278925, 23.172909 39.238844, 23.198043 39.168044,
+  23.14873 39.13685, 23.084992 39.187582, 23.044167 39.191028,
+  23.042285 39.155262, 23.037486 39.102119, 23.037454 39.100072,
+  23.062034 39.072224, 23.217704 39.088054, 23.516032 39.10907,
+  23.55055 39.193414, 23.322504 39.264777, 23.259362 39.347248,
+  23.212783 39.402932, 23.140933 39.454778, 23.109855 39.496992,
+  23.037641 39.538584, 22.95727 39.57511, 22.924663 39.618361,
+  22.897693 39.6923, 22.86812 39.781723, 22.852013 39.816286,
+  22.752076 39.88767, 22.725902 39.916224, 22.35542 39.837662,
+  22.276497 39.802357, 22.275303 39.749278, 21.465407 39.704952))
+aoi_bbox: [21.465407, 39.072119, 23.55055, 39.916224]
+
+event_peak_date: "2023-09-05"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_MONIT01"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2023-09-06T04:39:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR692/AOI01/DEL_MONIT01/EMSR692_AOI01_DEL_MONIT01_v3.zip"
+    # NOTE: this activation's layer schema names the cumulative-max layer
+    # "maximumWaterExtentA", not "maximumFloodExtentA" (EMSR773's naming) --
+    # confirmed by inspecting the actual ZIP contents, not assumed from the
+    # API summary. Different EMS activations are not guaranteed to share
+    # exact layer names even for the "same concept" product.
+    vector_layer_of_record: "maximumWaterExtentA"
+    search_window_center_utc: "2023-09-06T04:39:00Z"
+    search_window_days: 5
+  # DEL_MONIT02 (2023-09-07) exists as a second S1 monitoring pass over the
+  # same AOI but is not used as a separate harness event — MONIT01 is closer
+  # to peak and is the primary reference; MONIT02 is recorded here only for
+  # completeness / a future multi-date consistency check.
+  sentinel1_monit02_reference_only:
+    product_id: "DEL_MONIT02"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2023-09-07T16:25:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR692/AOI01/DEL_MONIT02/EMSR692_AOI01_DEL_MONIT02_v4.zip"
+
+caveats:
+  - "No Sentinel-2 product exists for this AOI (activation's other AOIs used GeoEye/SPOT/WorldView, not usable here) — this event scores the S1/SAR path only."
+  - "DEL_MONIT01 is ~1 day post-event-peak — closest-to-peak reference product found in this research pass."
+  - "No permanent-water mask available for this AOI in this pass."

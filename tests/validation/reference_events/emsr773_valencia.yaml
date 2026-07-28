@@ -1,0 +1,51 @@
+event_key: emsr773_valencia
+activation_code: EMSR773
+aoi_number: 1
+aoi_name: "Valencia province"
+country: Spain
+disaster_type: flood
+status: confirmed
+
+# Location string passed to the real pipeline's ProcessDisasterInput.location.
+# Uses the actual admin unit so boundary.py/geoboundaries.py resolve the same
+# AOI class ("province" -> ADM boundary) the reference product covers.
+pipeline_location: "Valencia, Spain"
+
+aoi_extent_wkt: >
+  POLYGON((-1.445179 39.781191, -1.485936 39.670665, -1.508716 39.470674,
+  -1.236598 39.052786, -0.858222 38.872957, -0.456856 38.727721,
+  -0.238921 38.723182, -0.040215 38.817867, 0.020432 38.892022,
+  -0.26688 39.421202, -0.251454 39.615411, -0.539548 39.724123,
+  -0.552116 39.724452, -0.551959 39.728807, -1.243609 39.989801,
+  -1.445179 39.781191))
+aoi_bbox: [-1.508716, 38.723182, 0.020432, 39.989801]
+
+event_peak_date: "2024-10-29"
+
+reference_products:
+  sentinel2:
+    product_id: "DEL_MONIT02"
+    sensor: "Sentinel-2"
+    acquisition_datetime_utc: "2024-11-05T10:52:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR773/AOI01/DEL_MONIT02/EMSR773_AOI01_DEL_MONIT02_v1.zip"
+    vector_layer_of_record: "maximumFloodExtentA"
+    # Anchor the harness's own search window around this reference
+    # acquisition (not "today") — see sentinel_clock_patch.py. +-3 days
+    # covers same-relative-orbit revisit without drifting to a different
+    # flood state.
+    search_window_center_utc: "2024-11-05T10:52:00Z"
+    search_window_days: 5
+  sentinel1:
+    product_id: "DEL_MONIT03"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2024-11-06T06:00:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR773/AOI01/DEL_MONIT03/EMSR773_AOI01_DEL_MONIT03_v1.zip"
+    vector_layer_of_record: "maximumFloodExtentA"
+    search_window_center_utc: "2024-11-06T06:00:00Z"
+    search_window_days: 5
+
+caveats:
+  - "Both reference products are ~1 week after the 29 Oct event peak (a receding/late flood state, not peak)."
+  - "maximumFloodExtentA (cumulative max extent) used as the reference layer, not the single-scene observedEventA, since it best matches 'area this flood affected'."
+  - "Pre-event same-relative-orbit Sentinel-1 pass not confirmed via the API — orbit TBD if bi-temporal change detection is built later."
+  - "No permanent-water mask available for this AOI in this pass — see harness's including/excluding-permanent-water split."

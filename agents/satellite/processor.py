@@ -297,8 +297,13 @@ _S2_BAND_RES = {
 # valid: 2 dark/topo shadow, 4 vegetation, 5 bare soil, 6 water, 7 unclassified.
 _SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
 
-# Sentinel-1 polarizations.
-_S1_POLARIZATIONS = ["VV", "VH"]
+# Sentinel-1 polarizations actually downloaded. calculate_indices' SAR path
+# (below) only ever reads VV — VH was downloaded but never consumed by any
+# index/threshold/classification code. Restricted to VV-only so the
+# per-band Nodes path (once wired below) fetches one ~100-300 MB GeoTIFF
+# per scene instead of two, and the whole-archive fallback path extracts
+# only the VV member instead of both.
+_S1_POLARIZATIONS = ["VV"]
 
 # CDSE serves the product bytes from a different host
 # (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
@@ -718,6 +723,52 @@ def _resolve_s2_band_nodes(
     return resolved
 
 
+def _resolve_s1_band_nodes(
+    session: requests.Session,
+    product_id: str,
+    band_tokens: list,
+    headers: dict,
+    timeout: tuple,
+) -> dict:
+    """Map each Sentinel-1 GRD polarization token to its measurement GeoTIFF
+    node path segments.
+
+    Walks SAFE -> measurement and matches each requested token (VV, VH) to
+    the file whose name embeds the polarization (e.g.
+    `s1a-iw-grd-vv-...tiff`) — same matching convention `_match_band_members`
+    already uses for the whole-zip fallback extractor, just applied to a
+    Nodes listing instead of a zip member list.
+
+    Returns {token: [seg, seg, ...]} for the polarizations located. Raises on
+    a traversal/HTTP error so the caller falls back to the whole-archive
+    download, same contract as `_resolve_s2_band_nodes`.
+    """
+    safe_children = _list_nodes(session, product_id, [], headers, timeout)
+    safe_dir = next((n for n in safe_children if n.endswith(".SAFE")), None)
+    if not safe_dir:
+        raise ValueError("no .SAFE root node in product")
+
+    measurement_base = [safe_dir, "measurement"]
+    files = _list_nodes(session, product_id, measurement_base, headers, timeout)
+    if not files:
+        raise ValueError("no measurement node in product")
+
+    resolved: dict = {}
+    for token in band_tokens:
+        lower = token.lower()
+        match = next(
+            (f for f in files
+             if f.lower().endswith((".tiff", ".tif"))
+             and f"-{lower}-" in f.lower()),
+            None,
+        )
+        if not match:
+            logger.warning("Polarization %s not found in measurement listing", token)
+            continue
+        resolved[token] = measurement_base + [match]
+    return resolved
+
+
 def _download_bands_via_nodes(
     scene_metadata: dict,
     token: str,
@@ -728,24 +779,31 @@ def _download_bands_via_nodes(
 ) -> Optional[dict]:
     """Download only the needed band rasters via the CDSE Nodes tree.
 
-    Primary download path for Sentinel-2: instead of the whole ~868 MB .SAFE
-    zip, fetch each requested band JP2 individually (~30-120 MB each) straight
-    into `<temp>/<event_id>/bands/`. CDSE doesn't honour Range, but per-band
+    Instead of the whole ~868 MB (S2) / ~1.1-1.7 GB (S1 GRD) .SAFE archive,
+    fetch each requested band/polarization individually straight into
+    `<temp>/<event_id>/bands/`. CDSE doesn't honour Range, but per-band
     download means a connection drop only restarts the one band in flight, not
     the whole archive — and any band already fully on disk is reused. The ~7-min
     outage budget is SHARED across all bands of the scene (a sustained outage
     aborts the scene, not each band independently). Returns {token: path} for the
-    bands fetched, or None on traversal failure (caller falls back to zip).
+    bands fetched, or None on traversal failure (caller falls back to the whole
+    archive).
+
+    Sentinel-2 bands are JP2 (IMG_DATA tree); Sentinel-1 GRD polarizations are
+    GeoTIFF (measurement/ tree) — `_resolve_s2_band_nodes`/`_resolve_s1_band_nodes`
+    both return {token: [node segments]}, differing only in which tree they
+    walk and which raster format they name, so the rest of this function is
+    satellite-agnostic.
     """
     _set_scl_reused(None)  # reset per call; only set when SCL is actually checked
 
     product_id = scene_metadata.get("Id")
     if not product_id:
         return None
-    if satellite_type != "sentinel-2":
-        # Per-band Nodes mapping here only knows the S2 L1C IMG_DATA layout.
+    if satellite_type not in ("sentinel-1", "sentinel-2"):
         return None
 
+    ext = ".tiff" if satellite_type == "sentinel-1" else ".jp2"
     bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
     os.makedirs(bands_dir, exist_ok=True)
     fresh_token = _resolve_token(token)
@@ -762,7 +820,7 @@ def _download_bands_via_nodes(
     # restart instead of stalling on the catalogue.
     cached = {}
     for tok in band_tokens:
-        cand = os.path.join(bands_dir, f"{tok}.jp2")
+        cand = os.path.join(bands_dir, f"{tok}{ext}")
         if os.path.exists(cand) and os.path.getsize(cand) > 0:
             cached[tok] = cand
     if len(cached) == len(band_tokens):
@@ -777,7 +835,12 @@ def _download_bands_via_nodes(
 
     try:
         with _CDSESession() as session:
-            node_map = _resolve_s2_band_nodes(
+            resolver = (
+                _resolve_s1_band_nodes
+                if satellite_type == "sentinel-1"
+                else _resolve_s2_band_nodes
+            )
+            node_map = resolver(
                 session, product_id, band_tokens, auth_header, timeout
             )
             if not node_map:
@@ -811,7 +874,7 @@ def _download_bands_via_nodes(
                     )
                     return None
                 band_auth_header = {"Authorization": f"Bearer {band_token}"}
-                out_path = os.path.join(bands_dir, f"{tok}.jp2")
+                out_path = os.path.join(bands_dir, f"{tok}{ext}")
 
                 # SCL-specific cache visibility (CHANGE 6 reuse path): this is
                 # the exact same on-disk check _stream_to_file_with_retry is
@@ -1338,8 +1401,7 @@ def _open_georeferenced(path: str, dst_crs=None):
     and (for the warped path) the underlying source handle the caller must also
     close. For the pass-through path ``src_to_close`` is None.
     """
-    from rasterio.vrt import WarpedVRT
-    from rasterio.warp import calculate_default_transform
+    from rasterio.warp import calculate_default_transform, reproject
 
     src = rasterio.open(path)
     try:
@@ -1352,32 +1414,86 @@ def _open_georeferenced(path: str, dst_crs=None):
         src_crs = gcp_crs or rasterio.crs.CRS.from_epsg(4326)
         if dst_crs is None:
             dst_crs = src_crs
+
+        # BUG 1 follow-up (2026-07-29, found by the S1 validation trace): the
+        # previous implementation wrapped `src` in a WarpedVRT and relied on
+        # GDAL picking up the source's GCPs implicitly. On REAL S1 GRD
+        # measurement files (COG-structured TIFFs from CDSE) that implicit
+        # pickup silently fails: the VRT reports a correct crs/transform/shape
+        # but reads ALL-ZERO pixel data everywhere — no error, no warning.
+        # (Synthetic plain-GTiff GCP fixtures warp fine, which is why
+        # test_bug1_gcp_raster_resolved never caught it; the same scene's
+        # raw pixel reads are fine, and `reproject(gcps=...)` on the same
+        # file produces real data — isolated live on event trace-s1-islamabad,
+        # scene S1D_IW_GRDH_1SDV_20260725...207C_COG.)
+        # Fix: warp EXPLICITLY via rasterio.warp.reproject with `gcps=` into
+        # an on-disk temp raster next to the source, and return that dataset.
+        # The downstream contract is unchanged — callers get a dataset with a
+        # real affine + CRS, same as the VRT path claimed to provide.
+        warped_path = f"{path}.warped-{str(dst_crs).replace(':', '')}.tif"
         try:
-            transform, width, height = calculate_default_transform(
-                src_crs, dst_crs, src.width, src.height, gcps=gcps,
-            )
-            vrt = WarpedVRT(
-                src,
-                src_crs=src_crs,
-                crs=dst_crs,
-                transform=transform,
-                width=width,
-                height=height,
-                resampling=Resampling.bilinear,
-            )
-            logger.info(
-                "Resolved GCP georeferencing for %s -> %s (%dx%d)",
-                os.path.basename(path),
-                dst_crs,
-                width,
-                height,
-            )
-            return vrt, src
+            if not (os.path.exists(warped_path) and os.path.getsize(warped_path) > 0):
+                transform, width, height = calculate_default_transform(
+                    src_crs, dst_crs, src.width, src.height, gcps=gcps,
+                )
+                profile = {
+                    "driver": "GTiff",
+                    "height": height,
+                    "width": width,
+                    "count": src.count,
+                    "dtype": src.dtypes[0],
+                    "crs": dst_crs,
+                    "transform": transform,
+                    "nodata": src.nodata if src.nodata is not None else 0,
+                    "tiled": True,
+                    "compress": "deflate",
+                    "BIGTIFF": "IF_SAFER",
+                }
+                with rasterio.open(warped_path, "w", **profile) as dst:
+                    for b in range(1, src.count + 1):
+                        reproject(
+                            source=rasterio.band(src, b),
+                            destination=rasterio.band(dst, b),
+                            gcps=gcps,
+                            src_crs=src_crs,
+                            dst_transform=transform,
+                            dst_crs=dst_crs,
+                            resampling=Resampling.bilinear,
+                        )
+                logger.info(
+                    "Resolved GCP georeferencing for %s -> %s (%dx%d) via "
+                    "explicit-GCP reproject",
+                    os.path.basename(path), dst_crs, width, height,
+                )
+            else:
+                logger.info(
+                    "Reusing cached explicit-GCP warp for %s",
+                    os.path.basename(path),
+                )
+            src.close()
+            warped = rasterio.open(warped_path)
+
+            # Empty-warp guard: the defect this fix replaces FAILED SILENTLY
+            # (valid metadata, all-zero pixels), so verify the warp actually
+            # carries data before handing it downstream. A cheap decimated
+            # read is enough — a genuinely all-zero warped scene means the
+            # warp path is broken again, not that the ground is featureless
+            # (raw GRD DNs over any real terrain are nonzero).
+            probe = warped.read(1, out_shape=(min(256, warped.height),
+                                              min(256, warped.width)))
+            if not (probe != 0).any():
+                warped.close()
+                raise ValueError(
+                    f"explicit-GCP warp of {os.path.basename(path)} produced "
+                    "all-zero data — refusing to hand an empty raster downstream"
+                )
+            return warped, None
         except (rasterio.errors.RasterioError, ValueError) as exc:
             logger.error(
                 "Failed to warp GCP-georeferenced raster %s: %s", path, exc
             )
-            src.close()
+            if not src.closed:
+                src.close()
             raise
     return src, None
 
