@@ -297,8 +297,13 @@ _S2_BAND_RES = {
 # valid: 2 dark/topo shadow, 4 vegetation, 5 bare soil, 6 water, 7 unclassified.
 _SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
 
-# Sentinel-1 polarizations.
-_S1_POLARIZATIONS = ["VV", "VH"]
+# Sentinel-1 polarizations actually downloaded. calculate_indices' SAR path
+# (below) only ever reads VV — VH was downloaded but never consumed by any
+# index/threshold/classification code. Restricted to VV-only so the
+# per-band Nodes path (once wired below) fetches one ~100-300 MB GeoTIFF
+# per scene instead of two, and the whole-archive fallback path extracts
+# only the VV member instead of both.
+_S1_POLARIZATIONS = ["VV"]
 
 # CDSE serves the product bytes from a different host
 # (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
@@ -718,6 +723,52 @@ def _resolve_s2_band_nodes(
     return resolved
 
 
+def _resolve_s1_band_nodes(
+    session: requests.Session,
+    product_id: str,
+    band_tokens: list,
+    headers: dict,
+    timeout: tuple,
+) -> dict:
+    """Map each Sentinel-1 GRD polarization token to its measurement GeoTIFF
+    node path segments.
+
+    Walks SAFE -> measurement and matches each requested token (VV, VH) to
+    the file whose name embeds the polarization (e.g.
+    `s1a-iw-grd-vv-...tiff`) — same matching convention `_match_band_members`
+    already uses for the whole-zip fallback extractor, just applied to a
+    Nodes listing instead of a zip member list.
+
+    Returns {token: [seg, seg, ...]} for the polarizations located. Raises on
+    a traversal/HTTP error so the caller falls back to the whole-archive
+    download, same contract as `_resolve_s2_band_nodes`.
+    """
+    safe_children = _list_nodes(session, product_id, [], headers, timeout)
+    safe_dir = next((n for n in safe_children if n.endswith(".SAFE")), None)
+    if not safe_dir:
+        raise ValueError("no .SAFE root node in product")
+
+    measurement_base = [safe_dir, "measurement"]
+    files = _list_nodes(session, product_id, measurement_base, headers, timeout)
+    if not files:
+        raise ValueError("no measurement node in product")
+
+    resolved: dict = {}
+    for token in band_tokens:
+        lower = token.lower()
+        match = next(
+            (f for f in files
+             if f.lower().endswith((".tiff", ".tif"))
+             and f"-{lower}-" in f.lower()),
+            None,
+        )
+        if not match:
+            logger.warning("Polarization %s not found in measurement listing", token)
+            continue
+        resolved[token] = measurement_base + [match]
+    return resolved
+
+
 def _download_bands_via_nodes(
     scene_metadata: dict,
     token: str,
@@ -728,24 +779,31 @@ def _download_bands_via_nodes(
 ) -> Optional[dict]:
     """Download only the needed band rasters via the CDSE Nodes tree.
 
-    Primary download path for Sentinel-2: instead of the whole ~868 MB .SAFE
-    zip, fetch each requested band JP2 individually (~30-120 MB each) straight
-    into `<temp>/<event_id>/bands/`. CDSE doesn't honour Range, but per-band
+    Instead of the whole ~868 MB (S2) / ~1.1-1.7 GB (S1 GRD) .SAFE archive,
+    fetch each requested band/polarization individually straight into
+    `<temp>/<event_id>/bands/`. CDSE doesn't honour Range, but per-band
     download means a connection drop only restarts the one band in flight, not
     the whole archive — and any band already fully on disk is reused. The ~7-min
     outage budget is SHARED across all bands of the scene (a sustained outage
     aborts the scene, not each band independently). Returns {token: path} for the
-    bands fetched, or None on traversal failure (caller falls back to zip).
+    bands fetched, or None on traversal failure (caller falls back to the whole
+    archive).
+
+    Sentinel-2 bands are JP2 (IMG_DATA tree); Sentinel-1 GRD polarizations are
+    GeoTIFF (measurement/ tree) — `_resolve_s2_band_nodes`/`_resolve_s1_band_nodes`
+    both return {token: [node segments]}, differing only in which tree they
+    walk and which raster format they name, so the rest of this function is
+    satellite-agnostic.
     """
     _set_scl_reused(None)  # reset per call; only set when SCL is actually checked
 
     product_id = scene_metadata.get("Id")
     if not product_id:
         return None
-    if satellite_type != "sentinel-2":
-        # Per-band Nodes mapping here only knows the S2 L1C IMG_DATA layout.
+    if satellite_type not in ("sentinel-1", "sentinel-2"):
         return None
 
+    ext = ".tiff" if satellite_type == "sentinel-1" else ".jp2"
     bands_dir = os.path.join(TEMP_ROOT, str(event_id), "bands")
     os.makedirs(bands_dir, exist_ok=True)
     fresh_token = _resolve_token(token)
@@ -762,7 +820,7 @@ def _download_bands_via_nodes(
     # restart instead of stalling on the catalogue.
     cached = {}
     for tok in band_tokens:
-        cand = os.path.join(bands_dir, f"{tok}.jp2")
+        cand = os.path.join(bands_dir, f"{tok}{ext}")
         if os.path.exists(cand) and os.path.getsize(cand) > 0:
             cached[tok] = cand
     if len(cached) == len(band_tokens):
@@ -777,7 +835,12 @@ def _download_bands_via_nodes(
 
     try:
         with _CDSESession() as session:
-            node_map = _resolve_s2_band_nodes(
+            resolver = (
+                _resolve_s1_band_nodes
+                if satellite_type == "sentinel-1"
+                else _resolve_s2_band_nodes
+            )
+            node_map = resolver(
                 session, product_id, band_tokens, auth_header, timeout
             )
             if not node_map:
@@ -811,7 +874,7 @@ def _download_bands_via_nodes(
                     )
                     return None
                 band_auth_header = {"Authorization": f"Bearer {band_token}"}
-                out_path = os.path.join(bands_dir, f"{tok}.jp2")
+                out_path = os.path.join(bands_dir, f"{tok}{ext}")
 
                 # SCL-specific cache visibility (CHANGE 6 reuse path): this is
                 # the exact same on-disk check _stream_to_file_with_retry is
