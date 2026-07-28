@@ -1001,7 +1001,18 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "status": "complete",
             "satellite_type": satellite_type,
             "cloud_cover": selection.get("cloud_cover"),
-            "selection_reason": selection.get("reason"),
+            "reason": selection.get("reason"),
+            # CHANGE 6 — the AOI-restricted SCL peek's own fields. These are
+            # what let a downstream consumer (or the pipeline log) actually
+            # see that the peek ran and what it decided, instead of only the
+            # legacy scene-level cloud_cover/reason pair. selection_reason
+            # names the real basis (aoi_scl_measured / scene_metadata_clear /
+            # scene_metadata_cloudy / no_s2_candidates / scl_unavailable_fallback);
+            # scene_cloud_percent/aoi_cloud_percent are the raw figures behind
+            # it.
+            "selection_reason": selection.get("selection_reason"),
+            "scene_cloud_percent": selection.get("scene_cloud_percent"),
+            "aoi_cloud_percent": selection.get("aoi_cloud_percent"),
             "index_type": result["index_type"],
             "water_percent": result["water_percent"],
             "mean_index": result["mean_index"],
@@ -1081,6 +1092,16 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "needs_verification": needs_verification,
             "should_alert": should_alert,
         }
+        # A field that exists in `selection` but silently vanishes from
+        # `structured` is the defect class this whole audit series keeps
+        # finding (see the index_type assertion above for the first
+        # instance). If selection produced a real selection_reason,
+        # structured must carry it through unchanged.
+        if selection.get("selection_reason") is not None:
+            assert structured["selection_reason"] == selection["selection_reason"], (
+                f"structured selection_reason {structured['selection_reason']!r} "
+                f"diverges from selection's {selection['selection_reason']!r}"
+            )
 
         # INTEGRATION POINT 5 — a natural, expert-sounding hand-off summary
         # (not raw JSON). The structured payload above still carries the
