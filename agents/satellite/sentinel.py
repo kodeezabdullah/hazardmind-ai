@@ -122,6 +122,7 @@ def select_satellite(
     bbox: Optional[tuple] = None,
     token: Optional[str] = None,
     cloud_cover: Optional[float] = None,
+    aoi_geom: Optional[dict] = None,
 ) -> dict:
     """Pick the Sentinel mission for a disaster, cloud cover deciding.
 
@@ -135,12 +136,47 @@ def select_satellite(
     3. Conflict resolution: cloud cover ALWAYS wins over the user hint
        (physics over assumption) — e.g. heavy cloud + "earthquake" still SAR.
 
+    **AOI-restricted cloud (2026-07-28, CHANGE 6, PARTIAL — see below).**
+    `CLOUD_COVER_THRESHOLD` was previously applied to the scene's own
+    metadata cloud percentage, which CDSE computes over the WHOLE TILE, not
+    the AOI. A scene can be 45% cloudy across its full footprint and
+    completely clear over a small town (or vice versa) — a real run selected
+    the uncalibrated SAR path on a 45.9% scene-level reading without ever
+    checking whether the AOI itself was obscured.
+
+    A real AOI-restricted figure requires the scene's SCL band, which means a
+    download — `select_satellite`/`_peek_cloud_cover` are, by design, a
+    lightweight metadata-only catalogue query with NO download capability at
+    all (that lives in `processor.py`, which imports FROM this module, not
+    the other way around; wiring a real per-candidate SCL pre-fetch in here
+    would mean either an import-cycle-breaking restructure or making this
+    function async and threading a download-capable session through the
+    selection path — a larger restructuring than this session's scope). **So
+    this is intentionally documented as a partial implementation, not forced
+    into a half-working shape:**
+    - `scene_cloud_percent` is always reported (the pre-existing scene-level
+      figure).
+    - `aoi_cloud_percent` is reported ONLY when an AOI-restricted figure was
+      actually computed elsewhere and passed in as `cloud_cover` alongside a
+      caller-supplied provenance hint — today, nothing upstream of this
+      function computes one (no caller does the SCL pre-fetch), so in
+      practice `aoi_cloud_percent` is currently always `None` and
+      `selection_reason` always reflects the scene-level fallback path.
+    - `selection_reason` explicitly names which basis drove the decision
+      (`"scene_cloud_45pct_scl_unavailable"` shape) so a reader can always
+      tell which figure was used, rather than silently assuming AOI-restricted.
+    - Sentinel-1 has no SCL at all, so the scene-level fallback is not a
+      degraded case for S1 — it is S1's normal, permanent path.
+
     Returns:
         {
             "satellite_type": "sentinel-1" | "sentinel-2",
-            "reason": str,                # why this mission was chosen
-            "cloud_cover": float | None,  # observed cloud %, if known
+            "reason": str,                # why this mission was chosen (legacy field)
+            "cloud_cover": float | None,  # observed cloud %, if known (legacy field)
             "user_hint": str,             # the disaster type, lowercased
+            "scene_cloud_percent": float | None,  # CDSE whole-tile cloud %
+            "aoi_cloud_percent": float | None,    # AOI-restricted cloud %, when available
+            "selection_reason": str,      # which basis drove the decision
         }
     """
     disaster = (disaster_type or "").strip().lower()
@@ -158,34 +194,63 @@ def select_satellite(
         hint_satellite = SENTINEL_2
 
     # Step 1: cloud cover from real metadata (or an explicitly supplied value).
+    # No caller anywhere in this codebase computes a real AOI-restricted
+    # figure today (the documented CHANGE 6 gap — see docstring above), so
+    # ANY non-None `observed` value reaching this function, whether supplied
+    # directly or peeked via the metadata-only catalogue query, is a
+    # scene-level figure. `scl_unavailable_reason` is therefore always set
+    # once we have a value from either path.
     observed = cloud_cover
+    scl_unavailable_reason = None
     if observed is None and bbox is not None:
         observed = _peek_cloud_cover(bbox, token)
+        if observed is not None:
+            scl_unavailable_reason = "scl_not_fetched_pre_selection"
+    elif observed is not None:
+        scl_unavailable_reason = "scl_not_computed_caller_supplied_scene_level"
+    else:
+        scl_unavailable_reason = "no_bbox_for_cloud_peek"
+
+    aoi_cloud_percent = None  # never populated today; see docstring gap note
+    scene_cloud_percent = observed
 
     # Step 3: cloud cover wins when we have it.
     if observed is not None:
+        basis_pct = round(observed)
         if observed > CLOUD_COVER_THRESHOLD:
             satellite = SENTINEL_1
-            reason = f"cloud_cover_{round(observed)}_percent"
+            reason = f"cloud_cover_{basis_pct}_percent"
         else:
             satellite = SENTINEL_2
-            reason = f"clear_sky_cloud_cover_{round(observed)}_percent"
+            reason = f"clear_sky_cloud_cover_{basis_pct}_percent"
+        selection_reason = (
+            f"scene_cloud_{basis_pct}pct_scl_unavailable"
+            if scl_unavailable_reason
+            else f"aoi_cloud_{basis_pct}pct"
+        )
     else:
         # No cloud info: trust the user hint.
         satellite = hint_satellite
         reason = f"user_hint_{disaster or 'unknown'}"
+        selection_reason = f"user_hint_{disaster or 'unknown'}_no_cloud_data"
 
     result = {
         "satellite_type": satellite,
         "reason": reason,
         "cloud_cover": observed,
         "user_hint": disaster,
+        "scene_cloud_percent": scene_cloud_percent,
+        "aoi_cloud_percent": aoi_cloud_percent,
+        "selection_reason": selection_reason,
     }
     logger.info(
-        "Selected %s (reason=%s, cloud_cover=%s, hint=%s)",
+        "Selected %s (reason=%s, selection_reason=%s, scene_cloud=%s, "
+        "aoi_cloud=%s, hint=%s)",
         satellite,
         reason,
-        observed,
+        selection_reason,
+        scene_cloud_percent,
+        aoi_cloud_percent,
         disaster,
     )
     return result
@@ -716,31 +781,66 @@ def backfill_uncovered_cities(
     return ranked
 
 
-# Temporal-coherence tiers for reaching 100% coverage (BUG 3). Each entry is
-# (tier number, +/- day window around the anchor date, require same relative
-# orbit). Tier 4 relaxes the orbit constraint. Ascending/descending are NEVER
-# mixed within a Sentinel-1 mosaic in ANY tier (enforced separately).
-COVERAGE_TIERS = (
+# Temporal-coherence tiers for reaching the caller's coverage target (BUG 3;
+# per-satellite windows since 2026-07-28, CHANGE 5). Each entry is (tier
+# number, +/- day window around the anchor date, require same relative
+# orbit). The last tier relaxes the orbit constraint. Ascending/descending
+# are NEVER mixed within a Sentinel-1 mosaic in ANY tier (enforced
+# separately).
+#
+# Day windows are derived from MEASURED revisit cadence, not chosen as round
+# numbers. S2 combined-constellation revisit over Pakistan is ~5d (existing
+# tiers already match this, left as-is). S1 same-relative-orbit revisit over
+# Pakistan was measured ~11 days (see ANALYSIS.md / CLAUDE.md "Tier-window
+# revisit analysis", live CDSE query, 2026-07-27) — tiers narrower than one
+# revisit cycle are structural near-no-ops for S1 (confirmed live: tiers 2/3
+# came back exactly 0.000% coverage gain on the 2026-07-26 e2e run, per
+# CLAUDE.md's "S1 coverage tiers 1-3 exactly-0.000%" entry), so S1 collapses
+# the old +/-3/+/-7 intermediate steps into a single same-orbit window at
+# +/-10 days instead. Re-measure the S1 figure once the post-June-2026
+# constellation configuration (Sentinel-1A retired 2026-06-29) has a clean
+# 90-day history — the 6-day S1C/1D repeat cycle is Europe-concentrated per
+# ESA/ASF planning and does not yet apply globally.
+COVERAGE_TIERS_S2 = (
     (1, 0, True),    # same acquisition date, same relative orbit
     (2, 3, True),    # within +/-3 days, same relative orbit
     (3, 7, True),    # within +/-7 days, same relative orbit
     (4, 14, False),  # within +/-14 days, any orbit (same pass direction only)
 )
+COVERAGE_TIERS_S1 = (
+    (1, 0, True),    # same acquisition date, same relative orbit
+    (2, 10, True),   # within +/-10 days (one measured revisit cycle), same orbit
+    (4, 14, False),  # within +/-14 days, any orbit — tier number kept as 4
+                      # for continuity with S2/DB/log-message tier numbering,
+                      # even though S1 has only 3 tiers total.
+)
+
+# Back-compat alias: some call sites/tests may still import the old flat
+# name. Points at the S2 tuple (the design this constant originally
+# described) — new code should use `coverage_tiers_for(satellite_type)`.
+COVERAGE_TIERS = COVERAGE_TIERS_S2
+
+
+def coverage_tiers_for(satellite_type: str):
+    """Return the per-satellite tier-window tuple for `build_coverage_tiers`."""
+    return COVERAGE_TIERS_S1 if satellite_type == "sentinel-1" else COVERAGE_TIERS_S2
 
 
 def build_coverage_tiers(ranked, satellite_type: str):
     """Yield ordered candidate scene groups per temporal-coherence tier (BUG 3).
 
-    Coverage must reach 100% using a *temporally coherent* mosaic, not an
-    arbitrary set-cover. This produces, for each tier in order, the list of
-    candidate groups to try (the caller downloads+clips group members until real
-    valid-pixel coverage hits 100%, then stops at the first tier that succeeds).
+    Coverage must reach the caller's target using a *temporally coherent*
+    mosaic, not an arbitrary set-cover. This produces, for each tier in
+    order, the list of candidate groups to try (the caller downloads+clips
+    group members until real valid-pixel coverage reaches its target, then
+    stops at the first tier that succeeds).
 
     Coherence rules:
       - The anchor is the most-recent acquisition (best for a *current*
-        disaster). Tiers widen the date window around it: 0, +/-3, +/-7, +/-14 d.
-      - Tiers 1-3 require the SAME relative orbit as the anchor; tier 4 relaxes
-        that.
+        disaster). Tiers widen the date window around it, per-satellite (see
+        `COVERAGE_TIERS_S2`/`COVERAGE_TIERS_S1` above).
+      - Same-orbit tiers require the SAME relative orbit as the anchor; the
+        last tier relaxes that.
       - For Sentinel-1, ascending and descending are never mixed: each tier
         yields groups split by orbit direction (the anchor's direction first).
 
@@ -757,9 +857,10 @@ def build_coverage_tiers(ranked, satellite_type: str):
     anchor_orbit = scene_relative_orbit(anchor)
     anchor_dir = scene_orbit_direction(anchor)
     is_s1 = satellite_type == "sentinel-1"
+    tiers_for_satellite = coverage_tiers_for(satellite_type)
 
     groups = []
-    for tier, window_days, same_orbit in COVERAGE_TIERS:
+    for tier, window_days, same_orbit in tiers_for_satellite:
         in_window = [
             s for s in scenes
             if abs((scene_datetime(s).date() - anchor_date).days) <= window_days
