@@ -18,6 +18,16 @@ class PipelineState(TypedDict):
     disaster_type: Literal["flood", "earthquake", "landslide"]
     magnitude: NotRequired[Optional[float]]
 
+    # Coverage-tolerance / search-budget overrides (2026-07-28,
+    # fix/coverage-tolerance), threaded from AnalyzeRequest through to
+    # agents/satellite/processor.py's process_satellite_imagery. All
+    # optional — the innermost function's own defaults are the ultimate
+    # fallback, never hardcoded anywhere along this chain.
+    min_coverage_percent: NotRequired[Optional[float]]
+    max_scenes: NotRequired[Optional[int]]
+    max_download_gb: NotRequired[Optional[float]]
+    max_search_seconds: NotRequired[Optional[float]]
+
     # Per-stage results (populated as the graph advances; None until that node runs)
     satellite_result: NotRequired[Optional[dict]]   # see satellite_results DB columns
     hazard_result: NotRequired[Optional[dict]]       # see hazard_zones DB columns (3 rows: flood/eq/landslide)

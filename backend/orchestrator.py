@@ -64,6 +64,11 @@ class OrchestratorAgent:
             "location": disaster_data.get("location"),
             "disaster_type": disaster_data.get("disaster_type"),
             "magnitude": disaster_data.get("magnitude"),
+            # Coverage-tolerance / search-budget overrides (fix/coverage-tolerance).
+            "min_coverage_percent": disaster_data.get("min_coverage_percent"),
+            "max_scenes": disaster_data.get("max_scenes"),
+            "max_download_gb": disaster_data.get("max_download_gb"),
+            "max_search_seconds": disaster_data.get("max_search_seconds"),
             "status": "satellite",
             "current_step": "satellite",
             "progress": 0,

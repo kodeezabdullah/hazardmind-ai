@@ -266,6 +266,41 @@ class ProcessDisasterInput(BaseModel):
             "agent can parse it for structure and detect ambiguity."
         ),
     )
+    # Coverage-tolerance / search-budget overrides (2026-07-28,
+    # fix/coverage-tolerance). Optional; None means "use processor.py's own
+    # defaults" (DEFAULT_MIN_COVERAGE_PERCENT / max_scenes=3 /
+    # max_download_gb=4.0 / max_search_seconds=900.0) — these are never
+    # hardcoded a second time here, only threaded through.
+    min_coverage_percent: Optional[float] = Field(
+        None, description="Target interior-AOI coverage percent (80-100, clamped server-side)."
+    )
+    max_scenes: Optional[int] = Field(
+        None, description="Max scenes to attempt across the whole coverage search."
+    )
+    max_download_gb: Optional[float] = Field(
+        None, description="Max cumulative bytes (GB) to download across the whole coverage search."
+    )
+    max_search_seconds: Optional[float] = Field(
+        None, description="Max wall-clock seconds for the whole coverage search."
+    )
+
+
+def _coverage_budget_kwargs(params: "ProcessDisasterInput") -> dict:
+    """Build the kwargs for process_satellite_imagery's budget params.
+
+    min_coverage_percent is always passed (process_satellite_imagery's own
+    clamp treats None as "use DEFAULT_MIN_COVERAGE_PERCENT"). max_scenes/
+    max_download_gb/max_search_seconds are typed with hard numeric defaults
+    there (not Optional), so an unset override is simply omitted rather than
+    passed as None — this keeps the default living in exactly one place
+    (processor.py's function signature), never re-hardcoded here.
+    """
+    kwargs: dict = {"min_coverage_percent": params.min_coverage_percent}
+    for name in ("max_scenes", "max_download_gb", "max_search_seconds"):
+        value = getattr(params, name, None)
+        if value is not None:
+            kwargs[name] = value
+    return kwargs
 
 
 def _coerce_float(value) -> Optional[float]:
@@ -645,19 +680,29 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             city_boundaries=city_polys if ENABLE_PER_CITY_ARTIFACTS else None,
             # Tiers 3/4 lower confidence + append an anomaly through this tracker.
             tracker=tracker,
+            # Coverage-tolerance / search-budget overrides (fix/coverage-tolerance).
+            # min_coverage_percent accepts None directly (process_satellite_imagery
+            # clamps None to its own default). max_scenes/max_download_gb/
+            # max_search_seconds are typed with hard numeric defaults there, so an
+            # unset override is omitted from the call rather than passed as None.
+            **_coverage_budget_kwargs(params),
         )
         if result is None:
             return _error(event_id, "Satellite imagery processing failed")
         if result.get("status") == "failed" and (
             result.get("reason") == "insufficient_coverage"
         ):
-            # HARD REQUIREMENT: 100% valid-pixel AOI coverage. No tier reached it,
-            # so we FAIL HONESTLY rather than analyse a partial AOI and report a
-            # risk level for it (BUG 3). Surface the gap geometry so downstream
-            # can see WHERE coverage is missing and whether more tiles would help
-            # (nodata) or the sky was covered that week (cloud).
+            # HARD FLOOR: coverage stayed below COVERAGE_FLOOR (80%, see
+            # processor.py's coverage-tolerance banding, 2026-07-28) even
+            # after the whole tiered/budgeted search. FAIL HONESTLY rather
+            # than analyse a too-poorly-sampled AOI and report a risk level
+            # for it (BUG 3). Surface the gap geometry so downstream can see
+            # WHERE coverage is missing and whether more tiles would help
+            # (nodata) or the sky was covered that week (cloud), and whether
+            # a budget ran out before the floor was even approached.
             gaps = result.get("gaps") or []
-            gap_cause = result.get("gap_cause") or {}
+            gap_cause = result.get("gap_cause") or result.get("gap_attribution") or {}
+            budget_exhausted = result.get("budget_exhausted")
             # INTEGRATION POINT 3 — let the LLM weigh in (may recommend Landsat).
             recovery = _recover(
                 "coverage_insufficient",
@@ -667,6 +712,7 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                     "uncovered_area_km2": result.get("uncovered_area_km2"),
                     "uncovered_regions": result.get("uncovered_regions"),
                     "gap_cause": gap_cause,
+                    "budget_exhausted": budget_exhausted,
                     "disaster_type": disaster_type,
                     "location": location,
                 },
@@ -676,21 +722,26 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             if recovery and recovery.get("alert_human"):
                 note = f" | {recovery.get('alert_message', '')}"
             logger.error(
-                "[%s] INSUFFICIENT COVERAGE: best %.3f%% interior; %d gap(s), "
-                "%.3f km^2 uncovered (nodata=%s px, cloud=%s px)",
+                "[%s] INSUFFICIENT COVERAGE: best %.3f%% interior (floor "
+                "%.1f%%); %d gap(s), %.3f km^2 uncovered (nodata=%s px, "
+                "cloud=%s px)%s",
                 event_id,
                 result.get("coverage_percent", 0.0),
+                result.get("min_coverage_percent") or 90.0,
                 result.get("uncovered_regions", 0),
                 result.get("uncovered_area_km2", 0.0),
                 gap_cause.get("nodata"),
                 gap_cause.get("cloud"),
+                f" [budget_exhausted={budget_exhausted}]" if budget_exhausted else "",
             )
             return _coverage_failure(
                 event_id,
-                "insufficient_coverage: could not cover 100% of the AOI with "
-                f"valid pixels (best {result.get('coverage_percent')}%; "
+                "insufficient_coverage: could not reach the minimum viable "
+                f"AOI coverage (best {result.get('coverage_percent')}%; "
                 f"{result.get('uncovered_regions')} uncovered region(s), "
-                f"{result.get('uncovered_area_km2')} km^2)" + note,
+                f"{result.get('uncovered_area_km2')} km^2)"
+                + (f" | search budget exhausted: {budget_exhausted}" if budget_exhausted else "")
+                + note,
                 {
                     "coverage_percent": result.get("coverage_percent"),
                     "full_aoi_coverage_percent": result.get(
@@ -698,9 +749,14 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
                     ),
                     "uncovered_regions": result.get("uncovered_regions"),
                     "uncovered_area_km2": result.get("uncovered_area_km2"),
+                    "gap_count": result.get("gap_count"),
+                    "gap_area_km2": result.get("gap_area_km2"),
+                    "gap_attribution": gap_cause,
+                    "gap_limited_by": result.get("gap_limited_by"),
                     "gaps": gaps,
                     "gap_cause": gap_cause,
                     "bytes_downloaded": result.get("bytes_downloaded"),
+                    "budget_exhausted": budget_exhausted,
                 },
             )
 

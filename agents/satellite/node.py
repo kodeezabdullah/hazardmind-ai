@@ -30,6 +30,11 @@ async def satellite_node(state: PipelineState) -> dict:
         location=state["location"],
         disaster_type=state["disaster_type"],
         magnitude=state.get("magnitude"),
+        # Coverage-tolerance / search-budget overrides (fix/coverage-tolerance).
+        min_coverage_percent=state.get("min_coverage_percent"),
+        max_scenes=state.get("max_scenes"),
+        max_download_gb=state.get("max_download_gb"),
+        max_search_seconds=state.get("max_search_seconds"),
     )
 
     raw = await run_pipeline(params)
