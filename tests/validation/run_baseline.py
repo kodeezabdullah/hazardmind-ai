@@ -95,10 +95,20 @@ def _run_one_path(
     path_key: str,
     product_cfg: dict,
     dry_run: bool,
+    forced_satellite_type: str | None = None,
 ) -> EventResult:
     event_key = event_cfg["event_key"]
     label = f"{event_key}::{path_key}"
     notes: list[str] = list(event_cfg.get("caveats", []))
+    if forced_satellite_type:
+        notes.append(
+            f"SATELLITE SELECTION FORCED to {forced_satellite_type} for this run "
+            "(tests/validation/forced_satellite_override.py) — this bypasses "
+            "select_satellite's real cloud-aware decision entirely; the DB row's "
+            "selection_reason will read 'harness_forced_selection', never a real "
+            "selection_reason value, so this cannot be mistaken for an "
+            "organically-selected result."
+        )
 
     # 1. Reference geometry (ground truth) — always loaded, even in a
     #    dry run, since this is what step 2/3 of the task asks the harness
@@ -241,6 +251,7 @@ def _run_one_path(
             max_scenes=BUDGET_MAX_SCENES,
             max_download_gb=BUDGET_MAX_DOWNLOAD_GB,
             max_search_seconds=BUDGET_MAX_SEARCH_SECONDS,
+            forced_satellite_type=forced_satellite_type,
         )
     except Exception as exc:
         return EventResult(
@@ -374,7 +385,19 @@ def _run_one_path(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", help="Only run this event_key")
+    parser.add_argument("--path", help="Only run this reference_products path key (e.g. sentinel1)")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--force-satellite",
+        choices=["sentinel-1", "sentinel-2"],
+        help=(
+            "Bypass select_satellite's real cloud-aware decision and force this "
+            "satellite type for every run in this invocation (harness-only, see "
+            "forced_satellite_override.py). Use this to validate a specific "
+            "S1/S2 path when the reference date's real sky conditions would "
+            "otherwise select the other satellite."
+        ),
+    )
     args = parser.parse_args()
 
     configs = _load_event_configs()
@@ -407,7 +430,14 @@ def main() -> int:
         for path_key, product_cfg in cfg.get("reference_products", {}).items():
             if path_key.endswith("_reference_only"):
                 continue  # recorded for completeness, not run as a scored path
-            results.append(_run_one_path(cfg, path_key, product_cfg, args.dry_run))
+            if args.path and path_key != args.path:
+                continue
+            results.append(
+                _run_one_path(
+                    cfg, path_key, product_cfg, args.dry_run,
+                    forced_satellite_type=args.force_satellite,
+                )
+            )
 
     print_summary_table(results)
     if not args.dry_run:

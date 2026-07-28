@@ -26,6 +26,17 @@ harness has no business doing), so the isolation is simpler: just prepend
 agents/satellite/ to sys.path for the pipeline call, and separately prepend
 backend/ to sys.path for the DB read-back, without ever importing
 backend/router.py or backend/orchestrator.py.
+
+**`forced_satellite_type`** (optional): validates the specific satellite path
+a reference event was chosen to test, bypassing `select_satellite`'s real
+cloud-aware decision for this run only (see forced_satellite_override.py's
+module docstring for the full safety argument). When set, the run's
+`selection_reason` in the persisted satellite_results row is always exactly
+"harness_forced_selection" — a value the real pipeline can never produce —
+so a forced result is never mistaken for a real one in any stored evidence.
+BASELINE_REPORT.md §3 documented that every baseline run's clear-sky
+historical date defeated the harness's intent to test S1, for two different
+reasons across two sessions; this parameter is the fix flagged there.
 """
 
 from __future__ import annotations
@@ -89,6 +100,7 @@ def run_pipeline_for_event(
     max_scenes: Optional[int] = None,
     max_download_gb: Optional[float] = None,
     max_search_seconds: Optional[float] = None,
+    forced_satellite_type: Optional[str] = None,
 ) -> dict:
     """Invoke the real satellite pipeline end to end:
 
@@ -128,6 +140,14 @@ def run_pipeline_for_event(
     # cached module-level import of `datetime` elsewhere.
     import agent as satellite_agent  # type: ignore
     from sentinel_clock_patch import frozen_sentinel_clock  # local harness module
+    from forced_satellite_override import forced_satellite  # local harness module
+    import contextlib
+
+    satellite_override_cm = (
+        forced_satellite(forced_satellite_type)
+        if forced_satellite_type
+        else contextlib.nullcontext()
+    )
 
     backend_db = _load_backend_db()
 
@@ -180,7 +200,7 @@ def run_pipeline_for_event(
             await backend_db.update_event_status(event_id, status="processing", step="satellite")
 
             started = time.monotonic()
-            with frozen_sentinel_clock(as_of):
+            with frozen_sentinel_clock(as_of), satellite_override_cm:
                 # _run_pipeline_sync is blocking (it does its own internal
                 # asyncio.run() for the DB persist and synchronous I/O for
                 # everything else) — run it in a worker thread so it doesn't
