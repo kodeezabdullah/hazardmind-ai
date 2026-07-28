@@ -141,6 +141,7 @@ def run_pipeline_for_event(
     import agent as satellite_agent  # type: ignore
     from sentinel_clock_patch import frozen_sentinel_clock  # local harness module
     from forced_satellite_override import forced_satellite  # local harness module
+    from aoi_pin import pinned_aoi  # local harness module
     import contextlib
 
     satellite_override_cm = (
@@ -200,7 +201,12 @@ def run_pipeline_for_event(
             await backend_db.update_event_status(event_id, status="processing", step="satellite")
 
             started = time.monotonic()
-            with frozen_sentinel_clock(as_of), satellite_override_cm:
+            # pinned_aoi: boundary resolution replayed from the on-disk cache
+            # (tests/validation/cache/aoi/) so Nominatim drift can never move
+            # the AOI between runs of the same event — see aoi_pin.py for the
+            # live confound this closed (Kanalia's reference area shifted
+            # 16.082 -> 20.308 km² across two harness sessions).
+            with frozen_sentinel_clock(as_of), satellite_override_cm, pinned_aoi():
                 # _run_pipeline_sync is blocking (it does its own internal
                 # asyncio.run() for the DB persist and synchronous I/O for
                 # everything else) — run it in a worker thread so it doesn't

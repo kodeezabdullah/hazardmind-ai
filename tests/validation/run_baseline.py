@@ -144,9 +144,14 @@ def _run_one_path(
             # Using the SAME function here means the harness scores against
             # the same geometry the pipeline itself actually analyses.
             from boundary import get_risk_city_boundaries  # local import, needs agents/satellite on sys.path
+            from aoi_pin import pinned_aoi  # deterministic AOI replay (see aoi_pin.py)
 
             headline_city = event_cfg["pipeline_location"].split(",")[0].strip()
-            city_boundaries = get_risk_city_boundaries(event_cfg["pipeline_location"], [headline_city])
+            with pinned_aoi():
+                import boundary as _boundary_mod  # patched inside the context
+                city_boundaries = _boundary_mod.get_risk_city_boundaries(
+                    event_cfg["pipeline_location"], [headline_city]
+                )
             if not city_boundaries:
                 raise RuntimeError(
                     f"Could not resolve pipeline boundary for "
