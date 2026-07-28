@@ -223,6 +223,35 @@ def test_nonpositive_within_water_mean_flags_inconsistency():
             f"concerns={trk.concerns}")
 
 
+def test_confidence_basis_weak_vs_contradicts():
+    """Phase 0b-2: a merely-low score with nothing actively contradicting is
+    'evidence_weak', not 'evidence_contradicts'; a CRITICAL concern is what
+    'contradicts' means."""
+    weak = ConfidenceTracker()
+    weak.add_evidence("cloud_check", 0.5, weight=0.2)
+    weak.add_concern("scene is 13 days old", "MEDIUM")
+    if weak.confidence_basis() == "evidence_weak":
+        ok("low score, no CRITICAL -> evidence_weak")
+    else:
+        bad(f"expected evidence_weak, got {weak.confidence_basis()!r}")
+
+    contra = ConfidenceTracker()
+    contra.add_evidence("cloud_check", 0.5, weight=0.2)
+    contra.add_concern("0% water classified but GDACS RED", "CRITICAL")
+    if contra.confidence_basis() == "evidence_contradicts":
+        ok("CRITICAL concern -> evidence_contradicts")
+    else:
+        bad(f"expected evidence_contradicts, got {contra.confidence_basis()!r}")
+
+    strong = ConfidenceTracker()
+    strong.add_evidence("index_validation", 0.95, weight=0.3)
+    strong.add_evidence("cloud_check", 0.95, weight=0.2)
+    if strong.confidence_basis() == "evidence_supports":
+        ok("high score, no concerns -> evidence_supports")
+    else:
+        bad(f"expected evidence_supports, got {strong.confidence_basis()!r}")
+
+
 if __name__ == "__main__":
     print("=" * 64)
     print("PHASE 0b — WITHIN-WATER MEAN / evidence_contradicts FIX")
@@ -233,6 +262,7 @@ if __name__ == "__main__":
     test_zero_water_gdacs_red_still_contradicts()
     test_zero_water_no_gdacs_is_quiet()
     test_nonpositive_within_water_mean_flags_inconsistency()
+    test_confidence_basis_weak_vs_contradicts()
     print("=" * 64)
     print(f"RESULT: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 64)

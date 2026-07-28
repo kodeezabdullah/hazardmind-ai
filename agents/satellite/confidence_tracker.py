@@ -154,16 +154,29 @@ class ConfidenceTracker:
         * ``"insufficient_evidence"`` — no evidence was ever gathered (every
           reachable source was unreachable/skipped). The pipeline could not
           say anything, favourable or not.
-        * ``"evidence_contradicts"`` — evidence was gathered, but the score is
-          still low: at least one CRITICAL concern fired, or the weighted
-          evidence average was dragged below the verification threshold.
+        * ``"evidence_contradicts"`` — at least one CRITICAL concern fired:
+          something actively disagrees with the result (e.g. 0% water
+          classified against a GDACS RED alert, >60% cloud on an optical
+          run). Phase 0b (science/full-pass): this label previously ALSO
+          fired whenever confidence merely sat below the verification
+          threshold — conflating "we are not sure" with "the evidence
+          disagrees", which made the basis field fire on 100% of baseline
+          runs regardless of outcome quality (BASELINE_REPORT_2 §5) and
+          uninformative. A merely-low score is now ``"evidence_weak"``.
+        * ``"evidence_weak"`` — evidence was gathered, nothing actively
+          contradicts the result, but the weighted score is below the
+          verification threshold (sparse/low-quality evidence, stale scene,
+          accumulated non-critical concerns). Verify before acting; nothing
+          is known to disagree.
         * ``"evidence_supports"`` — evidence was gathered and the result reads
           as reliable.
         """
         if not self.evidence:
             return "insufficient_evidence"
-        if self.should_alert_team() or self.needs_verification():
+        if self.should_alert_team():
             return "evidence_contradicts"
+        if self.needs_verification():
+            return "evidence_weak"
         return "evidence_supports"
 
     def get_report(self) -> dict[str, Any]:
