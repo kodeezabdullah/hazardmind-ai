@@ -378,7 +378,11 @@ class CrossValidator:
         if (disaster_type or "").lower() == "flood":
             index_type = satellite_result.get("index_type")
             index_calibrated = satellite_result.get("index_calibrated")
-            if index_type == "NDWI" and index_calibrated is not False:
+            # Phase 1b: MNDWI (Xu 2006) is the flood index since 2026-07-29;
+            # it is a calibrated bounded water ratio exactly like NDWI, with
+            # the same water-positive/land-negative sign convention, so the
+            # same physics check applies to both labels.
+            if index_type in ("NDWI", "MNDWI") and index_calibrated is not False:
                 # Phase 0b (science/full-pass): the physics check previously
                 # judged the WHOLE-AOI mean NDWI against water thresholds.
                 # With dry land ~-0.3 and open water ~+0.4, the whole-AOI mean

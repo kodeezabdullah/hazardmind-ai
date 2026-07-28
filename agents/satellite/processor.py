@@ -1851,16 +1851,43 @@ def calculate_indices(
         index_calibrated = False
         index_units = "dB_uncalibrated"
     elif disaster == "flood":
-        b03, b08 = bands.get("B03"), bands.get("B08")
-        if b03 is None or b08 is None:
-            logger.error("NDWI needs B03 and B08; one is missing")
+        # Phase 1b (science/full-pass): MNDWI (Xu 2006) replaces McFeeters
+        # NDWI as the primary flood index. (B03-B11)/(B03+B11) — B11 (SWIR)
+        # was chosen by Xu specifically because built-up surfaces, NDWI's
+        # documented false-positive class, reflect strongly in SWIR and are
+        # suppressed in the ratio, while water absorbs SWIR even more
+        # strongly than NIR. B11 is already in the flood band set (no new
+        # fetch) and is resampled 20m->10m bilinearly in stack_bands —
+        # appropriate for a continuous radiometric band feeding a continuous
+        # ratio (nearest would tile 2x2 blocks of identical reflectance and
+        # put blocky artifacts on every water edge; SCL, the categorical
+        # layer, is the one that gets nearest).
+        # Threshold: HELD at the NDWI-era constant this phase so the
+        # measured delta is the index formula alone (Phase 2 replaces the
+        # fixed threshold adaptively) — the measured number is therefore a
+        # lower bound on MNDWI's value, stated in SCIENCE_LOG.md.
+        # Fallback: if B11 is genuinely absent (non-flood band set reuse,
+        # legacy cache), compute NDWI and LABEL IT NDWI — the label always
+        # follows the formula actually used, never the intended one.
+        b03, b08, b11 = bands.get("B03"), bands.get("B08"), bands.get("B11")
+        if b03 is None or (b11 is None and b08 is None):
+            logger.error("Flood index needs B03 plus B11 (MNDWI) or B08 (NDWI fallback)")
             return None
-        index = _safe_ratio(b03 - b08, b03 + b08)
-        index_type = "NDWI"
+        if b11 is not None:
+            index = _safe_ratio(b03 - b11, b03 + b11)
+            index_type = "MNDWI"
+            index_units = "MNDWI_ratio"
+        else:
+            logger.warning(
+                "B11 missing — falling back to NDWI (B03/B08); built-up "
+                "false-positive suppression unavailable on this run"
+            )
+            index = _safe_ratio(b03 - b08, b03 + b08)
+            index_type = "NDWI"
+            index_units = "NDWI_ratio"
         scheme_key = "NDWI"
         threshold = NDWI_WATER_THRESHOLD
         index_calibrated = True
-        index_units = "NDWI_ratio"
     else:
         b08, b04 = bands.get("B08"), bands.get("B04")
         if b08 is None or b04 is None:

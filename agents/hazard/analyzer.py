@@ -343,12 +343,18 @@ async def analyze_flood(
     gdacs_data,
     satellite_type="sentinel-2",
     index_calibrated=None,
+    index_type=None,
 ) -> dict:
     if satellite_type == "sentinel-1":
         index_label = "SAR backscatter ratio (VV-VH)"
         index_context = "Values near 0 indicate water. Negative values mean flooding."
     else:
-        index_label = "NDWI flood index"
+        # Phase 1b: the satellite agent computes MNDWI (Xu 2006) since
+        # 2026-07-29; older payloads/fallbacks may still say NDWI. Label from
+        # the real index_type the payload carries — never a hardcoded name
+        # that can drift from what was actually computed.
+        label = index_type if index_type in ("NDWI", "MNDWI") else "MNDWI"
+        index_label = f"{label} flood index"
         index_context = "Values above 0.3 indicate flooding. Above 0.5 is severe."
 
     prompt = (
@@ -769,7 +775,7 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     )
 
     analysis_results = await asyncio.gather(
-        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type, index_calibrated),
+        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type, index_calibrated, analysis.get("index_type")),
         analyze_earthquake(bbox, usgs_data),
         analyze_landslide(bbox, gdacs_data, slope_data),
         return_exceptions=True,
