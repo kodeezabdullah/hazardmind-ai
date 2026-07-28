@@ -122,8 +122,21 @@ async def write_to_db(result: dict) -> None:
     overall_confidence.
     """
     confidence_scores = result.get("confidence_scores", {})
+    evidence_basis = result.get("evidence_basis") or {}
     severity = result["overall_severity"]
-    confirmed_by = json.dumps(confidence_scores)
+
+    # confirmed_by carries confidence_scores (unchanged) plus, additively, the
+    # evidence provenance (real DEM slope / USGS fetch status) for the
+    # per-row hazard_type this JSON blob belongs to — a LOW/UNKNOWN verdict is
+    # otherwise indistinguishable from one produced by a fetch failure's
+    # conservative default (see analyzer.analyze_landslide/analyze_earthquake).
+    def _confirmed_by(hazard_type: str) -> str:
+        return json.dumps(
+            {
+                "confidence_scores": confidence_scores,
+                "evidence_basis": evidence_basis.get(hazard_type),
+            }
+        )
 
     rows = [
         {
@@ -133,6 +146,7 @@ async def write_to_db(result: dict) -> None:
             "flood_depth_estimate": result.get("flood_depth_estimate"),
             "earthquake_mmi": None,
             "landslide_probability": None,
+            "confirmed_by": _confirmed_by("flood"),
         },
         {
             "hazard_type": "earthquake",
@@ -141,6 +155,7 @@ async def write_to_db(result: dict) -> None:
             "flood_depth_estimate": None,
             "earthquake_mmi": result.get("earthquake_mmi"),
             "landslide_probability": None,
+            "confirmed_by": _confirmed_by("earthquake"),
         },
         {
             "hazard_type": "landslide",
@@ -149,6 +164,7 @@ async def write_to_db(result: dict) -> None:
             "flood_depth_estimate": None,
             "earthquake_mmi": None,
             "landslide_probability": result.get("landslide_probability"),
+            "confirmed_by": _confirmed_by("landslide"),
         },
     ]
 
@@ -177,7 +193,7 @@ async def write_to_db(result: dict) -> None:
                 row["risk_level"],
                 row["hazard_type"],
                 severity,
-                confirmed_by,
+                row["confirmed_by"],
                 row["flood_depth_estimate"],
                 row["earthquake_mmi"],
                 row["landslide_probability"],
