@@ -668,6 +668,28 @@ pre-existing environment issue, not a code regression). No live e2e was run
 this session, per the task's explicit scope — that is the natural next step
 once this lands.
 
+**PROJ_LIB RESOLVED (2026-07-28, coherence pass on `feat/durable-evidence-trail`).**
+The count above ("`test_bug_fixes.py`/`test_clip_window.py` fail") undercounted
+the real scope: it was **8 failures**, all in `test_bug_fixes.py` (7) and one
+in `test_correctness_fixes_20260727.py::test_scene_id_threaded_into_merged_result`
+(1) — `test_clip_window.py` itself was not actually among the failures, despite
+being named alongside `test_bug_fixes.py` in the passage above. Root cause,
+found precisely: this dev box's shell exports `PROJ_LIB` pointing at
+PostgreSQL/PostGIS's older `proj.db`. GDAL/rasterio reads and caches this at
+`import rasterio` time (module/driver-registration, not first CRS lookup) —
+once PROJ has initialized against a bad `proj.db` in a process, no later
+`os.environ["PROJ_LIB"]` reassignment can undo it; the fix has to land before
+rasterio is ever imported in that process. Fixed via
+`agents/satellite/tests/conftest.py`, which computes rasterio's own bundled
+`proj_data` directory path via a plain filesystem walk (no `import rasterio`)
+and pins `PROJ_LIB`/`PROJ_DATA` to it before any test module runs. All 8
+previously-failing tests now pass with no manual environment setup, on a
+shell that has the conflicting system `PROJ_LIB` exported. Full satellite
+suite re-verified: `test_bug_fixes.py`/`test_clip_window.py`/
+`test_correctness_fixes_20260727.py` 34/34 (was 26/34), full `tests/`
+directory 82/82. See `shared/db/migrations/` commit history for the rest of
+this pass's changes.
+
 **Threading.** `min_coverage_percent`/`max_scenes`/`max_download_gb`/
 `max_search_seconds` are optional fields on `backend/models.py`'s
 `AnalyzeRequest`, threaded through `backend/router.py`'s `disaster_data` →
