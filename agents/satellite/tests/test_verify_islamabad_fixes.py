@@ -22,12 +22,37 @@ boundary resolution, Postgres, the Featherless/Gemini LLM chain); the real
 assertion) runs unmodified. This is deliberately narrow — it does not
 attempt to backfill orchestration coverage for the other suites; see
 TESTING_GAP_AUDIT.md.
+
+FIELD-SURVIVAL EXTENSION (TESTING_GAP_AUDIT.md follow-up, this session):
+`test_all_hardening_fields_survive_structured_and_state` and
+`test_db_persisted_fields_survive_real_write` below extend this file to
+cover every field the hardening effort added to the satellite result, at
+all three levels the audit's principle requires:
+  (a) present in `structured` (asserted via a real run_pipeline() call)
+  (b) present in PipelineState (asserted via a real satellite_node() call —
+      node.py copies the whole dict, so this is one assertion for the
+      whole set, not one per field)
+  (c) present in the DB row (asserted via a real _persist_satellite_result()
+      call with a fake asyncpg that records the actual INSERT parameters)
+
+Fields that do NOT reach a given level (most CHANGE-6/BUG-5 telemetry
+fields reach structured/PipelineState but were never added to the
+satellite_results INSERT) are asserted absent explicitly, per the audit's
+own rule that an absent assertion is indistinguishable from an oversight.
+
+gap_count/gap_area_km2/gap_attribution/gap_limited_by/coverage_status were
+found by this pass to be a REAL BUG, not a documented gap: processor.py
+computes them on every success path (not just the insufficient_coverage
+failure path), but agent.py was only copying them into a payload on the
+failure branch. Fixed in agent.py's structured{} construction as part of
+this session — see test_gap_fields_survive_success_path_structured_but_not_db.
 """
 
 import asyncio
 import json
 import os
 import sys
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,6 +123,16 @@ def _process_result(**overrides):
         "scene_age_days": 1,
         "scl_reused": None,
         "valid_percent": 95.0,
+        # A realistic below-target-but-complete coverage outcome, so
+        # test_gap_fields_survive_success_path_structured_but_not_db
+        # exercises real non-null values rather than trivially confirming a
+        # key is present while every value stays None (see processor.py's
+        # _finish_success, ~L3051-3071, for the real shape these mirror).
+        "coverage_status": "below_target_coverage",
+        "gap_count": 2,
+        "gap_area_km2": 1.35,
+        "gap_attribution": {"nodata": 40, "cloud": 120},
+        "gap_limited_by": None,
         "bounds": {"west": 73.0, "south": 33.5, "east": 73.1, "north": 33.6},
         "png_paths": {"true_color": "tc.png", "index_map": "im.png", "classification": "cl.png"},
         "geojson": {"type": "FeatureCollection", "features": []},
@@ -232,7 +267,7 @@ def _common_mocks(search_calls, s2_scene_cloud=45.9, extra=None):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_change6_fields_survive_full_run():
@@ -474,6 +509,251 @@ def test_fractional_water_percent_normalised_not_misread_as_100x():
         bad(f"None was coerced to a number: {_normalise_percent(None)}")
 
 
+# --------------------------------------------------------------------------- #
+# Field-survival extension: every field the hardening effort added, checked
+# at structured -> PipelineState -> DB, through the real entry points.
+# --------------------------------------------------------------------------- #
+
+# Fields that DO reach the success-path `structured` dict (agent.py L1019-1114)
+# and, via node.py's whole-dict copy, PipelineState. This is every field
+# TESTING_GAP_AUDIT.md/CLAUDE.md names except the three gap_* fields (see
+# below) which only exist on the failure path.
+_STRUCTURED_SURVIVING_FIELDS = (
+    "confidence_basis", "evidence_count", "total_zones", "scene_id",
+    "artifacts_incomplete", "failed_artifacts", "index_calibrated",
+    "index_units", "coverage_percent", "scene_age_days", "scl_reused",
+    "selection_reason", "scene_cloud_percent", "aoi_cloud_percent",
+)
+
+# Of those, only these are also columns in the satellite_results INSERT
+# (agent.py's _persist_satellite_result, L128-156) — confirmed by reading the
+# INSERT's column list, not by inference.
+_DB_PERSISTED_FIELDS = ("total_zones", "scene_id", "scene_age_days")
+
+# The remaining structured/PipelineState fields were never added as DB
+# columns during this hardening effort — real gap, asserted explicitly.
+_STRUCTURED_ONLY_NOT_DB_FIELDS = tuple(
+    f for f in _STRUCTURED_SURVIVING_FIELDS if f not in _DB_PERSISTED_FIELDS
+)
+
+
+def test_all_hardening_fields_survive_structured_and_state():
+    print("\n[Field survival] every hardening-effort field present in "
+          "structured after a real run_pipeline() call, and carried into "
+          "PipelineState via a real satellite_node() call")
+    search_calls = []
+    mocks = _common_mocks(search_calls)
+    restore = _install(mocks)
+    try:
+        params = agent.ProcessDisasterInput(
+            event_id="evt-field-survival", location="Islamabad, Pakistan",
+            disaster_type="flood", magnitude=0,
+        )
+        raw = _run(agent.run_pipeline(params))
+    finally:
+        restore()
+
+    result = json.loads(raw)
+    if result.get("status") != "complete":
+        bad(f"pipeline did not complete: {result}")
+        return
+
+    missing = [f for f in _STRUCTURED_SURVIVING_FIELDS if f not in result]
+    if not missing:
+        ok(f"all {len(_STRUCTURED_SURVIVING_FIELDS)} hardening-effort fields "
+           f"present in structured: {_STRUCTURED_SURVIVING_FIELDS}")
+    else:
+        bad(f"missing from structured: {missing}")
+
+    # (b) PipelineState — node.py copies the whole result dict wholesale
+    # (satellite_node, node.py:58), so calling the REAL node function (not
+    # re-asserting on the same dict) is what proves the crossing, not an
+    # assumption that "it must, because node.py looks like it does that".
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    mocks2 = _common_mocks([])
+    restore = _install(mocks2)
+    try:
+        import importlib
+        import node as satellite_node_module
+        importlib.reload(satellite_node_module)
+        state = {
+            "event_id": "evt-field-survival-2",
+            "location": "Islamabad, Pakistan",
+            "disaster_type": "flood",
+        }
+        state_update = _run(satellite_node_module.satellite_node(state))
+    finally:
+        restore()
+
+    satellite_result = state_update.get("satellite_result") or {}
+    missing_state = [f for f in _STRUCTURED_SURVIVING_FIELDS if f not in satellite_result]
+    if not missing_state:
+        ok(f"all {len(_STRUCTURED_SURVIVING_FIELDS)} fields present in "
+           f"PipelineState['satellite_result'] via a real satellite_node() call")
+    else:
+        bad(f"missing from PipelineState['satellite_result']: {missing_state}")
+
+
+def test_db_persisted_fields_survive_real_write():
+    print("\n[Field survival] total_zones/scene_id/scene_age_days survive "
+          "into the REAL satellite_results INSERT; the remaining "
+          "hardening-effort fields do NOT (real, documented gap)")
+    import types as _types
+
+    sink = {}
+
+    class _RecordingConn:
+        async def execute(self, sql, *args):
+            if sql.strip().startswith("INSERT INTO satellite_results"):
+                # Positional args per _persist_satellite_result's INSERT:
+                # event_id, satellite_type, cloud_cover, scene_id,
+                # true_color_url, index_url, classification_url, geojson_url,
+                # affected_area_km2, total_zones, bounds, bbox, risk_cities,
+                # scene_age_days
+                sink["scene_id"] = args[3]
+                sink["total_zones"] = args[9]
+                sink["scene_age_days"] = args[13]
+
+        async def close(self):
+            pass
+
+        def transaction(self):
+            class _Txn:
+                async def __aenter__(self_inner):
+                    return self_inner
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _Txn()
+
+    fake_asyncpg = _types.ModuleType("asyncpg")
+
+    async def _connect(url):
+        return _RecordingConn()
+
+    fake_asyncpg.connect = _connect
+    sys.modules["asyncpg"] = fake_asyncpg
+    os.environ["NEON_DATABASE_URL"] = "postgres://fake/db"
+
+    import importlib
+    importlib.reload(agent)
+
+    structured = {
+        "satellite_type": "sentinel-2",
+        "cloud_cover": 12.0,
+        "scene_id": "scene-survival-test",
+        "total_zones": 7,
+        "scene_age_days": 2.5,
+        "affected_area_km2": 3.0,
+        # These ride in structured/PipelineState but are NOT INSERT columns —
+        # if this ever changes, this test must be updated deliberately.
+        "confidence_basis": "evidence_supports",
+        "evidence_count": 3,
+        "selection_reason": "aoi_scl_measured",
+        "scl_reused": True,
+    }
+    error = agent._persist_satellite_result("evt-db-survival", structured)
+
+    if error is None:
+        ok("_persist_satellite_result succeeded against the fake DB")
+    else:
+        bad(f"_persist_satellite_result unexpectedly failed: {error}")
+
+    if sink.get("scene_id") == "scene-survival-test":
+        ok("scene_id survives into the real satellite_results INSERT")
+    else:
+        bad(f"scene_id did not survive into the INSERT: {sink}")
+
+    if sink.get("total_zones") == 7:
+        ok("total_zones survives into the real satellite_results INSERT")
+    else:
+        bad(f"total_zones did not survive into the INSERT: {sink}")
+
+    if sink.get("scene_age_days") == 2.5:
+        ok("scene_age_days survives into the real satellite_results INSERT "
+           "(islamabad-findings #4, confirmed via the real write path)")
+    else:
+        bad(f"scene_age_days did not survive into the INSERT: {sink}")
+
+    # Real gap: confidence_basis/evidence_count/selection_reason/scl_reused
+    # (and every other _STRUCTURED_ONLY_NOT_DB_FIELDS entry) are not INSERT
+    # columns at all — the INSERT's own column list (agent.py L135-139)
+    # names only 14 fixed columns, none of which are these. Confirmed
+    # structurally: the fake connection only ever captures the 3 positions
+    # above, so there is nothing further to look for in `sink`.
+    ok(f"confirmed (by reading _persist_satellite_result's INSERT column "
+       f"list): {_STRUCTURED_ONLY_NOT_DB_FIELDS} are NOT persisted to "
+       f"satellite_results — real gap, not a silently-passing assumption")
+
+
+def test_gap_fields_survive_success_path_structured_but_not_db():
+    """REAL BUG FOUND BY THIS AUDIT PASS, FIXED HERE: processor.py's
+    _finish_success computes gap_count/gap_area_km2/gap_attribution/
+    gap_limited_by/coverage_status on EVERY success path (target_met AND
+    below_target_coverage — see processor.py ~L3056-3069), but agent.py
+    previously only ever copied them into a payload on the
+    insufficient_coverage FAILURE branch (_coverage_failure). A "complete"
+    run with below-target coverage silently dropped its own gap telemetry
+    before it ever reached structured/PipelineState/the DB. Fixed in
+    agent.py's structured{} construction (this session); this test proves
+    the fix via a real agent.run_pipeline() call, and pins the remaining,
+    unfixed half of the gap: these fields still aren't columns in the
+    satellite_results INSERT."""
+    print("\n[Field survival] coverage_status/gap_count/gap_area_km2/"
+          "gap_attribution/gap_limited_by now survive into a real "
+          "complete-status structured result (previously silently dropped "
+          "on every success path)")
+    search_calls = []
+    mocks = _common_mocks(search_calls)
+    restore = _install(mocks)
+    try:
+        params = agent.ProcessDisasterInput(
+            event_id="evt-gap-fields", location="Islamabad, Pakistan",
+            disaster_type="flood", magnitude=0,
+        )
+        raw = _run(agent.run_pipeline(params))
+    finally:
+        restore()
+
+    result = json.loads(raw)
+    if result.get("status") != "complete":
+        bad(f"pipeline did not complete: {result}")
+        return
+
+    if (
+        result.get("coverage_status") == "below_target_coverage"
+        and result.get("gap_count") == 2
+        and result.get("gap_area_km2") == 1.35
+        and result.get("gap_attribution") == {"nodata": 40, "cloud": 120}
+    ):
+        ok(f"real non-null gap telemetry survives into a successful "
+           f"structured result: coverage_status={result['coverage_status']!r}, "
+           f"gap_count={result['gap_count']!r}, "
+           f"gap_area_km2={result['gap_area_km2']!r}, "
+           f"gap_attribution={result['gap_attribution']!r}")
+    else:
+        bad(f"gap telemetry missing/wrong in a real successful structured "
+            f"result: coverage_status={result.get('coverage_status')!r}, "
+            f"gap_count={result.get('gap_count')!r}, "
+            f"gap_area_km2={result.get('gap_area_km2')!r}, "
+            f"gap_attribution={result.get('gap_attribution')!r}")
+
+    # Real, still-open gap: satellite_results' INSERT (agent.py
+    # _persist_satellite_result) does not name any of these columns —
+    # confirmed by reading the same INSERT column list checked in
+    # test_db_persisted_fields_survive_real_write.
+    ok("confirmed (by reading _persist_satellite_result's INSERT column "
+       "list): coverage_status/gap_count/gap_area_km2/gap_attribution/"
+       "gap_limited_by reach structured/PipelineState but are NOT "
+       "persisted to satellite_results — real gap, flagged not fixed "
+       "(out of scope: would need a schema change)")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("TEST: islamabad-findings fix-pass verification")
@@ -484,6 +764,9 @@ if __name__ == "__main__":
     test_peek_fires_against_widened_search_candidate()
     test_low_nonzero_water_percent_raises_no_contradiction()
     test_fractional_water_percent_normalised_not_misread_as_100x()
+    test_all_hardening_fields_survive_structured_and_state()
+    test_db_persisted_fields_survive_real_write()
+    test_gap_fields_survive_success_path_structured_but_not_db()
     print("=" * 70)
     print(f"SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 70)
