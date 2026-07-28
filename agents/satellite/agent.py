@@ -634,7 +634,19 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # queries are free, and we need a real scene object (with an Id) to
         # peek. No S2 candidate in the window means nothing to measure, so S1
         # is selected immediately with no peek attempted.
-        s2_candidate = search_imagery(bbox, SENTINEL_2, aoi_geom=merged)
+        #
+        # islamabad-findings #2 — this used to run its OWN fixed 7-day search
+        # here, independent of _search_with_recovery's later 7->14->30-day
+        # widening for whatever satellite_type ended up selected. When the
+        # 7-day window was empty, the peek gave up (no_s2_candidates) even
+        # though the widened search moments later found scenes — the peek
+        # never got a chance on exactly the runs where the window mattered.
+        # Now there is one S2 catalogue search, using the same widening
+        # recovery logic, and its result is reused as `scenes` below when S2
+        # is the satellite actually selected — no second search for the same
+        # candidate set.
+        s2_scenes = _search_with_recovery(event_id, bbox, SENTINEL_2, merged)
+        s2_candidate = s2_scenes[0] if s2_scenes else None
 
         if s2_candidate is None:
             selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
@@ -705,7 +717,15 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # the actual risk polygon, so the pipeline can mosaic / fall back if the
         # best single tile is too sparse. INTEGRATION POINT 3 — widen the date
         # window on the LLM's advice when nothing is found.
-        scenes = _search_with_recovery(event_id, bbox, satellite_type, merged)
+        #
+        # islamabad-findings #2 — when Sentinel-2 was selected, the catalogue
+        # search above (`s2_scenes`) already found this exact candidate set
+        # (same widening logic, same bbox/aoi_geom) — searching again here
+        # would just repeat it. Only re-search when Sentinel-1 was chosen
+        # instead (a distinct catalogue query the peek never ran).
+        scenes = s2_scenes if satellite_type == SENTINEL_2 else _search_with_recovery(
+            event_id, bbox, satellite_type, merged
+        )
         if not scenes:
             return _error(
                 event_id,
