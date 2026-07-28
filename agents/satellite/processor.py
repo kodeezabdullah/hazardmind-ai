@@ -34,6 +34,7 @@ import re
 import tempfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -126,6 +127,28 @@ DEFAULT_MAX_DOWNLOAD_GB = 4.0
 # detects a technically-contributing but not-worth-its-cost download and stops
 # the search entirely (not just this candidate).
 MIN_MARGINAL_COVERAGE_GAIN = 2.0
+
+# Scene-age confidence penalty (islamabad-findings #4). The tiered temporal
+# search bounds coherence WITHIN a mosaic (BUG 3) but nothing previously
+# bounded how old the accepted imagery is relative to the event itself — a
+# live run accepted a 14-day-old scene with no signal downstream that the
+# imagery predates the event by two weeks. For flood analysis specifically,
+# imagery this old describes history, not current conditions. This is
+# deliberately NOT a hard cutoff (old imagery is still better than none, and
+# historical analysis is a planned feature) — age only reduces confidence and
+# is always reported, via SCENE_AGE_ANOMALY_DAYS below.
+#
+# Basis for the 7-day cutoff: it matches the widest "same tier" S2 window
+# (COVERAGE_TIERS_S2's ±7d tier) and is well inside a flood's typical
+# multi-day-to-multi-week active/recession window, so imagery older than this
+# is crossing from "describes the event" into "describes what came before or
+# after it" territory for the specific disaster type this pipeline targets.
+SCENE_AGE_ANOMALY_DAYS = 7
+# Confidence penalty per day beyond SCENE_AGE_ANOMALY_DAYS (linear, not a
+# cliff) — a 14-day-old scene (7 days past the threshold) knocks off 7 * 0.02
+# = 0.14 evidence-equivalent, comparable in magnitude to the coverage-shortfall
+# penalty scale above.
+SCENE_AGE_PENALTY_PER_DAY = 0.02
 
 
 def _clamp_min_coverage_percent(value: Optional[float]) -> float:
@@ -2998,6 +3021,23 @@ def _finish_success(
     gap_cause = cov.get("gap_cause") or {"nodata": 0, "cloud": 0}
     total_gap_km2 = round(sum(g["area_km2"] for g in gaps), 4)
 
+    # Scene recency (islamabad-findings #4): the tiered search bounds temporal
+    # COHERENCE within a mosaic (BUG 3) but nothing bounds staleness relative
+    # to the event itself. Use the MOST RECENT accepted acquisition — the
+    # freshest data point the result is based on — measured against "now"
+    # (when the pipeline finished processing it, the closest available proxy
+    # for "when the event was analysed").
+    from sentinel import scene_datetime as _scene_datetime
+
+    acq_datetimes = [
+        d for d in (_scene_datetime(s) for s in accepted) if d is not None
+    ]
+    scene_age_days = None
+    if acq_datetimes:
+        newest = max(acq_datetimes)
+        scene_age_days = (datetime.now(timezone.utc) - newest).total_seconds() / 86400.0
+        scene_age_days = round(scene_age_days, 2)
+
     # Proportional confidence penalty for shortfall from 100% (CHANGE 1). Not
     # a hardcoded cliff: linear in the shortfall, scaled by
     # COVERAGE_PENALTY_SCALE, and doubled in the below-target band since that
@@ -3035,9 +3075,38 @@ def _finish_success(
         ),
         # BUG 7 — per-stage peak RSS + which stage peaked, scaled by tiles.
         "memory_report": memory_report(),
+        # Scene recency (islamabad-findings #4) — how many days old the most
+        # recent accepted acquisition is, relative to now. Always reported
+        # (None only when no accepted scene had a parseable date), so a
+        # responder can always tell whether they're looking at current
+        # conditions or dated imagery.
+        "scene_age_days": scene_age_days,
     })
     if budget_exhausted:
         merged_result["budget_exhausted"] = budget_exhausted
+
+    # Confidence penalty + anomaly for stale imagery (islamabad-findings #4).
+    # Linear in days past the threshold, not a hard cutoff — old imagery is
+    # still reported and used, just with visibly reduced confidence.
+    if scene_age_days is not None and scene_age_days > SCENE_AGE_ANOMALY_DAYS:
+        age_over = scene_age_days - SCENE_AGE_ANOMALY_DAYS
+        age_penalty = age_over * SCENE_AGE_PENALTY_PER_DAY
+        if tracker is not None:
+            tracker.add_evidence(
+                "scene_age", max(0.0, 1.0 - age_penalty), weight=0.2
+            )
+            tracker.add_concern(
+                f"Most recent accepted scene is {scene_age_days:.1f} days old "
+                f"(> {SCENE_AGE_ANOMALY_DAYS}-day threshold) — imagery may "
+                "describe conditions before or after the event, not current "
+                "conditions.",
+                "HIGH" if scene_age_days > 2 * SCENE_AGE_ANOMALY_DAYS else "MEDIUM",
+            )
+        merged_result.setdefault("coverage_anomalies", []).append({
+            "type": "stale_scene_age",
+            "scene_age_days": scene_age_days,
+            "threshold_days": SCENE_AGE_ANOMALY_DAYS,
+        })
 
     # Coverage shortfall confidence penalty + anomaly (CHANGE 1). Applied
     # whenever coverage is below 100%, regardless of band.

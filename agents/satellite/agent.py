@@ -120,6 +120,15 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
         conn = await asyncpg.connect(db_url)
         try:
             async with conn.transaction():
+                # islamabad-findings #4 — additive column, same pattern as
+                # agents/impact/services/db.py's ALTER_DDL: a plain
+                # ADD COLUMN IF NOT EXISTS guard run before the INSERT rather
+                # than a separate migration file, since this table has no
+                # migration tooling of its own.
+                await conn.execute(
+                    "ALTER TABLE satellite_results "
+                    "ADD COLUMN IF NOT EXISTS scene_age_days DOUBLE PRECISION"
+                )
                 await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
                 await conn.execute(
                     """
@@ -127,8 +136,8 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                         (event_id, satellite_type, cloud_cover, scene_id,
                          true_color_url, index_url, classification_url, geojson_url,
                          affected_area_km2, total_zones,
-                         bounds, bbox, risk_cities)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                         bounds, bbox, risk_cities, scene_age_days)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                     """,
                     event_id,
                     structured.get("satellite_type"),
@@ -143,6 +152,7 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                     json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
                     json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
                     json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
+                    _f("scene_age_days"),
                 )
         finally:
             await conn.close()
@@ -1020,6 +1030,10 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "acquisition_count": result.get("acquisition_count"),
             "processing_level": result.get("processing_level"),
             "bytes_downloaded": result.get("bytes_downloaded"),
+            # islamabad-findings #4 — days between the most recent accepted
+            # acquisition and now; reduces confidence (processor._finish_success)
+            # but is never a hard cutoff, so it must always be visible downstream.
+            "scene_age_days": result.get("scene_age_days"),
             # CHANGE 6 — whether the selection-time SCL peek's download was
             # reused during real processing (True), a fresh SCL had to be
             # downloaded anyway (False), or SCL was never requested for this
