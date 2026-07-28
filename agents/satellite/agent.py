@@ -1061,6 +1061,20 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "acquisition_count": result.get("acquisition_count"),
             "processing_level": result.get("processing_level"),
             "bytes_downloaded": result.get("bytes_downloaded"),
+            # islamabad-findings audit follow-up (field-survival pass): these
+            # were computed by processor.py's _finish_success on EVERY
+            # success path (target_met and below_target_coverage alike, see
+            # coverage_status just below) but were only ever copied into a
+            # payload on the insufficient_coverage FAILURE branch above —
+            # dropped silently whenever the run completed (even a
+            # below-target-coverage "complete" run). Found by writing the
+            # field-survival test this comment sits next to, not by report
+            # or user complaint.
+            "coverage_status": result.get("coverage_status"),
+            "gap_count": result.get("gap_count"),
+            "gap_area_km2": result.get("gap_area_km2"),
+            "gap_attribution": result.get("gap_attribution") or result.get("gap_cause"),
+            "gap_limited_by": result.get("gap_limited_by"),
             # islamabad-findings #4 — days between the most recent accepted
             # acquisition and now; reduces confidence (processor._finish_success)
             # but is never a hard cutoff, so it must always be visible downstream.
