@@ -1,0 +1,48 @@
+event_key: emsr698_insh
+activation_code: EMSR698
+aoi_number: 1
+aoi_name: "River Spey (Insh Marshes area)"
+country: "United Kingdom"
+disaster_type: flood
+status: confirmed
+
+# WIDENING PASS (2026-07-28, BASELINE_REPORT.md task item 4): the EMSR698
+# activation (Storm Babet, Oct 2023, River Spey/Tay flooding in Scotland) is
+# a genuinely Sentinel-1-backed flood with a real maximumWaterExtentA layer
+# (confirmed via the EMS dashboard-api, not assumed) — the newer EMS naming
+# for the same layer role emsr773/emsr692's "maximumFloodExtentA" plays.
+# AOI01 "River Spey" itself is a ~105km x 87km regional-scale extent (same
+# shape of problem Valencia/Magnesia had before their city rescopes), so this
+# config rescopes to Insh — a real OSM village directly on the densest
+# reference-polygon cluster found via the same grid-search method used for
+# emsr773_paiporta.yaml/emsr692_kanalia.yaml. Insh sits on the Insh Marshes,
+# a well-known natural floodplain of the River Spey — consistent with why
+# the reference cluster is dense there.
+#
+# Confirmed by direct clip: Insh's boundary.py-resolved AOI (buffered ~6km
+# disk, real area ~6.98 km^2, same _ensure_areal point-city fallback Kanalia
+# uses) intersects ~5.32 km^2 of real EMS reference flood extent — a ~76%
+# flooded fraction, deliberately the HIGH end of this baseline's flood-
+# fraction spread (Paiporta ~1.3%, Kanalia ~14-29%, this ~76%).
+pipeline_location: "Insh, Scotland, United Kingdom"
+
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2023-10-07"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_MONIT01"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2023-10-10T06:30:00Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR698/AOI01/DEL_MONIT01/EMSR698_AOI01_DEL_MONIT01_v3.zip"
+    vector_layer_of_record: "maximumWaterExtentA"
+    search_window_center_utc: "2023-10-10T06:30:00Z"
+    search_window_days: 5
+
+caveats:
+  - "vector_layer_of_record is 'maximumWaterExtentA', the newer EMS layer-naming convention — same cumulative-maximum-extent role as emsr773/emsr692's 'maximumFloodExtentA', confirmed via the EMS dashboard-api's per-product layer listing, not assumed from the name alone."
+  - "Reference product is ~3 days post the 2023-10-07 event peak (Storm Babet) — not a peak-state comparison, same caveat class as Paiporta/Kanalia."
+  - "Reference geometry is the FULL River Spey AOI delineation, clipped to Insh's town boundary at scoring time — no separately-published village-level EMS product exists."
+  - "No permanent-water mask available for this AOI in this pass — the River Spey/Insh Marshes floodplain has real permanent wetland/marsh water bodies, so (like Kanalia's Lake Karla) 'permanent water' vs 'flood' is somewhat blurred here too, though less extreme than Kanalia's drained-lake case."
+  - "An earlier product (DEL_PRODUCT, 2023-10-08, closer to peak) exists for this AOI but does not carry a maximumWaterExtentA layer (only observedEventA/waterDepthA) — DEL_MONIT01 is the earliest available product with the layer this harness's reference_loader expects."

@@ -1,0 +1,32 @@
+{
+  "commit": "61db52e-dirty",
+  "commit_full": "61db52e250e8f6ed74e27ee01a721d30f23e5ab4",
+  "run_timestamp_utc": "2026-07-28T17:58:12.594447+00:00",
+  "events": [
+    {
+      "event_id": "343718bc-ac43-43c3-befa-6203bc0593f4",
+      "location": "Insh, Scotland, United Kingdom",
+      "satellite_type": "sentinel-2",
+      "satellite_type_reason": "scene_metadata_clear",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.263,
+      "confidence_basis": "evidence_contradicts",
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "complete_zero_zones",
+      "pipeline_error": null,
+      "harness_notes": [
+        "vector_layer_of_record is 'maximumWaterExtentA', the newer EMS layer-naming convention \u2014 same cumulative-maximum-extent role as emsr773/emsr692's 'maximumFloodExtentA', confirmed via the EMS dashboard-api's per-product layer listing, not assumed from the name alone.",
+        "Reference product is ~3 days post the 2023-10-07 event peak (Storm Babet) \u2014 not a peak-state comparison, same caveat class as Paiporta/Kanalia.",
+        "Reference geometry is the FULL River Spey AOI delineation, clipped to Insh's town boundary at scoring time \u2014 no separately-published village-level EMS product exists.",
+        "No permanent-water mask available for this AOI in this pass \u2014 the River Spey/Insh Marshes floodplain has real permanent wetland/marsh water bodies, so (like Kanalia's Lake Karla) 'permanent water' vs 'flood' is somewhat blurred here too, though less extreme than Kanalia's drained-lake case.",
+        "An earlier product (DEL_PRODUCT, 2023-10-08, closer to peak) exists for this AOI but does not carry a maximumWaterExtentA layer (only observedEventA/waterDepthA) \u2014 DEL_MONIT01 is the earliest available product with the layer this harness's reference_loader expects.",
+        "Pipeline completed but produced zero hazard zones \u2014 IoU/precision/recall against the EMS reference are undefined (0/0), not a score of 0."
+      ],
+      "elapsed_seconds": 530.4689999999973,
+      "bytes_downloaded": 408047467
+    }
+  ]
+}
