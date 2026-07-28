@@ -51,10 +51,13 @@ class _RecordingConn:
 
     async def execute(self, sql, *args):
         if "INSERT INTO impact_data" in sql:
-            # write_impact_data's INSERT column order: event_id, ...,
-            # overall_confidence is the last positional value before ON
-            # CONFLICT — capture it by keyword-free position from services/db.py.
-            self.sink["overall_confidence"] = args[-1]
+            # write_impact_data's INSERT column order (feat/durable-evidence-
+            # trail added `diagnostics` as the new LAST positional value,
+            # after overall_confidence, before ON CONFLICT) — capture
+            # overall_confidence at args[-2] and diagnostics at args[-1] by
+            # position, matching services/db.py's real INSERT column list.
+            self.sink["overall_confidence"] = args[-2]
+            self.sink["diagnostics"] = args[-1]
 
     async def close(self):
         pass
@@ -120,12 +123,76 @@ def test_overall_confidence_survives_real_write_impact_data():
     else:
         bad(f"overall_confidence did not survive into the real INSERT: {sink}")
 
+    # diagnostics JSONB: on the no-significant-disaster path, pop/infra/vuln
+    # are all empty dicts with no "confidence" key -- so the three task
+    # confidences are honestly None here (never invented), and
+    # evacuation_routes is honestly []. Confirmed via the real INSERT
+    # parameter, not source inspection.
+    diagnostics = json.loads(sink["diagnostics"]) if isinstance(sink.get("diagnostics"), str) else sink.get("diagnostics")
+    if diagnostics is not None and diagnostics.get("evacuation_routes") == []:
+        ok(f"diagnostics JSONB present on the no-significant-disaster path: "
+           f"{diagnostics} (task confidences honestly None -- no task ran)")
+    else:
+        bad(f"diagnostics missing/wrong on the no-significant-disaster path: {diagnostics}")
+
+
+def test_diagnostics_jsonb_carries_real_task_confidences_and_evacuation_routes():
+    """The durable-evidence-trail diagnostics JSONB must carry the three
+    task-level confidences (population/infrastructure/vulnerability) that
+    impact computes but previously discarded, plus the real evacuation_routes
+    output -- verified via a real services.db.write_impact_data() call (the
+    actual function agent.py's significant-disaster path calls), not a
+    hand-copied twin of its logic."""
+    print("\n[Field survival] impact_data.diagnostics carries real "
+          "population/infrastructure/vulnerability task confidences + "
+          "evacuation_routes via the real write_impact_data() call")
+
+    sink = {}
+    _install_fake_asyncpg(sink)
+
+    import importlib
+    if "services.db" in sys.modules:
+        importlib.reload(sys.modules["services.db"])
+    import services.db as db_module
+
+    pop = {"population_affected": 5000, "confidence": 0.81}
+    infra = {"hospitals_at_risk": 2, "roads_blocked_km": 3.4, "confidence": 0.76}
+    vuln = {
+        "vulnerability_score": "6.2",
+        "confidence": 0.68,
+        "evacuation_routes": [
+            {"name": "Route 1 — Test Road", "distance_km": 4, "status": "open", "geojson": {}}
+        ],
+    }
+
+    _run(db_module.write_impact_data("evt-impact-diagnostics", pop, infra, vuln, overall_confidence=0.75))
+
+    diagnostics = json.loads(sink["diagnostics"]) if isinstance(sink.get("diagnostics"), str) else sink.get("diagnostics")
+    if (
+        diagnostics
+        and diagnostics.get("population_confidence") == 0.81
+        and diagnostics.get("infrastructure_confidence") == 0.76
+        and diagnostics.get("vulnerability_confidence") == 0.68
+    ):
+        ok(f"all three task-level confidences survive into the real "
+           f"diagnostics JSONB write: {diagnostics}")
+    else:
+        bad(f"task-level confidences missing/wrong in diagnostics: {diagnostics}")
+
+    routes = diagnostics.get("evacuation_routes") if diagnostics else None
+    if routes and routes[0].get("name") == "Route 1 — Test Road":
+        ok(f"real evacuation_routes output survives into diagnostics JSONB "
+           f"alongside its own dedicated column: {routes}")
+    else:
+        bad(f"evacuation_routes missing/wrong in diagnostics: {routes}")
+
 
 if __name__ == "__main__":
     print("=" * 70)
     print("TEST: impact field survival (islamabad-findings audit follow-up)")
     print("=" * 70)
     test_overall_confidence_survives_real_write_impact_data()
+    test_diagnostics_jsonb_carries_real_task_confidences_and_evacuation_routes()
     print("=" * 70)
     print(f"SUMMARY: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 70)
