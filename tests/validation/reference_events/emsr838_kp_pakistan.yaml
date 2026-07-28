@@ -1,0 +1,19 @@
+event_key: emsr838_kp_pakistan
+activation_code: EMSR838
+aoi_number: null
+aoi_name: "Khyber Pakhtunkhwa (flash flood)"
+country: Pakistan
+disaster_type: flood
+status: unconfirmed  # imagery source could not be confirmed; harness must skip scoring
+
+pipeline_location: "Khyber Pakhtunkhwa, Pakistan"
+
+event_peak_date: "2025-08-15"
+
+reference_products: {}
+
+caveats:
+  - "Imagery source (Sentinel vs. VHR optical vs. commercial SAR) not confirmed — the public activation page links to an ArcGIS StoryMap, not structured product metadata."
+  - "Backend API (rapidmapping.emergency.copernicus.eu/backend/dashboard-api/public-activations/?code=EMSR838) returned 403 during this research pass — unresolved whether that is absence of published data, an access restriction, or rate-limiting."
+  - "Included per the task's request to flag a Pakistan/arid candidate honestly rather than omit it silently, or force a weaker EMSR629/EMSR631-style Landsat/SPOT/PlanetScope match into a Sentinel-only harness."
+  - "The harness reports this event as EXCLUDED FROM SCORING, not as a zero/failing score, since there is no confirmed reference imagery to compare against."
