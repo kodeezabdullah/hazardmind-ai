@@ -17,6 +17,9 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 1 | Phase 0b within-water-mean fix | 6099591 | Kanalia S2 | 0.9722 | 0.9839 | 0.9880 | 0.9859 | **0.714 (supports)** | metrics **identical to 0′** (bit-for-bit); confidence +0.266, basis flipped | **KEPT** | designed to change only confidence; did exactly that |
 | 1 | Phase 0b | 6099591-dirty | Paiporta S2 ×2 | undefined (0 zones, unchanged) | — | — | — | 0.49 (contradicts→ *weak* post-0b-2) | conf +0.17 vs 0.3184 | KEPT | no classification change, honest low conf |
 | 1 | Phase 0b | 6099591-dirty.run2 | Insh S2 | undefined (0 zones, unchanged) | — | — | — | 0.3235 (contradicts→ *weak* post-0b-2) | conf +0.06 vs 0.263 | KEPT | no classification change |
+| 2 | Phase 1a SCL masking in index | 439d5c0 | Kanalia S2 | 0.9722 | 0.9839 | 0.9880 | 0.9859 | 0.7092 (supports) | metrics identical (clear-sky scene: ~0 SCL-invalid px to mask); conf -0.005 (noise) | **KEPT** | no regression; correctness change guards cloudy events this set cannot exercise |
+| 2 | Phase 1a | 439d5c0-dirty | Paiporta S2 ×2 | undefined (0 zones, unchanged) | — | — | — | 0.4237 (**evidence_weak** — first live 0b-2 label) | basis label now informative | KEPT | — |
+| 2 | Phase 1a | 439d5c0-dirty | Insh S2 | undefined (0 zones, unchanged) | — | — | — | 0.3234 (**evidence_weak**) | — | KEPT | — |
 
 ## Cumulative download cost (this session)
 
@@ -26,7 +29,8 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | Phase 0b measurement: Paiporta S2 ×2 | 852 |
 | Phase 0b measurement: Insh S2 | 408 |
 | Pre-0b pinned-AOI re-baseline: Kanalia S2 | 414 |
-| **Running total** | **2,088 MB (~2.1 GB)** |
+| Phase 1a measurement: Kanalia + Paiporta ×2 + Insh | 1,674 |
+| **Running total** | **3,762 MB (~3.8 GB)** |
 
 ---
 
