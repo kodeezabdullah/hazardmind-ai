@@ -116,19 +116,39 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
 
     import asyncpg
 
+    # Durable evidence trail (feat/durable-evidence-trail, 2026-07-28):
+    # diagnostics carries everything that is read but not filtered/sorted/
+    # aggregated on — concerns, validations, needs_verification,
+    # should_alert, artifacts_incomplete, failed_artifacts, gap detail, gap
+    # geometry, coverage_tier, temporal_spread_days, acquisition_count,
+    # bytes_downloaded, processing_level. Real (queryable) columns are used
+    # for anything the API/report layer would filter/sort/aggregate on
+    # (confidence, coverage_percent, coverage_status, scene_age_days,
+    # index_calibrated/index_units, selection_reason, scene_cloud_percent/
+    # aoi_cloud_percent, scl_reused).
+    diagnostics = {
+        "concerns": structured.get("concerns"),
+        "validations": structured.get("validations"),
+        "needs_verification": structured.get("needs_verification"),
+        "should_alert": structured.get("should_alert"),
+        "artifacts_incomplete": structured.get("artifacts_incomplete"),
+        "failed_artifacts": structured.get("failed_artifacts"),
+        "gap_count": structured.get("gap_count"),
+        "gap_area_km2": structured.get("gap_area_km2"),
+        "gap_attribution": structured.get("gap_attribution"),
+        "gap_limited_by": structured.get("gap_limited_by"),
+        "gaps": structured.get("gaps"),
+        "coverage_tier": structured.get("coverage_tier"),
+        "temporal_spread_days": structured.get("temporal_spread_days"),
+        "acquisition_count": structured.get("acquisition_count"),
+        "bytes_downloaded": structured.get("bytes_downloaded"),
+        "processing_level": structured.get("processing_level"),
+    }
+
     async def _write():
         conn = await asyncpg.connect(db_url)
         try:
             async with conn.transaction():
-                # islamabad-findings #4 — additive column, same pattern as
-                # agents/impact/services/db.py's ALTER_DDL: a plain
-                # ADD COLUMN IF NOT EXISTS guard run before the INSERT rather
-                # than a separate migration file, since this table has no
-                # migration tooling of its own.
-                await conn.execute(
-                    "ALTER TABLE satellite_results "
-                    "ADD COLUMN IF NOT EXISTS scene_age_days DOUBLE PRECISION"
-                )
                 await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
                 await conn.execute(
                     """
@@ -136,8 +156,14 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                         (event_id, satellite_type, cloud_cover, scene_id,
                          true_color_url, index_url, classification_url, geojson_url,
                          affected_area_km2, total_zones,
-                         bounds, bbox, risk_cities, scene_age_days)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                         bounds, bbox, risk_cities, scene_age_days,
+                         confidence, confidence_basis, evidence_count,
+                         coverage_percent, coverage_status,
+                         index_calibrated, index_units, selection_reason,
+                         scene_cloud_percent, aoi_cloud_percent, scl_reused,
+                         diagnostics)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                            $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
                     """,
                     event_id,
                     structured.get("satellite_type"),
@@ -153,6 +179,18 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                     json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
                     json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
                     _f("scene_age_days"),
+                    _f("confidence"),
+                    structured.get("confidence_basis"),
+                    _i("evidence_count"),
+                    _f("coverage_percent"),
+                    structured.get("coverage_status"),
+                    structured.get("index_calibrated"),
+                    structured.get("index_units"),
+                    structured.get("selection_reason"),
+                    _f("scene_cloud_percent"),
+                    _f("aoi_cloud_percent"),
+                    structured.get("scl_reused"),
+                    json.dumps(diagnostics),
                 )
         finally:
             await conn.close()
@@ -1075,6 +1113,17 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "gap_area_km2": result.get("gap_area_km2"),
             "gap_attribution": result.get("gap_attribution") or result.get("gap_cause"),
             "gap_limited_by": result.get("gap_limited_by"),
+            # durable-evidence-trail (2026-07-28): the gap GEOMETRY itself
+            # (not just the count/area/attribution scalars above) was
+            # computed by processor.py's _finish_success on every success
+            # path (merged_result["gaps"] = gaps) but never copied into
+            # structured — _persist_satellite_result's diagnostics dict reads
+            # structured.get("gaps"), which was always None before this fix,
+            # so no run ever actually persisted gap geometry despite the
+            # write path assuming it would. Same defect class as the
+            # coverage_status/gap_count fix above (bd9cf11): computed on
+            # every success path, silently dropped one hop earlier.
+            "gaps": result.get("gaps"),
             # islamabad-findings #4 — days between the most recent accepted
             # acquisition and now; reduces confidence (processor._finish_success)
             # but is never a hard cutoff, so it must always be visible downstream.
