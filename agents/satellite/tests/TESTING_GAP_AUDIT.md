@@ -79,3 +79,124 @@ fixes in this session's scope (CHANGE 6 field survival, the duplicate-search
 fix, and the cross-validator unit fix), to establish that at least one test
 in this codebase exercises the real entry point — it does not attempt to
 backfill orchestration coverage for the other five findings above.
+
+## Follow-up pass (2026-07-28, same day): field-survival extension
+
+The gap this document identifies was closed for every field the hardening
+effort added, and the two actively-misleading test patterns were retired.
+
+**Survival assertions added**, each checked at (a) the agent's structured
+result, (b) PipelineState (via a real node-function call, not just an
+assumption that "node.py copies the whole dict so it must cross"), and (c)
+the DB row (via a real write function call with a faked DB connection that
+records the actual SQL parameters, not a hand-copied twin of the write
+logic):
+
+- **Satellite** (`tests/test_verify_islamabad_fixes.py`,
+  `test_all_hardening_fields_survive_structured_and_state` +
+  `test_db_persisted_fields_survive_real_write` +
+  `test_gap_fields_survive_success_path_structured_but_not_db`): all 14
+  CHANGE-6/BUG-5/islamabad-findings-#4 fields (confidence_basis,
+  evidence_count, total_zones, scene_id, artifacts_incomplete,
+  failed_artifacts, index_calibrated, index_units, coverage_percent,
+  scene_age_days, scl_reused, selection_reason, scene_cloud_percent,
+  aoi_cloud_percent) confirmed present in structured + PipelineState via a
+  real `agent.run_pipeline()` + real `satellite_node()` call. Of those, only
+  total_zones/scene_id/scene_age_days are actual `satellite_results` INSERT
+  columns — confirmed via a real `_persist_satellite_result()` call with a
+  DB double that records the real INSERT parameters. The other 11 reach
+  structured/PipelineState but are NOT DB columns — asserted absent
+  explicitly, a real (pre-existing, out-of-scope-to-fix) gap, not a silent
+  omission.
+- **Satellite gap telemetry — REAL BUG FOUND AND FIXED**: `coverage_status`/
+  `gap_count`/`gap_area_km2`/`gap_attribution`/`gap_limited_by` are computed
+  by `processor.py`'s `_finish_success` on **every** success path (not just
+  the `insufficient_coverage` failure path this document originally
+  described), but `agent.py` was only ever copying them into a payload on
+  the failure branch — a `below_target_coverage`-but-`"complete"` run
+  silently dropped its own gap telemetry before reaching
+  structured/PipelineState/the DB. Fixed in `agent.py`'s `structured{}`
+  construction (this pass); verified via a real `run_pipeline()` call with
+  a `below_target_coverage` fixture. They still do not reach the DB
+  (schema change, out of scope) — asserted absent there explicitly.
+- **Hazard** (`agents/hazard/test_field_survival.py`): `evidence_basis`
+  (earthquake + landslide) confirmed to survive into the REAL
+  `write_to_db`'s `confirmed_by` JSONB (not the hand-copied closure the old
+  test exercised) via a real `agent.analyze_hazard()` call with a faked
+  asyncpg connection that records the real INSERT's confirmed_by argument.
+  `primary_hazard_risk` confirmed to reach `analyze_hazard`'s payload (and
+  thus PipelineState) but NOT `confirmed_by` — real, structural gap
+  (`write_to_db(raw_result)` runs *before* `primary_hazard_risk` is even
+  computed in `agent.py`), asserted absent explicitly rather than omitted.
+  `confidence_cap_applied` confirmed absent from BOTH the payload and
+  `confirmed_by` via the real entry point — a real gap the analyzer-level
+  test (`test_confidence_cap.py`) could not see because it never calls
+  `analyze_hazard`.
+- **Impact** (`agents/impact/test_field_survival.py`): `overall_confidence`
+  confirmed to survive from `run_impact_analysis`'s real
+  no-significant-disaster path into the real `write_impact_data()` INSERT
+  parameter (Gate A's fix, previously only confirmed by reading source
+  during the 2026-07-28 audit, not by a test).
+- **Report** (`agents/report/test_field_survival.py`): the H#6 guarantee
+  (satellite confidence 0.0 cannot yield a HIGH/MEDIUM report
+  `confidence_level`) confirmed via a real `run_report_pipeline()` call with
+  a real `incoming_payload={"confidence_scores": {...}}` — the exact shape
+  `report/node.py` actually passes — rather than a hand-built report dict
+  shaped like what the wiring is supposed to produce.
+
+**This session's own at-risk fixes, now verified (not just flagged):**
+hazard-provenance (`evidence_basis` → `confirmed_by`) and scene-age
+(`scene_age_days` → `satellite_results`) both confirmed to genuinely survive
+via the real write paths above. Scene-age turned out fine (it was already
+correctly wired, just untested); hazard-provenance was also fine. Neither
+was a silent regression — but neither was verified before this pass, and
+now both are.
+
+**Misleading tests retired:**
+- `test_correctness_fixes_20260727.py`'s `test_scene_id_threaded_into_merged_result`,
+  `test_structured_carries_total_zones_and_scene_id`,
+  `test_structured_carries_artifacts_incomplete`, and
+  `test_per_city_flag_reaches_process_satellite_imagery_call` — all four
+  rewritten to call the real functions (`_render_clip`,
+  `agent.run_pipeline`, or a real flag-flip + captured kwarg) instead of
+  `inspect.getsource` + string matching. The known-failing
+  `scene_id`-via-source-grep check no longer exists in that form — resolved
+  by rewriting it to call `_render_clip` against a synthetic real raster.
+- `test_index_label_integrity.py`'s `test_validation_input_index_type_matches_result`
+  — rewritten to call `agent.run_pipeline()` with `cross_validator.validate_all`
+  patched to capture the REAL `validation_input` dict, for both a SAR and an
+  NDWI run, instead of asserting on a hand-built simulation.
+- `test_hazard_provenance.py`'s `test_evidence_basis_survives_into_db_write_confirmed_by`
+  — the hand-copied `_confirmed_by` closure replaced with a delegated call
+  into `agents/hazard/test_field_survival.py`'s real-write-path test.
+- `test_confidence_aggregation.py`'s
+  `test_satellite_zero_via_dedicated_channel_ONLY_cannot_yield_high` — kept
+  (it is a legitimate, fast unit test of `calculate_confidence_level`'s
+  aggregation rule, not a grep or a hand-copy), but its docstring updated to
+  point at the new real entry-point test
+  (`test_satellite_zero_confidence_via_real_run_report_pipeline_cannot_yield_high`
+  in `test_field_survival.py`) that actually exercises the wiring this test's
+  original docstring claimed to protect.
+
+**Left as legitimately narrow, not rewritten** (per the task: narrow is not
+wrong): `test_coverage_tolerance.py` (function-level coverage/tiering
+logic — the fields it computes are now covered end-to-end by
+`test_verify_islamabad_fixes.py` instead of being re-derived here) and
+`test_confidence_cap.py` (a fast, real unit test of the analyzer's cap
+arithmetic — the orchestration-level gap it couldn't see is now covered by
+`test_field_survival.py`'s `test_confidence_cap_applied_does_not_survive_any_boundary`).
+
+**Verify results:** satellite offline suite — `test_coverage_tolerance.py`
+65/65, `test_correctness_fixes_20260727.py` 20/20 (was 19/19 with 1
+known-failing scene_id check; now fully green with a real check in its
+place), `test_index_label_integrity.py` 5/5,
+`test_verify_islamabad_fixes.py` 27/27 (up from 6). `test_bug_fixes.py`/
+`test_clip_window.py` still fail on the pre-existing `PROJ_LIB` environment
+conflict (system PostgreSQL/PostGIS `proj.db` shadowing rasterio's bundled
+proj data) — confirmed present before this session's changes too, not a
+regression. hazard: `test_hazard_provenance.py` 17/17,
+`test_confidence_cap.py` 8/8, `test_field_survival.py` (new) 8/8;
+`test_db.py` needs a live DB connection, pre-existing, unrelated to this
+pass. impact: `test_field_survival.py` (new) 3/3. report:
+`test_confidence_aggregation.py` 8/8, `test_field_survival.py` (new) 4/4.
+No live e2e was run, per the task's scope.
