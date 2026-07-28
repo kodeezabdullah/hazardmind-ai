@@ -39,12 +39,17 @@ from confidence_tracker import ConfidenceTracker
 from cross_validator import CrossValidator
 from intelligence import SatelliteIntelligence
 from processor import (
+    DEFAULT_MAX_DOWNLOAD_GB as _PEEK_DEFAULT_MAX_DOWNLOAD_GB,
+    _bytes_downloaded_total as _processor_bytes_downloaded_total,
     cleanup_event_temp,
     memory_report as _processor_memory_report,
+    peek_aoi_cloud_percent,
+    peek_needed,
     process_satellite_imagery,
 )
 from r2_upload import check_demo_cache, upload_all_results
 from sentinel import (
+    SENTINEL_2,
     TokenManager,
     authenticate_copernicus,
     backfill_uncovered_cities,
@@ -611,9 +616,60 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         if token_manager is None:
             return _error(event_id, "Copernicus authentication failed (after recovery)")
 
-        # (e) Smart, cloud-aware Sentinel selection.
-        selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
-        satellite_type = selection["satellite_type"]
+        # (e) Smart, cloud-aware Sentinel selection (CHANGE 6: AOI-restricted
+        # cloud measurement via an SCL peek, 2026-07-28).
+        #
+        # Query the S2 catalogue for candidates FIRST, even when the disaster
+        # hint or a coarse cloud reading might point at S1 — catalogue
+        # queries are free, and we need a real scene object (with an Id) to
+        # peek. No S2 candidate in the window means nothing to measure, so S1
+        # is selected immediately with no peek attempted.
+        s2_candidate = search_imagery(bbox, SENTINEL_2, aoi_geom=merged)
+
+        if s2_candidate is None:
+            selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
+            selection["selection_reason"] = "no_s2_candidates"
+            satellite_type = selection["satellite_type"]
+        else:
+            scene_cloud = None
+            for attr in s2_candidate.get("Attributes", []):
+                if attr.get("Name") == "cloudCover":
+                    try:
+                        scene_cloud = float(attr.get("Value"))
+                    except (TypeError, ValueError):
+                        scene_cloud = None
+                    break
+
+            aoi_cloud_percent = None
+            aoi_cloud_reason = None
+            if scene_cloud is not None and peek_needed(scene_cloud):
+                # Ambiguous scene-level reading (see processor.PEEK_CLEAR_BELOW/
+                # PEEK_CLOUDY_ABOVE) — only download-and-measure when the
+                # answer is genuinely in doubt. Skip the peek if the byte
+                # budget is already exhausted (BUDGET INTERACTION): a peek is
+                # an optimisation, not a requirement, and an "exempt" spend
+                # path is how budgets stop meaning anything.
+                budget_gb = params.max_download_gb or _PEEK_DEFAULT_MAX_DOWNLOAD_GB
+                remaining_gb = budget_gb - (_processor_bytes_downloaded_total() / 1e9)
+                peek = peek_aoi_cloud_percent(
+                    s2_candidate, merged, event_id, token_manager,
+                    remaining_download_gb=remaining_gb,
+                )
+                aoi_cloud_percent = peek.get("aoi_cloud_percent")
+                aoi_cloud_reason = peek.get("reason") or None
+
+            selection = select_satellite(
+                disaster_type, bbox=bbox, token=token_manager.get(),
+                cloud_cover=scene_cloud,
+                aoi_cloud_percent=aoi_cloud_percent,
+                aoi_cloud_reason=aoi_cloud_reason,
+            )
+            satellite_type = selection["satellite_type"]
+            # If S2 ends up selected, the peek's SCL download (when one
+            # happened) is already sitting under this event's bands dir —
+            # process_satellite_imagery's own download_imagery reuses it via
+            # _download_bands_via_nodes's on-disk cache check rather than
+            # re-fetching, so the peek is never paid for twice.
 
         # INTEGRATION POINT 2 — devise the satellite strategy with full LLM
         # reasoning, logged. The deterministic cloud-aware selection stays

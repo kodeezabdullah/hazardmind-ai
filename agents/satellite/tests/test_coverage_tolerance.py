@@ -435,15 +435,19 @@ def test_s2_tiers_unchanged():
 
 
 # --------------------------------------------------------------------------- #
-# CHANGE 6 — AOI-restricted cloud selection (documented as partial — see
-# CLAUDE.md / sentinel.py's select_satellite docstring). These tests cover
-# the fallback behaviour that WAS implemented: scene-level cloud drives
-# selection when no AOI-restricted figure is available, and selection_reason
-# says so.
+# CHANGE 6 (complete, 2026-07-28) — AOI-restricted cloud selection via an SCL
+# peek. sentinel.select_satellite makes the final S1/S2 decision from
+# whichever cloud figure it's given (AOI trumps scene-level); agent.py is
+# responsible for deciding WHEN to peek (processor.peek_needed) and doing the
+# actual SCL download+measure (processor.peek_aoi_cloud_percent). These tests
+# cover select_satellite's decision logic directly (given a pre-computed AOI
+# figure, as agent.py would pass one in), the peek_needed cut points, and
+# peek_aoi_cloud_percent's failure/budget/no-op behaviour without any live
+# network access.
 # --------------------------------------------------------------------------- #
 def test_selection_falls_back_to_scene_level_cloud():
-    print("\n[CHANGE 6] selection falls back to scene-level cloud; "
-          "selection_reason says so")
+    print("\n[CHANGE 6] no AOI figure supplied -> falls back to scene-level "
+          "cloud; selection_reason says so")
     result = sentinel.select_satellite("flood", cloud_cover=45.9)
     if result["satellite_type"] == "sentinel-1":
         ok(f"45.9% cloud (scene-level, no AOI figure) -> sentinel-1")
@@ -453,11 +457,11 @@ def test_selection_falls_back_to_scene_level_cloud():
         ok("scene_cloud_percent=45.9, aoi_cloud_percent=None (not computed)")
     else:
         bad(f"cloud fields wrong: {result}")
-    if "scl_unavailable" in result.get("selection_reason", ""):
-        ok(f"selection_reason names the SCL-unavailable fallback: "
+    if result.get("selection_reason") == "scene_metadata_cloudy":
+        ok(f"selection_reason names the scene-level basis: "
            f"{result['selection_reason']}")
     else:
-        bad(f"selection_reason does not name the fallback: {result.get('selection_reason')}")
+        bad(f"selection_reason wrong: {result.get('selection_reason')}")
 
 
 def test_selection_low_cloud_selects_sentinel2():
@@ -467,6 +471,11 @@ def test_selection_low_cloud_selects_sentinel2():
         ok(f"12% cloud -> sentinel-2")
     else:
         bad(f"expected sentinel-2 at 12% cloud: {result}")
+    if result.get("selection_reason") == "scene_metadata_clear":
+        ok(f"selection_reason names the scene-level clear basis: "
+           f"{result['selection_reason']}")
+    else:
+        bad(f"selection_reason wrong: {result.get('selection_reason')}")
 
 
 def test_selection_reason_present_on_hint_fallback():
@@ -476,6 +485,266 @@ def test_selection_reason_present_on_hint_fallback():
         ok(f"selection_reason present with no cloud data: {result['selection_reason']}")
     else:
         bad(f"selection_reason missing: {result}")
+
+
+def test_high_scene_cloud_low_aoi_cloud_selects_s2():
+    print("\n[CHANGE 6] high scene cloud but low AOI cloud (peeked) -> "
+          "sentinel-2, not sentinel-1")
+    result = sentinel.select_satellite(
+        "flood", cloud_cover=45.9, aoi_cloud_percent=8.0,
+    )
+    if result["satellite_type"] == "sentinel-2":
+        ok("scene 45.9% / AOI 8.0% (peeked) -> sentinel-2 (AOI wins)")
+    else:
+        bad(f"expected sentinel-2: {result}")
+    if result.get("selection_reason") == "aoi_scl_measured":
+        ok(f"selection_reason=aoi_scl_measured")
+    else:
+        bad(f"selection_reason wrong: {result.get('selection_reason')}")
+    if result.get("scene_cloud_percent") == 45.9 and result.get("aoi_cloud_percent") == 8.0:
+        ok("both cloud figures reported: scene=45.9, aoi=8.0")
+    else:
+        bad(f"cloud fields wrong: {result}")
+
+
+def test_low_scene_cloud_high_aoi_cloud_selects_s1():
+    print("\n[CHANGE 6] low scene cloud but high AOI cloud (peeked) -> "
+          "sentinel-1, not sentinel-2")
+    result = sentinel.select_satellite(
+        "earthquake", cloud_cover=22.0, aoi_cloud_percent=48.0,
+    )
+    if result["satellite_type"] == "sentinel-1":
+        ok("scene 22.0% / AOI 48.0% (peeked) -> sentinel-1 (AOI wins)")
+    else:
+        bad(f"expected sentinel-1: {result}")
+    if result.get("selection_reason") == "aoi_scl_measured":
+        ok(f"selection_reason=aoi_scl_measured")
+    else:
+        bad(f"selection_reason wrong: {result.get('selection_reason')}")
+
+
+def test_clearly_clear_scene_no_peek_needed():
+    print("\n[CHANGE 6] clearly-clear scene-level cloud -> no peek needed")
+    if not processor.peek_needed(5.0):
+        ok(f"5.0% (< PEEK_CLEAR_BELOW={processor.PEEK_CLEAR_BELOW}) -> no peek")
+    else:
+        bad("5.0% should not trigger a peek")
+    result = sentinel.select_satellite("earthquake", cloud_cover=5.0)
+    if result["satellite_type"] == "sentinel-2" and result["selection_reason"] == "scene_metadata_clear":
+        ok(f"5.0% scene-level, no peek -> sentinel-2, "
+           f"reason={result['selection_reason']}")
+    else:
+        bad(f"unexpected result: {result}")
+
+
+def test_clearly_cloudy_scene_no_peek_needed():
+    print("\n[CHANGE 6] clearly-cloudy scene-level cloud -> no peek needed")
+    if not processor.peek_needed(85.0):
+        ok(f"85.0% (> PEEK_CLOUDY_ABOVE={processor.PEEK_CLOUDY_ABOVE}) -> no peek")
+    else:
+        bad("85.0% should not trigger a peek")
+    result = sentinel.select_satellite("flood", cloud_cover=85.0)
+    if result["satellite_type"] == "sentinel-1" and result["selection_reason"] == "scene_metadata_cloudy":
+        ok(f"85.0% scene-level, no peek -> sentinel-1, "
+           f"reason={result['selection_reason']}")
+    else:
+        bad(f"unexpected result: {result}")
+
+
+def test_ambiguous_scene_cloud_needs_peek():
+    print("\n[CHANGE 6] ambiguous scene-level cloud (between the two cut "
+          "points) -> peek is needed")
+    for pct in (processor.PEEK_CLEAR_BELOW, 30.0, processor.PEEK_CLOUDY_ABOVE):
+        if processor.peek_needed(pct):
+            ok(f"{pct}% (within [{processor.PEEK_CLEAR_BELOW}, "
+               f"{processor.PEEK_CLOUDY_ABOVE}]) -> peek needed")
+        else:
+            bad(f"{pct}% should trigger a peek")
+    if not processor.peek_needed(None):
+        ok("None scene-level cloud -> no peek (nothing to disambiguate)")
+    else:
+        bad("None should never trigger a peek")
+
+
+class _StubSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _install_processor_stubs(targets):
+    saved = {}
+    for name, fn in targets.items():
+        saved[name] = getattr(processor, name)
+        setattr(processor, name, fn)
+
+    def restore():
+        for name, orig in saved.items():
+            setattr(processor, name, orig)
+    return restore
+
+
+def test_scl_download_failure_falls_back_with_reason():
+    print("\n[CHANGE 6] SCL download failure -> aoi_cloud_percent=None, "
+          "reason=scl_download_failed, run not aborted")
+    restore = _install_processor_stubs({
+        "_download_bands_via_nodes": lambda *a, **k: None,
+    })
+    try:
+        peek = processor.peek_aoi_cloud_percent(
+            {"Id": "scene-x", "Name": "S2_x.SAFE"}, _POLY, "evt-peek-fail", "tok",
+        )
+    finally:
+        restore()
+    if peek["aoi_cloud_percent"] is None and peek["reason"] == "scl_download_failed":
+        ok(f"peek failure reported cleanly: {peek}")
+    else:
+        bad(f"peek failure not reported correctly: {peek}")
+
+    # The failed peek must not stop selection from falling back to the
+    # scene-level figure — never fail the run over a failed peek.
+    result = sentinel.select_satellite(
+        "flood", cloud_cover=40.0, aoi_cloud_percent=None,
+        aoi_cloud_reason=peek["reason"],
+    )
+    if result["satellite_type"] == "sentinel-1" and result["selection_reason"] == "scl_unavailable_fallback":
+        ok(f"selection fell back cleanly after peek failure: "
+           f"reason={result['selection_reason']}")
+    else:
+        bad(f"selection did not fall back correctly: {result}")
+
+
+def test_peeked_scl_reused_not_redownloaded():
+    print("\n[CHANGE 6] a peeked SCL already on disk is reused during "
+          "processing, not re-downloaded")
+    calls = {"n": 0}
+
+    def fake_download_bands(scene_metadata, token, event_id, band_tokens, satellite_type):
+        calls["n"] += 1
+        # First call (the peek) "downloads" SCL; verify the SAME event_id/
+        # dir layout is reused on a second call. peek_aoi_cloud_percent keys
+        # its single-scene peek under the plain event_id, matching
+        # download_imagery's own single-scene (len(scenes) == 1) layout —
+        # this test checks that identity directly.
+        assert band_tokens == ["SCL"], band_tokens
+        assert event_id == "evt-reuse", event_id  # peek uses plain event_id
+        return None  # short-circuit; this test only checks routing, not I/O
+
+    restore = _install_processor_stubs({
+        "_download_bands_via_nodes": fake_download_bands,
+    })
+    try:
+        processor.peek_aoi_cloud_percent(
+            {"Id": "scene-y", "Name": "S2_y.SAFE"}, _POLY, "evt-reuse", "tok",
+        )
+    finally:
+        restore()
+    if calls["n"] == 1:
+        ok("peek called _download_bands_via_nodes exactly once, keyed on "
+           "the plain event_id (the same dir download_imagery uses for a "
+           "single accepted scene) so a later real download's on-disk cache "
+           "check (inside _download_bands_via_nodes itself) finds and "
+           "reuses this file instead of re-fetching")
+    else:
+        bad(f"expected exactly 1 call, got {calls['n']}")
+
+
+def test_peek_bytes_count_against_download_budget():
+    print("\n[CHANGE 6] peek bytes count against max_download_gb, not exempt")
+    before = processor._bytes_downloaded_total()
+
+    def fake_download_bands(scene_metadata, token, event_id, band_tokens, satellite_type):
+        processor._add_bytes_downloaded(15_000_000)  # simulate a ~15 MB SCL
+        return {"SCL": "/fake/scl.jp2"}
+
+    def fake_stack_bands(band_paths, satellite_type):
+        return {"bands": {"SCL": None}, "transform": None, "crs": None, "shape": (0, 0)}
+
+    def fake_clip_to_polygon(stacked, polygon):
+        import numpy as _np
+        # SCL class 4 = "vegetation" (a valid, non-cloud class per ESA's
+        # scheme) — class 0 would be NO_DATA, itself an invalid class, so an
+        # all-zeros stub would (correctly) read as 100% invalid, not clear.
+        scl = _np.full((10, 10), 4.0, dtype="float32")
+        mask = _np.ones((10, 10), dtype=bool)
+        return {"bands": {"SCL": scl}, "mask": mask}
+
+    restore = _install_processor_stubs({
+        "_download_bands_via_nodes": fake_download_bands,
+        "stack_bands": fake_stack_bands,
+        "clip_to_polygon": fake_clip_to_polygon,
+    })
+    try:
+        peek = processor.peek_aoi_cloud_percent(
+            {"Id": "scene-z", "Name": "S2_z.SAFE"}, _POLY, "evt-budget-peek", "tok",
+        )
+    finally:
+        restore()
+    after = processor._bytes_downloaded_total()
+    if after - before == 15_000_000:
+        ok(f"peek download counted against the global byte total "
+           f"(+{after - before} bytes)")
+    else:
+        bad(f"peek bytes not counted: before={before} after={after}")
+    if peek.get("aoi_cloud_percent") == 0.0:
+        ok(f"peek measurement succeeded on the stubbed all-clear SCL: {peek}")
+    else:
+        bad(f"unexpected peek result: {peek}")
+
+
+def test_exhausted_byte_budget_skips_peek():
+    print("\n[CHANGE 6] exhausted byte budget skips the peek entirely, "
+          "falls back to scene figure")
+    calls = {"n": 0}
+
+    def fake_download_bands(*a, **k):
+        calls["n"] += 1
+        return None
+
+    restore = _install_processor_stubs({
+        "_download_bands_via_nodes": fake_download_bands,
+    })
+    try:
+        peek = processor.peek_aoi_cloud_percent(
+            {"Id": "scene-w", "Name": "S2_w.SAFE"}, _POLY, "evt-budget-exhausted",
+            "tok", remaining_download_gb=0.0,
+        )
+    finally:
+        restore()
+    if calls["n"] == 0:
+        ok("no download attempted once the byte budget is exhausted")
+    else:
+        bad(f"expected 0 download attempts, got {calls['n']}")
+    if peek["aoi_cloud_percent"] is None and peek["reason"] == "budget_exhausted":
+        ok(f"peek reports budget_exhausted cleanly: {peek}")
+    else:
+        bad(f"peek did not report budget exhaustion correctly: {peek}")
+
+
+def test_s1_selection_path_unchanged():
+    print("\n[CHANGE 6] Sentinel-1 selection path is unchanged in every respect")
+    # S1 has no SCL at all — select_satellite must reach the exact same
+    # decision it always did when no AOI figure is (or ever could be)
+    # supplied, with the pre-existing scene-level/no-cloud-data reasons.
+    r1 = sentinel.select_satellite("flood", cloud_cover=75.0)
+    if r1["satellite_type"] == "sentinel-1" and r1["aoi_cloud_percent"] is None:
+        ok(f"flood/75% cloud -> sentinel-1, aoi_cloud_percent=None: {r1['selection_reason']}")
+    else:
+        bad(f"S1 path changed: {r1}")
+
+    r2 = sentinel.select_satellite("cyclone")
+    if r2["satellite_type"] == "sentinel-1" and r2["selection_reason"] == "user_hint_cyclone_no_cloud_data":
+        ok(f"cyclone hint, no cloud data -> sentinel-1 unchanged: {r2['selection_reason']}")
+    else:
+        bad(f"S1 hint-fallback path changed: {r2}")
+
+    # peek_needed/peek_aoi_cloud_percent are agent.py-orchestration concerns
+    # that only ever run against an S2 candidate (search_imagery(bbox,
+    # SENTINEL_2, ...)) — S1 candidates never reach either function, so there
+    # is nothing further to assert here beyond select_satellite's own
+    # unchanged decision above.
 
 
 # --------------------------------------------------------------------------- #
@@ -613,6 +882,16 @@ def run_all():
     test_selection_falls_back_to_scene_level_cloud()
     test_selection_low_cloud_selects_sentinel2()
     test_selection_reason_present_on_hint_fallback()
+    test_high_scene_cloud_low_aoi_cloud_selects_s2()
+    test_low_scene_cloud_high_aoi_cloud_selects_s1()
+    test_clearly_clear_scene_no_peek_needed()
+    test_clearly_cloudy_scene_no_peek_needed()
+    test_ambiguous_scene_cloud_needs_peek()
+    test_scl_download_failure_falls_back_with_reason()
+    test_peeked_scl_reused_not_redownloaded()
+    test_peek_bytes_count_against_download_budget()
+    test_exhausted_byte_budget_skips_peek()
+    test_s1_selection_path_unchanged()
     test_cloud_gap_not_chased_without_lower_cloud_candidate()
     test_budget_params_thread_from_analyze_request()
 

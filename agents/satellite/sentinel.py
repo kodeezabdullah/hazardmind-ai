@@ -123,49 +123,60 @@ def select_satellite(
     token: Optional[str] = None,
     cloud_cover: Optional[float] = None,
     aoi_geom: Optional[dict] = None,
+    aoi_cloud_percent: Optional[float] = None,
+    aoi_cloud_reason: Optional[str] = None,
 ) -> dict:
     """Pick the Sentinel mission for a disaster, cloud cover deciding.
 
     Priority order:
-    1. Quick metadata check: peek the cloud cover of the best recent Sentinel-2
-       scene over `bbox`. > CLOUD_COVER_THRESHOLD -> Sentinel-1; otherwise
-       Sentinel-2. (Skipped when no bbox/token is available, or when an explicit
-       `cloud_cover` is supplied.)
-    2. User hint as a fallback / confirmation: flood/cyclone/tsunami -> SAR;
+    1. AOI-restricted cloud, when the caller has already measured one (see
+       CHANGE 6 below) — the real, physically-relevant figure.
+    2. Scene-level metadata check: peek the cloud cover of the best recent
+       Sentinel-2 scene over `bbox`. > CLOUD_COVER_THRESHOLD -> Sentinel-1;
+       otherwise Sentinel-2. (Skipped when no bbox/token is available, or when
+       an explicit `cloud_cover`/`aoi_cloud_percent` is supplied.)
+    3. User hint as a fallback / confirmation: flood/cyclone/tsunami -> SAR;
        earthquake/landslide/wildfire -> optical.
-    3. Conflict resolution: cloud cover ALWAYS wins over the user hint
-       (physics over assumption) — e.g. heavy cloud + "earthquake" still SAR.
+    4. Conflict resolution: cloud cover (AOI if available, else scene-level)
+       ALWAYS wins over the user hint (physics over assumption) — e.g. heavy
+       cloud + "earthquake" still SAR.
 
-    **AOI-restricted cloud (2026-07-28, CHANGE 6, PARTIAL — see below).**
-    `CLOUD_COVER_THRESHOLD` was previously applied to the scene's own
+    **AOI-restricted cloud (CHANGE 6, complete 2026-07-28).**
+    `CLOUD_COVER_THRESHOLD` was previously applied only to the scene's own
     metadata cloud percentage, which CDSE computes over the WHOLE TILE, not
     the AOI. A scene can be 45% cloudy across its full footprint and
     completely clear over a small town (or vice versa) — a real run selected
     the uncalibrated SAR path on a 45.9% scene-level reading without ever
     checking whether the AOI itself was obscured.
 
-    A real AOI-restricted figure requires the scene's SCL band, which means a
-    download — `select_satellite`/`_peek_cloud_cover` are, by design, a
-    lightweight metadata-only catalogue query with NO download capability at
-    all (that lives in `processor.py`, which imports FROM this module, not
-    the other way around; wiring a real per-candidate SCL pre-fetch in here
-    would mean either an import-cycle-breaking restructure or making this
-    function async and threading a download-capable session through the
-    selection path — a larger restructuring than this session's scope). **So
-    this is intentionally documented as a partial implementation, not forced
-    into a half-working shape:**
-    - `scene_cloud_percent` is always reported (the pre-existing scene-level
-      figure).
-    - `aoi_cloud_percent` is reported ONLY when an AOI-restricted figure was
-      actually computed elsewhere and passed in as `cloud_cover` alongside a
-      caller-supplied provenance hint — today, nothing upstream of this
-      function computes one (no caller does the SCL pre-fetch), so in
-      practice `aoi_cloud_percent` is currently always `None` and
-      `selection_reason` always reflects the scene-level fallback path.
-    - `selection_reason` explicitly names which basis drove the decision
-      (`"scene_cloud_45pct_scl_unavailable"` shape) so a reader can always
-      tell which figure was used, rather than silently assuming AOI-restricted.
-    - Sentinel-1 has no SCL at all, so the scene-level fallback is not a
+    A real AOI-restricted figure needs the scene's SCL band, i.e. a download
+    — `select_satellite` itself stays synchronous and download-free (it is
+    still, by design, only a metadata-driven decision function, callable
+    without a live download session). Instead, the caller
+    (`agents/satellite/agent.py`) does the SCL peek — via
+    `processor.peek_aoi_cloud_percent`, when `processor.peek_needed(scene_cloud)`
+    says the scene-level figure alone is genuinely ambiguous — over the best
+    S2 catalogue candidate BEFORE calling this function, and passes the
+    result in as `aoi_cloud_percent`/`aoi_cloud_reason`. This function's own
+    job is unchanged: decide S1 vs S2 from whatever cloud figure it is given,
+    with AOI trumping scene-level when both are present.
+
+    - `scene_cloud_percent` is always reported (the scene-level figure, peeked
+      here or supplied by the caller).
+    - `aoi_cloud_percent` is reported when the caller supplied one (a real
+      SCL-measured figure); `None` when no peek was performed or attempted
+      (clearly-clear/cloudy scene, no S2 candidate, S1-only, or a failed peek
+      that fell back to scene-level).
+    - `selection_reason` names exactly which basis drove the decision:
+      `"aoi_scl_measured"` (a real AOI figure decided it),
+      `"scene_metadata_clear"` / `"scene_metadata_cloudy"` (scene-level figure
+      decided it, no peek performed because the scene-level reading was
+      unambiguous), `"no_s2_candidates"` (no S2 scene existed to measure),
+      `"scl_unavailable_fallback"` (a peek was attempted but failed, or an
+      ambiguous scene-level reading was used without a peek — budget
+      exhausted, no bbox/token, or a caller-supplied scene-level-only
+      `cloud_cover`).
+    - Sentinel-1 has no SCL at all, so the scene-level/no-peek path is not a
       degraded case for S1 — it is S1's normal, permanent path.
 
     Returns:
@@ -193,43 +204,47 @@ def select_satellite(
         )
         hint_satellite = SENTINEL_2
 
-    # Step 1: cloud cover from real metadata (or an explicitly supplied value).
-    # No caller anywhere in this codebase computes a real AOI-restricted
-    # figure today (the documented CHANGE 6 gap — see docstring above), so
-    # ANY non-None `observed` value reaching this function, whether supplied
-    # directly or peeked via the metadata-only catalogue query, is a
-    # scene-level figure. `scl_unavailable_reason` is therefore always set
-    # once we have a value from either path.
-    observed = cloud_cover
-    scl_unavailable_reason = None
-    if observed is None and bbox is not None:
-        observed = _peek_cloud_cover(bbox, token)
-        if observed is not None:
-            scl_unavailable_reason = "scl_not_fetched_pre_selection"
-    elif observed is not None:
-        scl_unavailable_reason = "scl_not_computed_caller_supplied_scene_level"
-    else:
-        scl_unavailable_reason = "no_bbox_for_cloud_peek"
+    # Step 1: scene-level cloud cover from real metadata (or an explicitly
+    # supplied value) — always computed/reported regardless of whether an
+    # AOI figure is also available, so a reader can always see both.
+    scene_cloud_percent = cloud_cover
+    if scene_cloud_percent is None and bbox is not None:
+        scene_cloud_percent = _peek_cloud_cover(bbox, token)
 
-    aoi_cloud_percent = None  # never populated today; see docstring gap note
-    scene_cloud_percent = observed
+    # Step 2: the AOI-restricted figure, when the caller measured one (CHANGE
+    # 6). This is the figure CLOUD_COVER_THRESHOLD is applied to whenever it
+    # exists — it is what's physically true over the area that matters.
+    decisive = aoi_cloud_percent if aoi_cloud_percent is not None else scene_cloud_percent
 
-    # Step 3: cloud cover wins when we have it.
-    if observed is not None:
-        basis_pct = round(observed)
-        if observed > CLOUD_COVER_THRESHOLD:
+    if decisive is not None:
+        basis_pct = round(decisive)
+        if decisive > CLOUD_COVER_THRESHOLD:
             satellite = SENTINEL_1
             reason = f"cloud_cover_{basis_pct}_percent"
         else:
             satellite = SENTINEL_2
             reason = f"clear_sky_cloud_cover_{basis_pct}_percent"
-        selection_reason = (
-            f"scene_cloud_{basis_pct}pct_scl_unavailable"
-            if scl_unavailable_reason
-            else f"aoi_cloud_{basis_pct}pct"
-        )
+
+        if aoi_cloud_percent is not None:
+            selection_reason = "aoi_scl_measured"
+        elif aoi_cloud_reason:
+            # A peek was attempted upstream but didn't produce a figure
+            # (download/stack/clip failure, budget exhaustion, etc.) —
+            # `aoi_cloud_reason` carries WHY, but the decision itself fell
+            # back to the scene-level number.
+            selection_reason = "scl_unavailable_fallback"
+        else:
+            # No peek was attempted at all: either the scene-level reading
+            # was unambiguous (clearly clear/cloudy, see
+            # processor.PEEK_CLEAR_BELOW/PEEK_CLOUDY_ABOVE) or no bbox/token
+            # was available to even peek scene-level metadata.
+            selection_reason = (
+                "scene_metadata_clear"
+                if decisive <= CLOUD_COVER_THRESHOLD
+                else "scene_metadata_cloudy"
+            )
     else:
-        # No cloud info: trust the user hint.
+        # No cloud info at all: trust the user hint.
         satellite = hint_satellite
         reason = f"user_hint_{disaster or 'unknown'}"
         selection_reason = f"user_hint_{disaster or 'unknown'}_no_cloud_data"
@@ -237,7 +252,7 @@ def select_satellite(
     result = {
         "satellite_type": satellite,
         "reason": reason,
-        "cloud_cover": observed,
+        "cloud_cover": decisive,
         "user_hint": disaster,
         "scene_cloud_percent": scene_cloud_percent,
         "aoi_cloud_percent": aoi_cloud_percent,
@@ -253,6 +268,18 @@ def select_satellite(
         aoi_cloud_percent,
         disaster,
     )
+    if (
+        aoi_cloud_percent is not None
+        and scene_cloud_percent is not None
+        and abs(aoi_cloud_percent - scene_cloud_percent) >= 10.0
+    ):
+        logger.info(
+            "AOI cloud (%.1f%%) diverges materially from scene-level cloud "
+            "(%.1f%%) for this candidate — the whole justification for the "
+            "SCL peek (CHANGE 6)",
+            aoi_cloud_percent,
+            scene_cloud_percent,
+        )
     return result
 
 

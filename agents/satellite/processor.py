@@ -113,6 +113,12 @@ COVERAGE_CEILING = 100.0
 # scale 0.01, a 97% run gets a 0.03 confidence knock; a 100% run gets none.
 COVERAGE_PENALTY_SCALE = 0.01
 
+# Default whole-search download budget (CHANGE 2), shared by
+# `process_satellite_imagery`'s own default and by the CHANGE 6 selection
+# peek's budget check in agent.py, so both read one number rather than two
+# independently-hardcoded 4.0 literals.
+DEFAULT_MAX_DOWNLOAD_GB = 4.0
+
 # Minimum percentage-point gain a newly accepted scene must add over the
 # marginal-return threshold to be worth continuing the search (CHANGE 4). This
 # is DISTINCT from the near-zero (0.01) doomed-streak duplicate-detection
@@ -817,6 +823,164 @@ def _extract_bands(
         return {}
 
     return band_paths
+
+
+# --------------------------------------------------------------------------- #
+# CHANGE 6 (2026-07-28): AOI-restricted cloud peek for S2 selection.
+#
+# `sentinel.select_satellite` only ever sees the scene's whole-tile cloud
+# percentage (from catalogue metadata) — a scene can be 45% cloudy across its
+# full footprint and clear over a small AOI, or the reverse. A real
+# AOI-restricted figure needs the scene's SCL band, i.e. a download, which
+# `sentinel.py` cannot do (it has no download capability and processor.py
+# already imports FROM sentinel.py, so the reverse import would cycle). This
+# function lives here instead and is called from agent.py, between catalogue
+# search and the main tiered download, only when the scene-level figure is
+# genuinely ambiguous (see PEEK_CLEAR_BELOW / PEEK_CLOUDY_ABOVE below).
+# --------------------------------------------------------------------------- #
+
+# Cut points for when a peek is worth its cost (one small ~10-20 MB SCL
+# download vs. staying with the free scene-level catalogue figure):
+#   - Below this, the scene-level reading is already comfortably under
+#     CLOUD_COVER_THRESHOLD (30%, sentinel.py) with enough margin that even a
+#     meaningfully worse AOI-local reading is very unlikely to flip the
+#     decision — spend nothing.
+#   - Above this, the scene is cloudy enough tile-wide that an AOI clear
+#     enough to flip the decision back to S2 would be a large, unusual
+#     divergence — still possible (that's the whole premise of this fix), but
+#     rare enough that we default to the safe (weather-independent) SAR path
+#     rather than paying for a peek on every heavily overcast scene.
+# Between the two, the scene-level number alone cannot be trusted either way
+# and the AOI figure genuinely might change the outcome — that is exactly the
+# 45.9%-scene / clear-AOI live incident this fix exists for, so it is peeked.
+PEEK_CLEAR_BELOW = 15.0
+PEEK_CLOUDY_ABOVE = 50.0
+
+
+def peek_needed(scene_cloud_percent: Optional[float]) -> bool:
+    """Whether `scene_cloud_percent` is ambiguous enough to warrant a peek.
+
+    See PEEK_CLEAR_BELOW/PEEK_CLOUDY_ABOVE above for the basis of the two cut
+    points. `None` (no scene-level figure at all) is never peek-worthy — there
+    is nothing to disambiguate against, and the caller falls back to the user
+    hint as before.
+    """
+    if scene_cloud_percent is None:
+        return False
+    return PEEK_CLEAR_BELOW <= scene_cloud_percent <= PEEK_CLOUDY_ABOVE
+
+
+def peek_aoi_cloud_percent(
+    scene_metadata: dict,
+    merged_polygon: dict,
+    event_id: str,
+    token,
+    remaining_download_gb: Optional[float] = None,
+) -> dict:
+    """Download only the SCL band for one S2 candidate and measure AOI cloud.
+
+    SCL is a 20 m (L2A) class layer, a small fraction of a full scene (the
+    other bands in a flood/earthquake/landslide request are 10 m spectral
+    bands several times the pixel count) — this reuses the existing per-band
+    Nodes download path (`_download_bands_via_nodes`), so a fully-cached SCL
+    from a prior peek (or from processing itself) is reused, not re-fetched,
+    and any peek download is counted by the SAME `_add_bytes_downloaded`
+    global the rest of the pipeline's budget accounting reads.
+
+    Downloads straight into the SAME per-scene bands directory processing
+    would use (`download_imagery`'s `scene_event` layout), so if this
+    candidate is later accepted for real processing, `_download_bands_via_nodes`'s
+    already-on-disk fast path reuses this SCL file — it is never fetched
+    twice.
+
+    Returns:
+        {
+            "aoi_cloud_percent": float | None,   # None on any failure
+            "reason": str,   # "" on success, else why the peek didn't produce a figure
+        }
+    Never raises — a failed peek is always recoverable by the caller falling
+    back to the scene-level figure (this is an optimisation, not a
+    requirement).
+    """
+    if remaining_download_gb is not None and remaining_download_gb <= 0:
+        logger.info(
+            "Skipping AOI cloud peek for %s: byte budget already exhausted",
+            scene_metadata.get("Name"),
+        )
+        return {"aoi_cloud_percent": None, "reason": "budget_exhausted"}
+
+    product_id = scene_metadata.get("Id")
+    if not product_id:
+        return {"aoi_cloud_percent": None, "reason": "no_product_id"}
+
+    # Namespace the peek's SCL under the SAME bands dir `download_imagery`
+    # uses when this candidate is later downloaded ALONE (its dominant case —
+    # selection peeks the single best S2 candidate before any mosaic decision
+    # exists): `download_imagery` only switches to a per-scene
+    # `scene_<Id>` subdir once `len(scenes) > 1` (a real mosaic). Using the
+    # plain `event_id` dir here means `_download_bands_via_nodes`'s
+    # already-on-disk fast path finds and reuses this exact SCL file for the
+    # common single-scene accept. If this candidate instead ends up folded
+    # into a multi-scene mosaic, the real download re-keys under
+    # `scene_<Id>` and re-fetches SCL — a correct cache MISS in that rarer
+    # case, not a bug (the peek still saved the selection decision).
+    scene_event = event_id
+
+    try:
+        band_paths = _download_bands_via_nodes(
+            scene_metadata, token, scene_event, ["SCL"], "sentinel-2"
+        )
+    except Exception as exc:  # pragma: no cover - defensive, peek must never crash the run
+        logger.warning("AOI cloud peek download failed for %s: %s",
+                        scene_metadata.get("Name"), exc)
+        return {"aoi_cloud_percent": None, "reason": "scl_download_failed"}
+
+    if not band_paths or "SCL" not in band_paths:
+        logger.info(
+            "AOI cloud peek: SCL unavailable for %s (L1C-only date, or "
+            "traversal failure)",
+            scene_metadata.get("Name"),
+        )
+        return {"aoi_cloud_percent": None, "reason": "scl_download_failed"}
+
+    try:
+        stacked = stack_bands(band_paths, "sentinel-2")
+        if stacked is None:
+            return {"aoi_cloud_percent": None, "reason": "scl_stack_failed"}
+
+        clipped = clip_to_polygon(stacked, merged_polygon)
+        if clipped is None:
+            return {"aoi_cloud_percent": None, "reason": "scl_clip_failed"}
+
+        scl = clipped.get("bands", {}).get("SCL")
+        mask = clipped.get("mask")
+        if scl is None or mask is None:
+            return {"aoi_cloud_percent": None, "reason": "scl_missing_after_clip"}
+
+        # Interior AOI, same convention as compute_coverage: erode the clip
+        # mask by one pixel so rasterized-boundary artifacts never count.
+        interior = _erode_mask(mask, 1)
+        if interior is None or not interior.any():
+            interior = mask
+
+        int_count = int(np.count_nonzero(interior))
+        if int_count == 0:
+            return {"aoi_cloud_percent": None, "reason": "empty_interior_aoi"}
+
+        scl_int = np.rint(np.nan_to_num(scl, nan=0.0)).astype("int16")
+        invalid = np.isin(scl_int, list(_SCL_INVALID_CLASSES)) & interior
+        aoi_cloud_pct = round(100.0 * int(np.count_nonzero(invalid)) / int_count, 2)
+
+        logger.info(
+            "AOI cloud peek for %s: %.2f%% invalid over the interior AOI "
+            "(%d px)",
+            scene_metadata.get("Name"), aoi_cloud_pct, int_count,
+        )
+        return {"aoi_cloud_percent": aoi_cloud_pct, "reason": ""}
+    except (rasterio.errors.RasterioError, ValueError, MemoryError) as exc:
+        logger.warning("AOI cloud peek measurement failed for %s: %s",
+                        scene_metadata.get("Name"), exc)
+        return {"aoi_cloud_percent": None, "reason": "scl_measurement_failed"}
 
 
 def _match_band_members(
@@ -2260,7 +2424,7 @@ def process_satellite_imagery(
     tracker=None,
     min_coverage_percent: Optional[float] = DEFAULT_MIN_COVERAGE_PERCENT,
     max_scenes: int = 3,
-    max_download_gb: float = 4.0,
+    max_download_gb: float = DEFAULT_MAX_DOWNLOAD_GB,
     max_search_seconds: float = 900.0,
 ) -> Optional[dict]:
     """Run the full remote-sensing pipeline to a caller-controlled coverage band.
