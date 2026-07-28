@@ -13,12 +13,20 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 0 | baseline (session 1/2) | a17d4ee-dirty | Kanalia S2 | 0.4837 | 0.4866 | 0.9878 | 0.6520 | 0.4479 (contradicts) | — | — | reference |
 | 0 | baseline | a17d4ee-dirty | Paiporta S2 | undefined (0 predicted zones; ref = 1.3% of AOI) | — | — | — | 0.3184 (contradicts) | — | — | unscoreable at city scale (EMS urban ceiling) |
 | 0 | baseline | 61db52e+ | Insh S2 | undefined (0 predicted zones, 13.3-day-stale scene) | — | — | — | 0.263 (contradicts) | — | — | reference |
+| 0′ | **re-baseline, pinned AOI** (pre-0b code, today's Kanalia AOI) | 960ab4f-dirty | Kanalia S2 | 0.9722 | 0.9839 | 0.9880 | 0.9859 | 0.448 (contradicts) | vs #0: AOI moved (see Phase 0b section) | — | new reference frame for all later phases |
+| 1 | Phase 0b within-water-mean fix | 6099591 | Kanalia S2 | 0.9722 | 0.9839 | 0.9880 | 0.9859 | **0.714 (supports)** | metrics **identical to 0′** (bit-for-bit); confidence +0.266, basis flipped | **KEPT** | designed to change only confidence; did exactly that |
+| 1 | Phase 0b | 6099591-dirty | Paiporta S2 ×2 | undefined (0 zones, unchanged) | — | — | — | 0.49 (contradicts→ *weak* post-0b-2) | conf +0.17 vs 0.3184 | KEPT | no classification change, honest low conf |
+| 1 | Phase 0b | 6099591-dirty.run2 | Insh S2 | undefined (0 zones, unchanged) | — | — | — | 0.3235 (contradicts→ *weak* post-0b-2) | conf +0.06 vs 0.263 | KEPT | no classification change |
 
 ## Cumulative download cost (this session)
 
 | Run | MB |
 |---|---|
-| (none yet) | 0 |
+| Phase 0b measurement: Kanalia S2 | 414 |
+| Phase 0b measurement: Paiporta S2 ×2 | 852 |
+| Phase 0b measurement: Insh S2 | 408 |
+| Pre-0b pinned-AOI re-baseline: Kanalia S2 | 414 |
+| **Running total** | **2,088 MB (~2.1 GB)** |
 
 ---
 
@@ -84,3 +92,67 @@ change — the delta is +1 new order-independence check passing and the
 updated COG-preference check passing). No harness metric delta expected or
 measured for this change: it alters *which identical-pixel product* is
 fetched, not any classification logic.
+
+---
+
+## Phase 0b — evidence_contradicts fixed, and a measurement confound caught
+
+**The confound (found, fixed, and why it matters more than the fix):** the
+first post-0b Kanalia run scored IoU 0.9722 — a jump far too large for a
+confidence-only change. Root cause: **Nominatim resolved "Kanalia" as a
+zero-area Point at baseline (2026-07-28) and as a zero-area LineString a day
+later**; `_ensure_areal`'s ~6 km buffer moved with it, shifting BOTH the
+predicted and reference extents (reference area 16.082 → 20.308 km²). The
+session-1 baseline (IoU 0.4837 / precision 0.4866) and any post-change run
+were therefore geometrically incomparable. Fixed by `aoi_pin.py` (commit
+960ab4f): boundary resolution is disk-cached and replayed bit-identically
+across every run of the same event; the pins are committed.
+
+**Clean attribution, achieved by rerunning the PRE-0b code against the SAME
+pinned AOI (960ab4f-dirty.json):**
+
+| | IoU | Precision | Recall | F1 | Confidence | Basis |
+|---|---|---|---|---|---|---|
+| pre-0b, pinned AOI | 0.9722 | 0.9839 | 0.9880 | 0.9859 | 0.448 | evidence_contradicts |
+| post-0b, same AOI | 0.9722 | 0.9839 | 0.9880 | 0.9859 | **0.714** | **evidence_supports** |
+
+Classification metrics are **bit-identical** — Phase 0b changed exactly what
+it was designed to change (the confidence machinery) and nothing else. The
+attributable delta: **confidence +0.266 and the basis flip**, on identical
+pixels, on the run whose detection is measurably excellent (F1 0.986).
+Paiporta (0-zone) and Insh (0-zone) stayed degenerate with modestly higher
+but still-low confidence (0.49 / 0.3235).
+
+**Confidence now tracks accuracy for the first time — stated with its
+limits:** post-0b, the event with near-perfect measured accuracy reports
+0.714/evidence_supports while the two degenerate runs report 0.49 and
+0.32 with non-supporting bases. Pre-0b, the best run and the worst runs were
+statistically indistinguishable (0.45 vs 0.32/0.26, all
+`evidence_contradicts`). This is n=3 with one scoreable point — a necessary
+condition restored, not a validated correlation — but it is the first time
+the ordering has ever been correct, and it is the direct, measured effect of
+removing the whole-AOI-mean false contradiction.
+
+**0b-2 (commit 8aa26dc):** `confidence_basis` no longer reports
+`evidence_contradicts` for a merely-low score (<0.70 threshold) — that case
+is now `evidence_weak`; `evidence_contradicts` requires an actual CRITICAL
+contradiction. This was the remaining reason the basis field fired on 100%
+of runs. Verified by unit test; the label change will be visible live in the
+Phase 1a measurement runs (no dedicated live rerun — the arithmetic is
+untouched and the mapping is a pure function of tracker state).
+
+**Two honest caveats for every later phase:**
+1. **The session-1 "baseline to beat" (IoU 0.4837 / precision 0.4866) no
+   longer describes the current measurement frame.** Under the pinned AOI,
+   Kanalia S2 is nearly saturated (F1 0.9859, precision 0.9839) — the
+   headline precision problem was substantially an artifact of the old AOI
+   position relative to the reference cluster, not detector over-calling.
+   All later S2 phases are measured against the 0′ row; visible headroom on
+   this event set is small, and a change that holds these numbers while
+   being scientifically better-grounded (SCL masking, MNDWI, permanent
+   water) is still worth keeping — with the no-regression bar stated
+   explicitly per change.
+2. **Permanent-water masking (1c) may LOWER including-permanent-water
+   metrics here** (Lake Karla's reflooded basin is inside both prediction
+   and reference) — which is why the incl/excl split must land in the
+   harness before that change is judged.
