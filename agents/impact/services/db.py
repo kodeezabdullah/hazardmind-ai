@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS impact_data (
     estimated_evacuation_time TEXT,
     overall_confidence       DOUBLE PRECISION,
     created_at               TIMESTAMPTZ DEFAULT NOW(),
-    updated_at               TIMESTAMPTZ DEFAULT NOW()
+    updated_at               TIMESTAMPTZ DEFAULT NOW(),
+    diagnostics              JSONB
 );
 """
 
@@ -53,9 +54,21 @@ CREATE TABLE IF NOT EXISTS impact_data (
 # in place — roads_blocked is kept, still populated (deprecated, not
 # removed), so no existing reader breaks. New readers should prefer
 # roads_blocked_km.
+#
+# diagnostics (durable-evidence-trail, feat/durable-evidence-trail,
+# 2026-07-28): the three task-level confidences (population/infrastructure/
+# vulnerability) that each task already computes in its own LLM response but
+# were previously discarded before reaching write_impact_data — only the
+# hazard-derived overall_confidence (passed in as a parameter) was ever
+# persisted. See CLAUDE.md's migration-discipline rule: this column was
+# added via shared/db/migrations/0002_durable_evidence_trail.sql, NOT via
+# this inline ALTER_DDL — the ALTER_DDL below is retained only for the two
+# pre-existing columns it already guarded (this file predates the migration
+# tooling); do not add new columns here going forward.
 ALTER_DDL = """
 ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS overall_confidence DOUBLE PRECISION;
 ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS roads_blocked_km DOUBLE PRECISION;
+ALTER TABLE impact_data ADD COLUMN IF NOT EXISTS diagnostics JSONB;
 """
 
 
@@ -85,6 +98,19 @@ async def write_impact_data(
 
         roads_blocked_km = round(float(infra.get("roads_blocked_km", 0) or 0), 1)
 
+        # diagnostics (durable-evidence-trail, feat/durable-evidence-trail):
+        # the three task-level confidences (population/infrastructure/
+        # vulnerability) that impact currently computes and discards, plus
+        # the real evacuation_routes output (also in its own column —
+        # carried here too so a single diagnostics read shows the full
+        # provenance alongside the task confidences).
+        diagnostics = {
+            "population_confidence": pop.get("confidence"),
+            "infrastructure_confidence": infra.get("confidence"),
+            "vulnerability_confidence": vuln.get("confidence"),
+            "evacuation_routes": vuln.get("evacuation_routes", []),
+        }
+
         await conn.execute(
             """
             INSERT INTO impact_data (
@@ -101,8 +127,9 @@ async def write_impact_data(
                 evacuation_routes,
                 estimated_evacuation_time,
                 overall_confidence,
+                diagnostics,
                 updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
             ON CONFLICT (event_id) DO UPDATE SET
                 total_affected           = EXCLUDED.total_affected,
                 high_risk_people         = EXCLUDED.high_risk_people,
@@ -116,6 +143,7 @@ async def write_impact_data(
                 evacuation_routes        = EXCLUDED.evacuation_routes,
                 estimated_evacuation_time = EXCLUDED.estimated_evacuation_time,
                 overall_confidence       = EXCLUDED.overall_confidence,
+                diagnostics              = EXCLUDED.diagnostics,
                 updated_at               = NOW()
             """,
             event_id,
@@ -143,6 +171,7 @@ async def write_impact_data(
             json.dumps(vuln.get("evacuation_routes", [])),
             evac_time,
             float(overall_confidence) if overall_confidence is not None else None,
+            json.dumps(diagnostics),
         )
         logger.info("[db] impact_data upserted for event_id=%s", event_id)
 
