@@ -177,6 +177,29 @@ def _bytes_downloaded_total() -> int:
     return _BYTES_DOWNLOADED
 
 
+# CHANGE 6: whether the most recent _download_bands_via_nodes call reused an
+# SCL band already on disk (a prior selection peek) rather than downloading
+# it. Set at the exact HIT/MISS log point, read by the caller (download_imagery)
+# immediately after the call — process_satellite_imagery's tier/scene loop is
+# sequential (no concurrent scene downloads within one event), so there is no
+# cross-scene race on this flag, same as `_BYTES_DOWNLOADED` above. `None`
+# means the most recent call never checked SCL at all (SCL wasn't in
+# band_tokens, or the call short-circuited before the check).
+_LAST_SCL_REUSED: Optional[bool] = None
+
+
+def _set_scl_reused(value: Optional[bool]) -> None:
+    global _LAST_SCL_REUSED
+    _LAST_SCL_REUSED = value
+
+
+def _last_scl_reused() -> Optional[bool]:
+    """Whether the most recent _download_bands_via_nodes call reused a
+    peeked SCL band (True), downloaded it fresh (False), or never checked
+    SCL at all (None — SCL wasn't requested for this scene/satellite)."""
+    return _LAST_SCL_REUSED
+
+
 # BUG 7 — per-stage peak-RSS instrumentation. Peak memory is 8-16 GB and rises
 # with tile count; this records the peak resident-set size observed after each
 # pipeline stage so we can see WHERE the peak occurs and how it scales with the
@@ -691,6 +714,8 @@ def _download_bands_via_nodes(
     aborts the scene, not each band independently). Returns {token: path} for the
     bands fetched, or None on traversal failure (caller falls back to zip).
     """
+    _set_scl_reused(None)  # reset per call; only set when SCL is actually checked
+
     product_id = scene_metadata.get("Id")
     if not product_id:
         return None
@@ -720,6 +745,11 @@ def _download_bands_via_nodes(
     if len(cached) == len(band_tokens):
         for tok, path in cached.items():
             logger.info("Reusing cached band %s (%d bytes)", tok, os.path.getsize(path))
+            if tok.upper() == "SCL":
+                logger.info(
+                    "SCL cache HIT — reusing peeked band, skipping download"
+                )
+                _set_scl_reused(True)
         return cached
 
     try:
@@ -759,6 +789,25 @@ def _download_bands_via_nodes(
                     return None
                 band_auth_header = {"Authorization": f"Bearer {band_token}"}
                 out_path = os.path.join(bands_dir, f"{tok}.jp2")
+
+                # SCL-specific cache visibility (CHANGE 6 reuse path): this is
+                # the exact same on-disk check _stream_to_file_with_retry is
+                # about to make internally, done here first ONLY to log
+                # whether a prior CHANGE 6 selection peek's SCL download is
+                # about to be reused. Every other band token skips this log —
+                # only SCL was ever pre-fetched ahead of the real download.
+                if tok.upper() == "SCL":
+                    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                        logger.info(
+                            "SCL cache HIT — reusing peeked band, skipping download"
+                        )
+                        _set_scl_reused(True)
+                    else:
+                        logger.info(
+                            "SCL cache MISS — downloading SCL (peek reuse did not apply)"
+                        )
+                        _set_scl_reused(False)
+
                 url = _node_url(product_id, segments)
                 result = _stream_to_file_with_retry(
                     session,
@@ -1150,6 +1199,7 @@ def download_imagery(
 
     per_scene_paths = []
     rejected_non_grd = 0
+    scl_reused = None  # CHANGE 6: whether an S2 scene's SCL reused a peek
     for idx, scene in enumerate(scenes):
         # GUARD (Sentinel-1 only): reject a non-GRD product BEFORE downloading.
         # RAW (level-0) / SLC products carry no VV/VH measurement GeoTIFFs, so
@@ -1187,6 +1237,13 @@ def download_imagery(
         paths = _download_bands_via_nodes(
             scene, token, scene_event, band_tokens, satellite_type
         )
+        reused = _last_scl_reused()
+        if reused is not None:
+            # Last write wins across scenes in a mosaic — fine for logging/
+            # reporting purposes (this is an observability signal, not a
+            # correctness input); a mosaic's first scene is also the one
+            # selection would have peeked, so it's the meaningful one anyway.
+            scl_reused = reused
 
         # FALLBACK: whole-archive download + in-zip extract (unusual layouts,
         # Sentinel-1, or a Nodes traversal failure).
@@ -1221,7 +1278,11 @@ def download_imagery(
             per_scene_paths, event_id, satellite_type, dst_crs
         )
 
-    return {"satellite_type": satellite_type, "band_paths": band_paths}
+    return {
+        "satellite_type": satellite_type,
+        "band_paths": band_paths,
+        "scl_reused": scl_reused,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2284,6 +2345,10 @@ def _attempt_clip(
     # imagery to individual city polygons without downloading/stacking again.
     clipped["_stacked"] = stacked
     clipped["valid_percent"] = _valid_pixel_percent(clipped)
+    # CHANGE 6: whether this candidate's SCL reused a selection-time peek
+    # (True), was freshly downloaded (False), or SCL wasn't requested at all
+    # for this satellite_type/disaster (None, e.g. Sentinel-1).
+    clipped["scl_reused"] = imagery.get("scl_reused")
     return clipped
 
 
@@ -2964,6 +3029,7 @@ def _finish_success(
         "gap_limited_by": gap_limited_by,
         "bytes_downloaded": bytes_after - bytes_before,
         "scene_id": ",".join(scene_ids) if scene_ids else None,
+        "scl_reused": clipped.get("scl_reused"),
         "processing_level": (
             "L2A" if satellite_type == "sentinel-2" else None
         ),

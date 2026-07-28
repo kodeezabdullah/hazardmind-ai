@@ -747,6 +747,142 @@ def test_s1_selection_path_unchanged():
     # unchanged decision above.
 
 
+def test_scl_cache_hit_logs_and_sets_reused_flag(capsys=None):
+    print("\n[CHANGE 6] real download finds a peeked SCL on disk -> cache "
+          "HIT logged, _last_scl_reused()=True")
+    import logging
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    processor.logger.addHandler(handler)
+    processor.logger.setLevel(logging.INFO)
+    try:
+        restore = _install_processor_stubs({
+            # Every requested band, including SCL, already on disk -> the
+            # fully-cached fast path inside _download_bands_via_nodes fires.
+            "_resolve_token": lambda t: "tok",
+        })
+        import os as _os
+        bands_dir = _os.path.join(processor.TEMP_ROOT, "evt-scl-hit", "bands")
+        _os.makedirs(bands_dir, exist_ok=True)
+        for tok in ("B03", "B08", "SCL"):
+            p = _os.path.join(bands_dir, f"{tok}.jp2")
+            with open(p, "wb") as f:
+                f.write(b"x" * 10)
+        try:
+            paths = processor._download_bands_via_nodes(
+                {"Id": "scene-hit"}, "tok", "evt-scl-hit",
+                ["B03", "B08", "SCL"], "sentinel-2",
+            )
+        finally:
+            restore()
+            for tok in ("B03", "B08", "SCL"):
+                try:
+                    _os.remove(_os.path.join(bands_dir, f"{tok}.jp2"))
+                except OSError:
+                    pass
+    finally:
+        processor.logger.removeHandler(handler)
+
+    if paths and paths.get("SCL"):
+        ok("all-cached fast path returned SCL among the bands")
+    else:
+        bad(f"fast path did not return SCL: {paths}")
+    if any("SCL cache HIT" in m for m in records):
+        ok("SCL cache HIT logged")
+    else:
+        bad(f"no SCL cache HIT log line found: {records}")
+    if processor._last_scl_reused() is True:
+        ok("_last_scl_reused() == True after a cache hit")
+    else:
+        bad(f"_last_scl_reused() wrong: {processor._last_scl_reused()}")
+
+
+def test_scl_cache_miss_logs_and_sets_reused_flag():
+    print("\n[CHANGE 6] real download finds no peeked SCL on disk -> cache "
+          "MISS logged, _last_scl_reused()=False")
+    import logging
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    processor.logger.addHandler(handler)
+    processor.logger.setLevel(logging.INFO)
+
+    def fake_resolve_nodes(session, product_id, band_tokens, headers, timeout):
+        return {tok: ["SAFE", "GRANULE", "g", "IMG_DATA", f"{tok}.jp2"] for tok in band_tokens}
+
+    def fake_stream(session, url, headers, dest_path, label, timeout=None, grace_seconds=None):
+        # Simulate a successful download: write the file so the caller sees
+        # a real path, without touching the network.
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(b"x" * 10)
+        return dest_path
+
+    restore = _install_processor_stubs({
+        "_resolve_s2_band_nodes": fake_resolve_nodes,
+        "_stream_to_file_with_retry": fake_stream,
+        "_CDSESession": lambda: _StubSession(),
+    })
+    try:
+        paths = processor._download_bands_via_nodes(
+            {"Id": "scene-miss", "Name": "S2_miss.SAFE"}, "tok",
+            "evt-scl-miss", ["SCL"], "sentinel-2",
+        )
+    finally:
+        restore()
+        processor.logger.removeHandler(handler)
+        try:
+            os.remove(os.path.join(processor.TEMP_ROOT, "evt-scl-miss", "bands", "SCL.jp2"))
+        except OSError:
+            pass
+
+    if paths and paths.get("SCL"):
+        ok("download path returned SCL")
+    else:
+        bad(f"download did not return SCL: {paths}")
+    if any("SCL cache MISS" in m for m in records):
+        ok("SCL cache MISS logged")
+    else:
+        bad(f"no SCL cache MISS log line found: {records}")
+    if processor._last_scl_reused() is False:
+        ok("_last_scl_reused() == False after a cache miss")
+    else:
+        bad(f"_last_scl_reused() wrong: {processor._last_scl_reused()}")
+
+
+def test_scl_reused_flag_surfaces_in_result():
+    print("\n[CHANGE 6] scl_reused rides through download_imagery -> "
+          "_attempt_clip -> _finish_success's merged result")
+
+    def fake_download_bands(scene_metadata, token, event_id, band_tokens, satellite_type):
+        processor._set_scl_reused(True)
+        return {tok: f"/fake/{tok}.jp2" for tok in band_tokens}
+
+    restore = _install_processor_stubs({
+        "_download_bands_via_nodes": fake_download_bands,
+    })
+    try:
+        imagery = processor.download_imagery(
+            {"satellite_type": "sentinel-2"}, {"Id": "scene-flag"}, "evt-flag",
+            "tok", "flood",
+        )
+    finally:
+        restore()
+    if imagery and imagery.get("scl_reused") is True:
+        ok(f"download_imagery surfaces scl_reused=True: {imagery.get('scl_reused')}")
+    else:
+        bad(f"download_imagery did not surface scl_reused: {imagery}")
+
+
 # --------------------------------------------------------------------------- #
 # CHANGE 3 — cloud-attributed gap stops being chased
 # --------------------------------------------------------------------------- #
@@ -892,6 +1028,9 @@ def run_all():
     test_peek_bytes_count_against_download_budget()
     test_exhausted_byte_budget_skips_peek()
     test_s1_selection_path_unchanged()
+    test_scl_cache_hit_logs_and_sets_reused_flag()
+    test_scl_cache_miss_logs_and_sets_reused_flag()
+    test_scl_reused_flag_surfaces_in_result()
     test_cloud_gap_not_chased_without_lower_cloud_candidate()
     test_budget_params_thread_from_analyze_request()
 

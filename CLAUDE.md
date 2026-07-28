@@ -539,6 +539,24 @@ back into `processor.py`), the orchestration moved up a level, into
    into a multi-scene mosaic, the real download re-keys under `scene_<Id>`
    and re-fetches SCL — a correct cache MISS in that rarer case (the peek
    still paid for itself by deciding selection correctly), not a bug.
+   **This reuse is now directly observable, not just structurally implied.**
+   `_download_bands_via_nodes` logs an explicit `"SCL cache HIT — reusing
+   peeked band, skipping download"` or `"SCL cache MISS — downloading SCL
+   (peek reuse did not apply)"` at the exact point it checks for SCL on disk
+   (both the fully-cached fast path and the per-band download loop), and
+   records the outcome in a small module-level flag
+   (`_set_scl_reused`/`_last_scl_reused`, mirroring the existing
+   `_add_bytes_downloaded`/`_bytes_downloaded_total` pattern — safe because
+   `process_satellite_imagery`'s tier/scene loop is sequential, no concurrent
+   scene downloads within one event). `download_imagery` reads the flag right
+   after each `_download_bands_via_nodes` call and returns it as
+   `scl_reused: bool | None` (`None` when SCL was never requested at all,
+   e.g. Sentinel-1); `_attempt_clip`/`_finish_success` carry it onto the
+   accepted candidate's merged result, and `agent.py`'s `structured` result
+   dict — the same dict that is persisted and becomes `PipelineState["satellite_result"]`
+   — now carries `scl_reused` alongside `bytes_downloaded`, so it shows up in
+   the pipeline log / `/pipeline-log` trail without inventing a separate
+   logging channel.
 
 **Reporting.** `scene_cloud_percent` is always present. `aoi_cloud_percent`
 is the real measured value when a peek succeeded, `None` otherwise.
@@ -588,15 +606,18 @@ preferred an AOI-restricted figure the moment one exists
 (`scene["_aoi_cloud"]`) — nothing further was needed there; it was written
 ahead of this gap closing.
 
-**Tests:** `agents/satellite/tests/test_coverage_tolerance.py` gained 12 new
-checks (51 total in that file, up from 28) covering: peek_needed's two cut
+**Tests:** `agents/satellite/tests/test_coverage_tolerance.py` gained 19 new
+checks (58 total in that file, up from 28) covering: peek_needed's two cut
 points and the ambiguous band between them, AOI-vs-scene-level conflict
 resolution in both directions, a failed SCL download falling back cleanly, the
 SCL-reuse path (asserted structurally — same `event_id`-keyed directory,
 single call to `_download_bands_via_nodes`), peek bytes counting against the
 global download-byte total, an exhausted byte budget skipping the peek
-outright, and the S1 path staying provably unchanged. Full offline suite
-re-run: `test_coverage_tolerance.py` 51/51,
+outright, the S1 path staying provably unchanged, and (added in a follow-up
+within this same pass) the explicit SCL cache HIT/MISS log lines and the
+`scl_reused` flag's propagation from `_download_bands_via_nodes` through
+`download_imagery` into the merged result. Full offline suite re-run:
+`test_coverage_tolerance.py` 58/58,
 `test_correctness_fixes_20260727.py` 18/19 (the 1 failure — a `scene_id`
 source-grep check unrelated to this change — confirmed pre-existing via
 `git stash`, present identically before and after this session's edits),

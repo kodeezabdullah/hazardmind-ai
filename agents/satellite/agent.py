@@ -1020,6 +1020,11 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "acquisition_count": result.get("acquisition_count"),
             "processing_level": result.get("processing_level"),
             "bytes_downloaded": result.get("bytes_downloaded"),
+            # CHANGE 6 — whether the selection-time SCL peek's download was
+            # reused during real processing (True), a fresh SCL had to be
+            # downloaded anyway (False), or SCL was never requested for this
+            # satellite_type/disaster (None, e.g. Sentinel-1).
+            "scl_reused": result.get("scl_reused"),
             "bbox": list(bbox),
             # Geographic extent of the PNG layers, for map overlay. Shapes
             # for Leaflet (bounds_leaflet) and MapLibre (bounds_corners).
