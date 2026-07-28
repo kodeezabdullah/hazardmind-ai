@@ -230,6 +230,107 @@ def test_78_percent_insufficient_coverage():
         bad(f"insufficient_coverage missing gap geometry: {res}")
 
 
+def _iso_days_ago(days):
+    from datetime import datetime, timedelta, timezone
+    dt = datetime.now(timezone.utc) - timedelta(days=days)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_scene_age_days_present_and_correct():
+    print("\n[islamabad-findings #4] scene_age_days present and computed correctly")
+    s1 = _scene("S2_a.SAFE", _iso_days_ago(14), 91, pid="a")
+    restore = _install_stubs({
+        "_attempt_clip": lambda *a, **k: {"_stacked": {}, "shape": (10, 10)},
+        "compute_coverage": _sequenced_coverage([100.0]),
+        "_render_clip": _fake_render_clip,
+    })
+    try:
+        res = processor.process_satellite_imagery(
+            {"satellite_type": "sentinel-2"}, [s1], (73, 33.5, 73.1, 33.6),
+            _POLY, "evt-age14", "tok", "flood", tracker=_FakeTracker(),
+        )
+    finally:
+        restore()
+
+    age = res.get("scene_age_days") if res else None
+    if age is not None and 13.9 <= age <= 14.1:
+        ok(f"scene_age_days present and ~14 days ({age})")
+    else:
+        bad(f"scene_age_days missing or wrong: {res.get('scene_age_days') if res else res}")
+
+
+def test_old_scene_reduces_confidence_and_appends_anomaly():
+    print("\n[islamabad-findings #4] a 14-day-old scene reduces confidence "
+          "and appends a stale_scene_age anomaly")
+    s1 = _scene("S2_a.SAFE", _iso_days_ago(14), 91, pid="a")
+    restore = _install_stubs({
+        "_attempt_clip": lambda *a, **k: {"_stacked": {}, "shape": (10, 10)},
+        "compute_coverage": _sequenced_coverage([100.0]),
+        "_render_clip": _fake_render_clip,
+    })
+    trk = _FakeTracker()
+    try:
+        res = processor.process_satellite_imagery(
+            {"satellite_type": "sentinel-2"}, [s1], (73, 33.5, 73.1, 33.6),
+            _POLY, "evt-age14b", "tok", "flood", tracker=trk,
+        )
+    finally:
+        restore()
+
+    anomaly_types = [a.get("type") for a in (res.get("coverage_anomalies") or [])] if res else []
+    if "stale_scene_age" in anomaly_types:
+        ok("stale_scene_age anomaly appended for a 14-day-old scene")
+    else:
+        bad(f"missing stale_scene_age anomaly: {anomaly_types}")
+
+    scene_age_evidence = [e for e in trk.evidence if e[0] and e[0][0] == "scene_age"]
+    if scene_age_evidence:
+        ok("confidence tracker received scene_age evidence")
+    else:
+        bad(f"no scene_age evidence recorded: {trk.evidence}")
+
+    if any("days old" in text for _sev, text in trk.concerns):
+        ok("a concern describing the stale scene age was recorded")
+    else:
+        bad(f"no stale-age concern recorded: {trk.concerns}")
+
+
+def test_same_day_scene_no_age_penalty():
+    print("\n[islamabad-findings #4] a same-day scene carries no age penalty")
+    s1 = _scene("S2_a.SAFE", _iso_days_ago(0), 91, pid="a")
+    restore = _install_stubs({
+        "_attempt_clip": lambda *a, **k: {"_stacked": {}, "shape": (10, 10)},
+        "compute_coverage": _sequenced_coverage([100.0]),
+        "_render_clip": _fake_render_clip,
+    })
+    trk = _FakeTracker()
+    try:
+        res = processor.process_satellite_imagery(
+            {"satellite_type": "sentinel-2"}, [s1], (73, 33.5, 73.1, 33.6),
+            _POLY, "evt-age0", "tok", "flood", tracker=trk,
+        )
+    finally:
+        restore()
+
+    anomaly_types = [a.get("type") for a in (res.get("coverage_anomalies") or [])] if res else []
+    if "stale_scene_age" not in anomaly_types:
+        ok("no stale_scene_age anomaly for a same-day scene")
+    else:
+        bad(f"unexpected stale_scene_age anomaly for a fresh scene: {anomaly_types}")
+
+    scene_age_evidence = [e for e in trk.evidence if e[0] and e[0][0] == "scene_age"]
+    if not scene_age_evidence:
+        ok("no scene_age confidence penalty for a same-day scene")
+    else:
+        bad(f"unexpected scene_age evidence for a fresh scene: {scene_age_evidence}")
+
+    age = res.get("scene_age_days") if res else None
+    if age is not None and 0.0 <= age < 1.0:
+        ok(f"scene_age_days correctly ~0 for a same-day scene ({age})")
+    else:
+        bad(f"scene_age_days unexpected for a same-day scene: {age}")
+
+
 def test_min_coverage_percent_clamped_low():
     print("\n[CHANGE 1] caller min_coverage_percent=60 clamped to COVERAGE_FLOOR=80")
     clamped = processor._clamp_min_coverage_percent(60)
@@ -1006,6 +1107,9 @@ def run_all():
     test_97_percent_completes_with_penalty()
     test_85_percent_below_target_flagged()
     test_78_percent_insufficient_coverage()
+    test_scene_age_days_present_and_correct()
+    test_old_scene_reduces_confidence_and_appends_anomaly()
+    test_same_day_scene_no_age_penalty()
     test_min_coverage_percent_clamped_low()
     test_min_coverage_percent_clamped_high()
     test_coverage_below_100_lowers_confidence_and_anomaly()

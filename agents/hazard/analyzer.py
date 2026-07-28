@@ -311,6 +311,13 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     #     (CRITICAL/HIGH/MEDIUM/LOW), confidence (0.0-1.0), reasoning
     #     (string), liquefaction_probability (0.0-1.0)."
     # )
+    # A USGS fetch failure (network error, timeout) degrades to the same
+    # {"count": 0} shape as a genuine "no recent earthquakes" result. Without
+    # `usgs_data.get("error")` surfacing downstream, a LOW verdict here is
+    # indistinguishable from "we never actually asked USGS" — the same
+    # provenance gap this function shares with analyze_landslide.
+    usgs_fetch_failed = bool(usgs_data.get("error"))
+
     if max_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
     elif max_mag >= 5.5:
@@ -330,6 +337,16 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
             else f"Seismic risk from observed USGS data: max magnitude {max_mag}."
         ),
         "liquefaction_probability": liq,
+        # Provenance: distinguishes "USGS was queried and found nothing" from
+        # "USGS could not be reached" — both currently produce the same LOW
+        # risk/reasoning text without this.
+        "evidence_basis": {
+            "eq_count": eq_count,
+            "max_magnitude": max_mag,
+            "usgs_source": usgs_data.get("source"),
+            "usgs_fetch_failed": usgs_fetch_failed,
+            "usgs_error": usgs_data.get("error"),
+        },
     }
 
 
@@ -380,6 +397,18 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
             else f"Landslide risk from real DEM mean slope {slope:.1f}°."
         ),
         "high_risk_zones": [],
+        # Provenance: a LOW verdict from genuinely flat terrain (real DEM
+        # sample) must be distinguishable from a LOW verdict produced by the
+        # conservative 10.0-degree default when the DEM call failed —
+        # currently both look identical downstream.
+        "evidence_basis": {
+            "slope_estimate": slope,
+            "dem_available": bool(slope_data.get("available")),
+            "dem_source": slope_data.get("source"),
+            "elevation_min_m": slope_data.get("elevation_min_m"),
+            "elevation_max_m": slope_data.get("elevation_max_m"),
+            "sample_count": slope_data.get("samples"),
+        },
     }
 
 
@@ -515,6 +544,14 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         "satellite_confidence": satellite_confidence,
         "confidence_cap_applied": confidence_cap_applied,
         "risk_polygons": {},
+        # Evidence provenance for earthquake/landslide (see analyze_earthquake/
+        # analyze_landslide) — lets a downstream reader tell a genuine
+        # no-seismicity/flat-terrain verdict apart from a fetch failure that
+        # degraded to the same conservative default.
+        "evidence_basis": {
+            "earthquake": quake.get("evidence_basis"),
+            "landslide": landslide.get("evidence_basis"),
+        },
         "raw": {"gdacs": gdacs_data, "usgs": usgs_data, "slope": slope_data},
         # H#4: surfaced only when the deterministic flood fallback excluded an
         # uncalibrated SAR index rather than misapplying NDWI thresholds to it.

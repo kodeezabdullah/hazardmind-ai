@@ -120,6 +120,15 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
         conn = await asyncpg.connect(db_url)
         try:
             async with conn.transaction():
+                # islamabad-findings #4 — additive column, same pattern as
+                # agents/impact/services/db.py's ALTER_DDL: a plain
+                # ADD COLUMN IF NOT EXISTS guard run before the INSERT rather
+                # than a separate migration file, since this table has no
+                # migration tooling of its own.
+                await conn.execute(
+                    "ALTER TABLE satellite_results "
+                    "ADD COLUMN IF NOT EXISTS scene_age_days DOUBLE PRECISION"
+                )
                 await conn.execute("DELETE FROM satellite_results WHERE event_id=$1", event_id)
                 await conn.execute(
                     """
@@ -127,8 +136,8 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                         (event_id, satellite_type, cloud_cover, scene_id,
                          true_color_url, index_url, classification_url, geojson_url,
                          affected_area_km2, total_zones,
-                         bounds, bbox, risk_cities)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                         bounds, bbox, risk_cities, scene_age_days)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                     """,
                     event_id,
                     structured.get("satellite_type"),
@@ -143,6 +152,7 @@ def _persist_satellite_result(event_id: str, structured: dict) -> Optional[str]:
                     json.dumps(structured.get("bounds")) if structured.get("bounds") is not None else None,
                     json.dumps(structured.get("bbox")) if structured.get("bbox") is not None else None,
                     json.dumps(structured.get("risk_cities")) if structured.get("risk_cities") is not None else None,
+                    _f("scene_age_days"),
                 )
         finally:
             await conn.close()
@@ -624,7 +634,19 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # queries are free, and we need a real scene object (with an Id) to
         # peek. No S2 candidate in the window means nothing to measure, so S1
         # is selected immediately with no peek attempted.
-        s2_candidate = search_imagery(bbox, SENTINEL_2, aoi_geom=merged)
+        #
+        # islamabad-findings #2 — this used to run its OWN fixed 7-day search
+        # here, independent of _search_with_recovery's later 7->14->30-day
+        # widening for whatever satellite_type ended up selected. When the
+        # 7-day window was empty, the peek gave up (no_s2_candidates) even
+        # though the widened search moments later found scenes — the peek
+        # never got a chance on exactly the runs where the window mattered.
+        # Now there is one S2 catalogue search, using the same widening
+        # recovery logic, and its result is reused as `scenes` below when S2
+        # is the satellite actually selected — no second search for the same
+        # candidate set.
+        s2_scenes = _search_with_recovery(event_id, bbox, SENTINEL_2, merged)
+        s2_candidate = s2_scenes[0] if s2_scenes else None
 
         if s2_candidate is None:
             selection = select_satellite(disaster_type, bbox=bbox, token=token_manager.get())
@@ -695,7 +717,15 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # the actual risk polygon, so the pipeline can mosaic / fall back if the
         # best single tile is too sparse. INTEGRATION POINT 3 — widen the date
         # window on the LLM's advice when nothing is found.
-        scenes = _search_with_recovery(event_id, bbox, satellite_type, merged)
+        #
+        # islamabad-findings #2 — when Sentinel-2 was selected, the catalogue
+        # search above (`s2_scenes`) already found this exact candidate set
+        # (same widening logic, same bbox/aoi_geom) — searching again here
+        # would just repeat it. Only re-search when Sentinel-1 was chosen
+        # instead (a distinct catalogue query the peek never ran).
+        scenes = s2_scenes if satellite_type == SENTINEL_2 else _search_with_recovery(
+            event_id, bbox, satellite_type, merged
+        )
         if not scenes:
             return _error(
                 event_id,
@@ -991,7 +1021,18 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "status": "complete",
             "satellite_type": satellite_type,
             "cloud_cover": selection.get("cloud_cover"),
-            "selection_reason": selection.get("reason"),
+            "reason": selection.get("reason"),
+            # CHANGE 6 — the AOI-restricted SCL peek's own fields. These are
+            # what let a downstream consumer (or the pipeline log) actually
+            # see that the peek ran and what it decided, instead of only the
+            # legacy scene-level cloud_cover/reason pair. selection_reason
+            # names the real basis (aoi_scl_measured / scene_metadata_clear /
+            # scene_metadata_cloudy / no_s2_candidates / scl_unavailable_fallback);
+            # scene_cloud_percent/aoi_cloud_percent are the raw figures behind
+            # it.
+            "selection_reason": selection.get("selection_reason"),
+            "scene_cloud_percent": selection.get("scene_cloud_percent"),
+            "aoi_cloud_percent": selection.get("aoi_cloud_percent"),
             "index_type": result["index_type"],
             "water_percent": result["water_percent"],
             "mean_index": result["mean_index"],
@@ -1020,6 +1061,24 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "acquisition_count": result.get("acquisition_count"),
             "processing_level": result.get("processing_level"),
             "bytes_downloaded": result.get("bytes_downloaded"),
+            # islamabad-findings audit follow-up (field-survival pass): these
+            # were computed by processor.py's _finish_success on EVERY
+            # success path (target_met and below_target_coverage alike, see
+            # coverage_status just below) but were only ever copied into a
+            # payload on the insufficient_coverage FAILURE branch above —
+            # dropped silently whenever the run completed (even a
+            # below-target-coverage "complete" run). Found by writing the
+            # field-survival test this comment sits next to, not by report
+            # or user complaint.
+            "coverage_status": result.get("coverage_status"),
+            "gap_count": result.get("gap_count"),
+            "gap_area_km2": result.get("gap_area_km2"),
+            "gap_attribution": result.get("gap_attribution") or result.get("gap_cause"),
+            "gap_limited_by": result.get("gap_limited_by"),
+            # islamabad-findings #4 — days between the most recent accepted
+            # acquisition and now; reduces confidence (processor._finish_success)
+            # but is never a hard cutoff, so it must always be visible downstream.
+            "scene_age_days": result.get("scene_age_days"),
             # CHANGE 6 — whether the selection-time SCL peek's download was
             # reused during real processing (True), a fresh SCL had to be
             # downloaded anyway (False), or SCL was never requested for this
@@ -1067,6 +1126,16 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "needs_verification": needs_verification,
             "should_alert": should_alert,
         }
+        # A field that exists in `selection` but silently vanishes from
+        # `structured` is the defect class this whole audit series keeps
+        # finding (see the index_type assertion above for the first
+        # instance). If selection produced a real selection_reason,
+        # structured must carry it through unchanged.
+        if selection.get("selection_reason") is not None:
+            assert structured["selection_reason"] == selection["selection_reason"], (
+                f"structured selection_reason {structured['selection_reason']!r} "
+                f"diverges from selection's {selection['selection_reason']!r}"
+            )
 
         # INTEGRATION POINT 5 — a natural, expert-sounding hand-off summary
         # (not raw JSON). The structured payload above still carries the

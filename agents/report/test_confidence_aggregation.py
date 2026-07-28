@@ -137,6 +137,23 @@ def test_satellite_zero_via_dedicated_channel_ONLY_cannot_yield_high():
     failing if a future refactor removes the dedicated channel while also
     "cleaning up" the redundant hazard_scores["flood"] read -- catching
     exactly the fragility SYSTEM_ANALYSIS.md F.6/H#6 warned about.
+
+    NOTE (TESTING_GAP_AUDIT.md, 2026-07-28): this test's own docstring names
+    agents/report/node.py's wiring as the thing it protects, but only ever
+    tested a hand-built report dict shaped like what that wiring is
+    *supposed* to produce -- it never called node.py or
+    run_report_pipeline, so a real regression in the wiring itself (e.g.
+    report_node stops passing incoming_payload, or
+    _merge_incoming_payload_into_context stops reading
+    confidence_scores["satellite"]) would not be caught here. The real,
+    entry-point-exercising version of this exact guarantee now lives in
+    agents/report/test_field_survival.py's
+    test_satellite_zero_confidence_via_real_run_report_pipeline_cannot_yield_high
+    (calls run_report_pipeline directly with a real incoming_payload). This
+    test is kept as a fast, narrower regression guard on
+    calculate_confidence_level's aggregation rule itself -- it is not wrong,
+    only narrower than its docstring claimed; the wiring-level guarantee is
+    now covered elsewhere too.
     """
     report = {
         "confidence": {"satellite_confidence": 0.0},

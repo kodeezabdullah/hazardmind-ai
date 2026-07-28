@@ -354,7 +354,7 @@ class CrossValidator:
                 )
 
         # 3. Cloud-cover validation.
-        cloud = _coerce_float(satellite_result.get("cloud_cover"))
+        cloud = _normalise_percent(satellite_result.get("cloud_cover"))
         if cloud is not None:
             if cloud > 60:
                 tracker.add_concern(
@@ -380,7 +380,7 @@ class CrossValidator:
             index_calibrated = satellite_result.get("index_calibrated")
             if index_type == "NDWI" and index_calibrated is not False:
                 ndwi = _coerce_float(satellite_result.get("mean_index"))
-                water_pct = _coerce_float(satellite_result.get("water_percent")) or 0.0
+                water_pct = _normalise_percent(satellite_result.get("water_percent")) or 0.0
                 gdacs_red = bool(gdacs and gdacs.get("alert") == "RED")
                 if ndwi is not None:
                     if ndwi < 0 and gdacs_red:
@@ -417,7 +417,7 @@ class CrossValidator:
                 )
 
         # 5. Coverage validation.
-        coverage = _coerce_float(
+        coverage = _normalise_percent(
             satellite_result.get("coverage_percent", satellite_result.get("valid_percent"))
         )
         if coverage is not None and coverage < 60:
@@ -515,6 +515,32 @@ def _coerce_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalise_percent(value: Any) -> Optional[float]:
+    """Coerce a percent-contract field (water_percent/coverage_percent/
+    cloud_cover — all documented as 0-100 by their producers in
+    processor.py/sentinel.py) to that 0-100 scale, tolerating a caller that
+    mistakenly supplies a 0-1 fraction instead.
+
+    islamabad-findings #3 — a value in (0, 1] read as though it were already
+    0-100 renders as e.g. "90% classified wet_soil" when the real figure was
+    a fraction (0.9, i.e. genuinely 90%, or worse, 0.09 meaning 9% read as
+    "9%" — coincidentally correct-looking but for the wrong reason) or, more
+    dangerously, silently fails every `> 20`/`> 60` threshold check for a
+    real low-but-nonzero reading, masking a genuine partial result as "no
+    evidence" instead of raising the false-contradiction alarm this was
+    previously producing. Any 0 < value <= 1 is treated as a fraction and
+    scaled up; 0 and values > 1 are assumed already on the 0-100 scale (a
+    genuine 0% needs no conversion, and no valid percent contract in this
+    codebase produces a fraction greater than 1).
+    """
+    v = _coerce_float(value)
+    if v is None:
+        return None
+    if 0 < v <= 1:
+        return v * 100.0
+    return v
 
 
 if __name__ == "__main__":
