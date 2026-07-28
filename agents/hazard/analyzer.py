@@ -21,52 +21,117 @@ USGS_API = os.getenv("USGS_API", "https://earthquake.usgs.gov/fdsnws/event/1")
 
 
 async def fetch_gdacs(bbox: list) -> dict:
-    """Fetch recent GDACS flood, tsunami, and earthquake alerts for a bbox."""
+    """Fetch recent GDACS flood, tsunami, and earthquake alerts for a bbox.
+
+    ``query`` on the returned dict is the raw-evidence-trace record (query
+    URL/params, HTTP status, latency) so a hazard_zones row can show whether
+    GDACS was actually reached and what it returned, for any hazard type's
+    diagnostics that wants to record "was GDACS used or deliberately
+    ignored" (the landslide path deliberately ignores the count — see
+    analyze_landslide's docstring for why — but that exclusion should be
+    visible in the trace, not only in a code comment).
+    """
+    url = f"{GDACS_API}/events/geteventlist/SEARCH"
+    params = {
+        "eventtype": "FL,TS,EQ",
+        "bbox": ",".join(str(value) for value in bbox),
+        "limit": 50,
+    }
+    started = datetime.now(timezone.utc)
     try:
-        url = f"{GDACS_API}/events/geteventlist/SEARCH"
-        params = {
-            "eventtype": "FL,TS,EQ",
-            "bbox": ",".join(str(value) for value in bbox),
-            "limit": 50,
-        }
         timeout = aiohttp.ClientTimeout(total=15)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as response:
+                latency_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+                status = response.status
                 response.raise_for_status()
                 data = await _read_json(response)
 
         events = _extract_events(data)
-        return {"events": events, "count": len(events), "source": "gdacs"}
+        return {
+            "events": events,
+            "count": len(events),
+            "source": "gdacs",
+            "query": {
+                "url": url,
+                "params": params,
+                "http_status": status,
+                "latency_ms": latency_ms,
+            },
+        }
     except Exception as e:
-        return {"events": [], "count": 0, "source": "gdacs", "error": str(e)}
+        latency_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+        return {
+            "events": [],
+            "count": 0,
+            "source": "gdacs",
+            "error": str(e),
+            "query": {
+                "url": url,
+                "params": params,
+                "http_status": None,
+                "latency_ms": latency_ms,
+            },
+        }
 
 
 async def fetch_usgs(bbox: list, days: int = 7) -> dict:
-    """Fetch USGS earthquake GeoJSON features for a bbox."""
+    """Fetch USGS earthquake GeoJSON features for a bbox.
+
+    ``query`` on the returned dict is the raw-evidence-trace record (full
+    query URL with parameters, HTTP status, latency) so the earthquake
+    hazard_zones row can record exactly what was asked and what came back,
+    independent of re-running the pipeline.
+    """
+    starttime = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    url = f"{USGS_API}/query"
+    params = {
+        "format": "geojson",
+        "minmagnitude": 2.0,
+        "starttime": starttime,
+        "minlongitude": bbox[0],
+        "minlatitude": bbox[1],
+        "maxlongitude": bbox[2],
+        "maxlatitude": bbox[3],
+    }
+    started = datetime.now(timezone.utc)
     try:
-        starttime = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        url = f"{USGS_API}/query"
-        params = {
-            "format": "geojson",
-            "minmagnitude": 2.0,
-            "starttime": starttime,
-            "minlongitude": bbox[0],
-            "minlatitude": bbox[1],
-            "maxlongitude": bbox[2],
-            "maxlatitude": bbox[3],
-        }
         timeout = aiohttp.ClientTimeout(total=15)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as response:
+                latency_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+                status = response.status
                 response.raise_for_status()
                 data = await _read_json(response)
 
         earthquakes = data.get("features", []) if isinstance(data, dict) else []
-        return {"earthquakes": earthquakes, "count": len(earthquakes), "source": "usgs"}
+        return {
+            "earthquakes": earthquakes,
+            "count": len(earthquakes),
+            "source": "usgs",
+            "query": {
+                "url": url,
+                "params": params,
+                "http_status": status,
+                "latency_ms": latency_ms,
+            },
+        }
     except Exception as e:
-        return {"earthquakes": [], "count": 0, "source": "usgs", "error": str(e)}
+        latency_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+        return {
+            "earthquakes": [],
+            "count": 0,
+            "source": "usgs",
+            "error": str(e),
+            "query": {
+                "url": url,
+                "params": params,
+                "http_status": None,
+                "latency_ms": latency_ms,
+            },
+        }
 
 
 # OpenTopoData public API — free, no-auth, global. SRTM 30m is the best global
@@ -85,6 +150,20 @@ def _slope_from_grid(elevations: list, lats: list, lngs: list) -> float | None:
     metres (≈111,320 m/deg lat; lng scaled by cos(lat)). Returns the mean slope
     in degrees, or None if the grid is unusable.
     """
+    result = _slope_from_grid_traced(elevations, lats, lngs)
+    return result[0] if result else None
+
+
+def _slope_from_grid_traced(
+    elevations: list, lats: list, lngs: list
+) -> tuple[float, dict] | None:
+    """Same computation as ``_slope_from_grid`` but also returns the raw
+    evidence trace (per-cell slopes, the m/deg conversion factor actually
+    used at this latitude, and which statistic was taken) so a landslide
+    hazard_zones row can show the exact arithmetic behind the verdict
+    without re-running anything. Returns None on the same failure
+    conditions as the untraced version (unchanged math).
+    """
     try:
         n = _DEM_GRID
         if len(elevations) < n * n:
@@ -97,10 +176,27 @@ def _slope_from_grid(elevations: list, lats: list, lngs: list) -> float | None:
         mean_lat = (max(lats) + min(lats)) / 2.0
         # Metres per grid step along each axis.
         dy = (lat_span / (n - 1)) * 111_320.0
-        dx = (lng_span / (n - 1)) * 111_320.0 * max(0.05, math.cos(math.radians(mean_lat)))
+        lng_cos_factor = max(0.05, math.cos(math.radians(mean_lat)))
+        dx = (lng_span / (n - 1)) * 111_320.0 * lng_cos_factor
         gy, gx = np.gradient(grid, dy, dx)
         slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
-        return float(np.degrees(slope_rad).mean())
+        slope_deg_grid = np.degrees(slope_rad)
+        mean_slope = float(slope_deg_grid.mean())
+        trace = {
+            "per_cell_slopes_deg": [round(float(v), 3) for v in slope_deg_grid.flatten()],
+            "metres_per_degree_lat": 111_320.0,
+            "lng_cos_factor_at_latitude": round(lng_cos_factor, 6),
+            "dy_metres_per_grid_step": round(dy, 3),
+            "dx_metres_per_grid_step": round(dx, 3),
+            # The statistic actually applied to the per-cell slope grid.
+            # Recorded explicitly since a future science pass is expected to
+            # change this to a percentile (see CLAUDE.md's slope-threshold
+            # revalidation note) -- this makes that change auditable against
+            # past runs' raw per-cell values.
+            "statistic": "mean",
+            "resulting_value_deg": round(mean_slope, 3),
+        }
+        return mean_slope, trace
     except Exception:  # noqa: BLE001 - any math failure -> caller falls back
         return None
 
@@ -115,11 +211,26 @@ async def fetch_slope(bbox: list) -> dict:
     Rawalpindi as HIGH landslide risk. Works worldwide. On any failure it returns
     `available: False` with a low conservative default rather than fabricating
     steepness — so a missing DEM never invents a landslide.
+
+    The returned dict also carries a full raw-evidence trace (dem_query,
+    dem_samples, dem_response_raw, slope_computation, fallback_used) so the
+    landslide hazard_zones row can show the exact locations requested, every
+    grid point's elevation, and the per-cell slope arithmetic behind the
+    final verdict, re-derivable from the DB alone.
     """
     try:
         min_lng, min_lat, max_lng, max_lat = [float(v) for v in bbox]
     except (TypeError, ValueError):
-        return {"available": False, "slope_estimate": 10.0, "source": "bad_bbox_default"}
+        return {
+            "available": False,
+            "slope_estimate": 10.0,
+            "source": "bad_bbox_default",
+            "dem_query": {"bbox": bbox, "error": "unparseable bbox"},
+            "dem_samples": [],
+            "dem_response_raw": {"all_points_returned": False, "null_points": []},
+            "slope_computation": None,
+            "fallback_used": {"reason": "unparseable bbox", "default_slope_deg": 10.0},
+        }
 
     n = _DEM_GRID
     lats, lngs, locations = [], [], []
@@ -134,11 +245,23 @@ async def fetch_slope(bbox: list) -> dict:
         for lng in lngs:
             locations.append(f"{lat:.5f},{lng:.5f}")
 
+    dem_query = {
+        "requested_points": [{"lat": lat, "lng": lng} for lat in lats for lng in lngs],
+        "endpoint": _OPENTOPODATA_API,
+        "http_status": None,
+        "latency_ms": None,
+    }
+    started = datetime.now(timezone.utc)
+
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         params = {"locations": "|".join(locations)}
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(_OPENTOPODATA_API, params=params) as response:
+                dem_query["latency_ms"] = round(
+                    (datetime.now(timezone.utc) - started).total_seconds() * 1000, 1
+                )
+                dem_query["http_status"] = response.status
                 response.raise_for_status()
                 data = await _read_json(response)
 
@@ -149,8 +272,25 @@ async def fetch_slope(bbox: list) -> dict:
         grid_lats = [r["location"]["lat"] for r in results if r.get("location")]
         grid_lngs = [r["location"]["lng"] for r in results if r.get("location")]
 
-        slope = _slope_from_grid(elevations, grid_lats or lats, grid_lngs or lngs)
-        if slope is not None:
+        dem_samples = [
+            {
+                "lat": r.get("location", {}).get("lat"),
+                "lon": r.get("location", {}).get("lng"),
+                "elevation_m": r.get("elevation"),
+            }
+            for r in results
+        ]
+        null_points = [i for i, r in enumerate(results) if r.get("elevation") is None]
+        dem_response_raw = {
+            "requested_count": n * n,
+            "returned_count": len(results),
+            "all_points_returned": len(results) == n * n and not null_points,
+            "null_point_indices": null_points,
+        }
+
+        traced = _slope_from_grid_traced(elevations, grid_lats or lats, grid_lngs or lngs)
+        if traced is not None:
+            slope, slope_computation = traced
             return {
                 "available": True,
                 "slope_estimate": round(slope, 2),
@@ -158,15 +298,41 @@ async def fetch_slope(bbox: list) -> dict:
                 "elevation_max_m": round(max(elevations), 1) if elevations else None,
                 "samples": len(elevations),
                 "source": "opentopodata_srtm30m",
+                "dem_query": dem_query,
+                "dem_samples": dem_samples,
+                "dem_response_raw": dem_response_raw,
+                "slope_computation": slope_computation,
+                "fallback_used": False,
             }
+        return {
+            "available": False,
+            "slope_estimate": 10.0,
+            "source": "no_dem_conservative_default",
+            "dem_query": dem_query,
+            "dem_samples": dem_samples,
+            "dem_response_raw": dem_response_raw,
+            "slope_computation": None,
+            "fallback_used": {
+                "reason": "DEM grid unusable (too few/non-finite samples for slope computation)",
+                "default_slope_deg": 10.0,
+            },
+        }
     except Exception as e:  # noqa: BLE001 - DEM is best-effort; never crash analysis
         logger.warning("fetch_slope DEM lookup failed: %s", e)
+        dem_query["latency_ms"] = dem_query["latency_ms"] or round(
+            (datetime.now(timezone.utc) - started).total_seconds() * 1000, 1
+        )
 
     # No real DEM -> conservative low default (do NOT fabricate steepness).
     return {
         "available": False,
         "slope_estimate": 10.0,
         "source": "no_dem_conservative_default",
+        "dem_query": dem_query,
+        "dem_samples": [],
+        "dem_response_raw": {"requested_count": n * n, "returned_count": 0, "all_points_returned": False, "null_point_indices": []},
+        "slope_computation": None,
+        "fallback_used": {"reason": "DEM fetch raised an exception", "default_slope_deg": 10.0},
     }
 
 
@@ -207,6 +373,16 @@ async def analyze_flood(
             "affected_zones": parsed.get("affected_zones")
             if isinstance(parsed.get("affected_zones"), list)
             else [],
+            "diagnostics": {
+                "branch": "llm",
+                "index_value": _to_float(mean_value),
+                "index_type": index_label,
+                "index_calibrated": index_calibrated,
+                "affected_area_km2": _to_float(affected_area_km2),
+                "gdacs_count": gdacs_data.get("count", 0),
+                "gdacs_used": True,
+                "threshold_applied": None,
+            },
         }
 
     area = _to_float(affected_area_km2)
@@ -257,23 +433,59 @@ async def analyze_flood(
             ),
             "affected_zones": [],
             "anomaly": "sar_index_excluded_uncalibrated",
+            "diagnostics": {
+                "branch": "deterministic_fallback_uncalibrated_sar",
+                "index_value": _to_float(mean_value),
+                "index_type": index_label,
+                "index_calibrated": False,
+                "affected_area_km2": area,
+                "gdacs_count": gdacs_data.get("count", 0),
+                "gdacs_used": False,
+                "gdacs_ignored_reason": (
+                    "SAR index is uncalibrated raw backscatter; the decision "
+                    "is based on affected_area_km2 alone, so GDACS count is "
+                    "recorded here for visibility but not used as evidence."
+                ),
+                "threshold_applied": (
+                    f"affected_area_km2 > 200 -> CRITICAL / > 100 -> HIGH / "
+                    f"> 25 -> MEDIUM / else LOW (area={area})"
+                ),
+            },
         }
 
     flood_index = _to_float(mean_value)
     if area > 200 or flood_index > 0.5:
         risk, confidence = "CRITICAL", 0.7
+        threshold_applied = f"area>200 or index>0.5 (area={area}, index={flood_index})"
     elif area > 100 or flood_index > 0.3:
         risk, confidence = "HIGH", 0.65
+        threshold_applied = f"area>100 or index>0.3 (area={area}, index={flood_index})"
     elif area > 25:
         risk, confidence = "MEDIUM", 0.6
+        threshold_applied = f"area>25 (area={area})"
     else:
         risk, confidence = "LOW", 0.55
+        threshold_applied = f"else LOW (area={area}, index={flood_index})"
 
     return {
         "risk": risk,
         "confidence": confidence,
         "reasoning": "Fallback flood risk based on affected area and flood index.",
         "affected_zones": [],
+        "diagnostics": {
+            "branch": "deterministic_fallback_calibrated",
+            "index_value": flood_index,
+            "index_type": index_label,
+            "index_calibrated": index_calibrated if index_calibrated is not None else True,
+            "affected_area_km2": area,
+            "gdacs_count": gdacs_data.get("count", 0),
+            "gdacs_used": False,
+            "gdacs_ignored_reason": (
+                "GDACS count is recorded for visibility but this branch's "
+                "decision uses affected_area_km2/index thresholds only."
+            ),
+            "threshold_applied": threshold_applied,
+        },
     }
 
 
@@ -320,12 +532,56 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
 
     if max_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
+        threshold_applied = f"max_magnitude>=7.0 -> CRITICAL (max_mag={max_mag})"
     elif max_mag >= 5.5:
         risk, confidence, liq = "HIGH", 0.8, 0.5
+        threshold_applied = f"max_magnitude>=5.5 -> HIGH (max_mag={max_mag})"
     elif max_mag >= 4.0:
         risk, confidence, liq = "MEDIUM", 0.7, 0.3
+        threshold_applied = f"max_magnitude>=4.0 -> MEDIUM (max_mag={max_mag})"
     else:
         risk, confidence, liq = "LOW", 0.85, 0.1
+        threshold_applied = f"max_magnitude<4.0 -> LOW (max_mag={max_mag})"
+
+    # events_returned: capped at the 20 LARGEST-by-magnitude events, with the
+    # true total count recorded separately, so a seismically busy region
+    # can't bloat the hazard_zones row.
+    events_with_props = [
+        f for f in usgs_data.get("earthquakes", []) if isinstance(f, dict)
+    ]
+
+    def _event_record(feature: dict) -> dict:
+        props = feature.get("properties", {}) or {}
+        geom = feature.get("geometry", {}) or {}
+        coords = geom.get("coordinates") or [None, None, None]
+        distance_km = None
+        try:
+            if bbox and len(bbox) == 4 and coords[0] is not None and coords[1] is not None:
+                centroid_lng = (bbox[0] + bbox[2]) / 2.0
+                centroid_lat = (bbox[1] + bbox[3]) / 2.0
+                dlat = (coords[1] - centroid_lat) * 111.32
+                dlng = (coords[0] - centroid_lng) * 111.32 * max(
+                    0.05, math.cos(math.radians(centroid_lat))
+                )
+                distance_km = round(math.sqrt(dlat**2 + dlng**2), 2)
+        except (TypeError, ValueError, IndexError):
+            distance_km = None
+        return {
+            "usgs_event_id": feature.get("id"),
+            "magnitude": _to_float(props.get("mag")),
+            "magnitude_type": props.get("magType"),
+            "depth_km": coords[2] if len(coords) > 2 else None,
+            "time": props.get("time"),
+            "distance_from_aoi_centroid_km": distance_km,
+        }
+
+    events_sorted = sorted(
+        events_with_props,
+        key=lambda f: _to_float((f.get("properties") or {}).get("mag")),
+        reverse=True,
+    )
+    top_20 = [_event_record(f) for f in events_sorted[:20]]
+    driving_event = top_20[0] if top_20 else None
 
     return {
         "risk": risk,
@@ -346,6 +602,20 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
             "usgs_source": usgs_data.get("source"),
             "usgs_fetch_failed": usgs_fetch_failed,
             "usgs_error": usgs_data.get("error"),
+        },
+        "diagnostics": {
+            "usgs_query": usgs_data.get("query"),
+            "events_returned": top_20,
+            "events_returned_total_count": len(events_with_props),
+            "max_magnitude": max_mag,
+            "max_magnitude_driving_event_id": (
+                driving_event.get("usgs_event_id") if driving_event else None
+            ),
+            "magnitude_type": (
+                driving_event.get("magnitude_type") if driving_event else None
+            ),
+            "threshold_applied": threshold_applied,
+            "usgs_fetch_failed": usgs_fetch_failed,
         },
     }
 
@@ -380,12 +650,16 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     slope = _to_float(slope_estimate)
     if slope > 45:
         risk, confidence = "CRITICAL", 0.8
+        threshold_applied = f"slope>45 -> CRITICAL (slope={slope:.2f})"
     elif slope > 30:
         risk, confidence = "HIGH", 0.75
+        threshold_applied = f"slope>30 -> HIGH (slope={slope:.2f})"
     elif slope > 15:
         risk, confidence = "MEDIUM", 0.65
+        threshold_applied = f"slope>15 -> MEDIUM (slope={slope:.2f})"
     else:
         risk, confidence = "LOW", 0.8
+        threshold_applied = f"slope<=15 -> LOW (slope={slope:.2f})"
 
     return {
         "risk": risk,
@@ -408,6 +682,28 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
             "elevation_min_m": slope_data.get("elevation_min_m"),
             "elevation_max_m": slope_data.get("elevation_max_m"),
             "sample_count": slope_data.get("samples"),
+        },
+        "diagnostics": {
+            "dem_query": slope_data.get("dem_query"),
+            "dem_samples": slope_data.get("dem_samples"),
+            "dem_response_raw": slope_data.get("dem_response_raw"),
+            "slope_computation": slope_data.get("slope_computation"),
+            "threshold_applied": threshold_applied,
+            "fallback_used": slope_data.get("fallback_used", False),
+            # GDACS is deliberately EXCLUDED from the landslide decision (its
+            # bbox filter is unreliable — see the comment above, e.g. it
+            # returned 93 "Rawalpindi" events all located in China/Mongolia).
+            # This makes that exclusion visible in the trace itself, not
+            # only in a code comment.
+            "gdacs_count": gdacs_data.get("count", 0),
+            "gdacs_query": gdacs_data.get("query"),
+            "gdacs_used": False,
+            "gdacs_ignored_reason": (
+                "GDACS's bbox filter is unreliable for landslide events "
+                "(observed returning events located in a different country "
+                "entirely) -- the real measured DEM slope is the only "
+                "signal used for this hazard type."
+            ),
         },
     }
 
@@ -556,6 +852,16 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         # H#4: surfaced only when the deterministic flood fallback excluded an
         # uncalibrated SAR index rather than misapplying NDWI thresholds to it.
         "anomalies": [flood["anomaly"]] if flood.get("anomaly") else [],
+        # Raw evidence trace (durable-evidence-trail, feat/durable-evidence-trail):
+        # per-hazard-type diagnostics so any deterministic decision here is
+        # re-derivable from what's persisted in hazard_zones.diagnostics
+        # without re-running the pipeline. See analyze_flood/analyze_earthquake/
+        # analyze_landslide's own "diagnostics" keys for what each carries.
+        "raw_diagnostics": {
+            "flood": flood.get("diagnostics"),
+            "earthquake": quake.get("diagnostics"),
+            "landslide": landslide.get("diagnostics"),
+        },
     }
 
 
