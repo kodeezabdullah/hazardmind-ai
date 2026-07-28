@@ -674,17 +674,46 @@ def dedupe_by_acquisition(scenes: list) -> list:
     acquisition id, preserving input order. Products with no derivable id are
     kept as-is (never silently dropped).
     """
-    seen = set()
+    # DETERMINISM (science/full-pass Phase 0a): COG/non-COG twins carry
+    # identical footprint+cloud, so they tie on `_score` and the stable sort
+    # leaves them in CDSE's arbitrary catalogue row order — "keep first seen"
+    # therefore let CDSE decide which FORMAT the pipeline processed, run to
+    # run. The two formats exercised different warp code health historically
+    # (the implicit-WarpedVRT bug read COG-organised S1 GRD files as all-zero
+    # while classic strip TIFFs warped fine), so the choice must be
+    # deterministic and logged. Preference: keep the COG twin — the format
+    # the explicit-GCP reproject fix was live-validated on (Islamabad
+    # trace-s1-islamabad, S1D..._COG) and the format CDSE increasingly
+    # serves. The kept product occupies the FIRST twin's rank position so
+    # ordering semantics are unchanged.
+    kept_index: dict[str, int] = {}
     out = []
     dropped = 0
     for scene in scenes:
         key = _base_acquisition_id(scene)
-        if key is not None and key in seen:
-            dropped += 1
+        if key is None:
+            out.append(scene)
             continue
-        if key is not None:
-            seen.add(key)
-        out.append(scene)
+        if key not in kept_index:
+            kept_index[key] = len(out)
+            out.append(scene)
+            continue
+        dropped += 1
+        idx = kept_index[key]
+        incumbent = out[idx]
+        if _is_cog_product(scene) and not _is_cog_product(incumbent):
+            out[idx] = scene
+            preferred, other = scene, incumbent
+        else:
+            preferred, other = incumbent, scene
+        logger.info(
+            "Acquisition twin collapsed [%s]: kept %s (%s), dropped %s (%s)",
+            key,
+            preferred.get("Name"),
+            "COG" if _is_cog_product(preferred) else "non-COG",
+            other.get("Name"),
+            "COG" if _is_cog_product(other) else "non-COG",
+        )
     if dropped:
         logger.info(
             "Deduped %d duplicate acquisition product(s) (COG/non-COG twins) "
@@ -693,6 +722,12 @@ def dedupe_by_acquisition(scenes: list) -> list:
             len(out),
         )
     return out
+
+
+def _is_cog_product(scene: dict) -> bool:
+    """True when the product Name marks the Cloud-Optimized (COG) variant."""
+    name = (scene.get("Name") or "").upper()
+    return "_COG" in name or name.endswith("COG.SAFE") or name.endswith("COG")
 
 
 def backfill_uncovered_cities(
