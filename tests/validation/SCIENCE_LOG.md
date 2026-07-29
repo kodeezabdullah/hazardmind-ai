@@ -1287,3 +1287,83 @@ failure."
 same-orbit pre-event scene within ~2 weeks of the quake, and the real IBI
 built-up mask from an optical pair. Turkey-Syria 2023 (M7.8) has dense S1
 coverage and is the obvious candidate.
+
+---
+
+# EARTHQUAKE, SECOND ATTEMPT — Amatrice, and the REAL limit
+
+Palu's failure was confounded by a 112-day pre-event lead. The retest fixed
+exactly that: **EMSR177 Amatrice (Italy, M6.2, 2016-08-24), orbit 44
+ASCENDING, pre 2016-08-22 (-1.4 d), post 2016-09-03 (+10.6 d)**, both scenes
+dual-pol VV+VH. At a 1.4-day lead essentially nothing changed between the two
+acquisitions except the earthquake — no seasonal confound.
+
+The reference is also better than Palu's: **472 graded settlement POLYGONS**
+across five damage grades, including **145 "Not Affected"** as a genuine
+control class rather than only an area-fraction baseline.
+
+**The result: ZERO hits in EVERY grade.**
+
+| grade | n (px) | hit | rate |
+|---|---|---|---|
+| Completely Destroyed | 161 | 0 | 0.0000 |
+| Highly Damaged | 156 | 0 | 0.0000 |
+| Moderately Damaged | 250 | 0 | 0.0000 |
+| Negligible to slight | 73 | 0 | 0.0000 |
+| Not Affected | 368 | 0 | 0.0000 |
+| NULL BASELINE | — | — | 0.0916 |
+
+Zero across ALL grades — including the control — is not a weak detector. A
+detector flagging 9.16% of built-up area would hit *something* by chance.
+That pattern says the two datasets barely intersect, so the cause was
+diagnosed rather than reported as an accuracy figure.
+
+**THE CAUSE — a hard physical limit, not a bug:**
+
+    reference polygons                     472
+    TOTAL reference area                   0.1014 km2
+    median polygon area                    143.2 m2
+    polygons smaller than ONE 10 m pixel   172 / 472
+    polygons smaller than FOUR pixels      413 / 472
+
+**The Amatrice reference maps INDIVIDUAL BUILDINGS.** A 10 m Sentinel-1 pixel
+is 100 m2; the median reference polygon is 143 m2 — about one and a half
+pixels — and 87% of them are under four pixels. The whole town's graded
+extent totals 0.10 km2, against a detected 2.468 km2 at the sensor's own
+resolution.
+
+This is precisely what `earthquake_damage.py`'s `resolution_limit` field has
+stated in every result since it was written: *"Sentinel-1 at 10 m cannot
+resolve individual buildings. This detects LARGE-SCALE destruction, NOT
+per-structure damage."* Amatrice is a per-structure reference. The detector
+and the reference address different spatial scales, and no scoring scheme
+reconciles that.
+
+## Net verdict on earthquake validation
+
+Two attempts, two DIFFERENT and independently disqualifying obstacles:
+
+| Attempt | Reference | Obstacle |
+|---|---|---|
+| Palu (EMSR317) | 9,457 graded points, 20.8 km2 | 112-day pre-event lead (seasonal confound); no tight same-orbit pair exists |
+| Amatrice (EMSR177) | 472 graded polygons, 0.10 km2 | reference is PER-BUILDING (median 143 m2 vs a 100 m2 pixel) |
+
+**Earthquake damage detection remains UNVALIDATED, and the reason is now
+precise rather than vague.** EMS grading products are produced from
+sub-metre VHR imagery for per-structure assessment. That is the wrong
+granularity for a 10 m SAR detector by roughly two orders of magnitude in
+area — the same mismatch that disqualified Townsville as a flood reference,
+appearing here as a scale problem rather than a sensor-provenance one.
+
+**What a fair test would need** (not available in EMS): a reference mapping
+damage as CONTIGUOUS DISTRICT-SCALE extent — collapsed blocks, levelled
+neighbourhoods — at >= ~0.01 km2 per feature, over an event with a
+same-orbit S1 pair inside one revisit cycle. Turkey-Syria 2023 has the
+imagery (1.4 d and 2.9 d leads confirmed by catalogue query) but its EMS
+products are per-building too.
+
+**Do NOT claim earthquake accuracy.** The defensible statement is:
+"implemented and verified end-to-end on real dual-pol Sentinel-1 with a
+1.4-day pre-event baseline; not validated, because every available reference
+maps damage per-building at a granularity Sentinel-1 cannot resolve — a
+stated limit of the sensor, documented in the detector's own output."
