@@ -1125,3 +1125,91 @@ where buildings actually exist (Phase 4's IBI mask).
    claimable.
 4. **GPM IMERG live fetch** not implemented (bounded-influence layer is).
 5. **SoilGrids/Overpass not exercised live** — stubbed tests only.
+
+---
+
+# SESSION 5b — reference hunt for landslide and earthquake
+
+**Question:** can we score the landslide and earthquake detectors at all?
+
+## Earthquake: a REAL reference exists — EMSR317 Palu
+
+Swept EMS activations 150-720 for earthquake events publishing GRADING
+(damage) products. Found several; Palu (Indonesia, M7.5, Sept 2018) is by far
+the strongest:
+
+| | Palu AOI07 (EMSR317) |
+|---|---|
+| Graded building points | **9,457** |
+| Destroyed | **1,995** |
+| Damaged | 4,149 |
+| Possibly damaged | 3,313 |
+| Spatial extent of destroyed | **20.8 km²** (convex hull) |
+| Post-event sensor | **Pleiades-1A/1B, 0.5 m** |
+
+**The sensor is VHR, so an extent-vs-extent IoU is INVALID** — the same
+disqualifier that rejected Townsville (scoring a 10 m prediction against a
+0.5 m delineation measures sensor difference as pipeline error).
+
+**But the reference is graded POINTS, not a competing extent map**, which
+makes a different and legitimate question available: do our detected damage
+pixels COINCIDE with where buildings were actually destroyed? That is a
+spatial-agreement / hit-rate test, and it is exactly what the Phase 1e brief
+anticipated ("report what it CAN validate — aggregate damage extent,
+relative severity ordering").
+
+**Verdict: SCOREABLE, but not by IoU.** 1,995 destroyed buildings over
+20.8 km² is ample for a 10 m detector to be tested against.
+
+## Landslide: still NO usable reference. The hunt failed honestly.
+
+Swept the same range for landslide activations. 22 activations mention
+landslides and publish vector products. Three had **Sentinel-1 10 m
+post-event sources** — which looked like the breakthrough:
+
+| Activation | Post-event sensor |
+|---|---|
+| EMSR251 Kragerø, Norway | Sentinel-1, 10 m |
+| EMSR292 Chrisoupoli, Greece | Sentinel-1, 10 m |
+| EMSR273 Barbullush, Albania | Sentinel-1, 10 m |
+
+**They are not landslide references.** Reading each product's
+`observed_event_a.event_type` — rather than trusting the activation
+description — shows:
+
+    EMSR251: {'5-Flood': 16}
+    EMSR273: {'5-Flood': 83}
+    EMSR292: {'5-Flood': 1}
+    EMSR335: {'998-Other': 4}
+    EMSR325: {'6-Mass Movement': 2}   <- the ONLY real landslide
+
+These are FLOOD activations whose narrative text merely mentions landslides;
+a keyword sweep matched the wrong thing. Checking `event_type` in the data
+caught it before any of them became a "landslide" harness event.
+
+**EMSR325 is a genuine mass-movement product but fails both bars:** only
+**2 polygons**, and its post-event source is **Pleiades 0.5 m**.
+
+**Verdict: landslide remains UNSCOREABLE.** Combined with the earlier COOLR
+finding (polygon service down; 15 of 18 post-2018 records under 0.04 km²,
+~40 px), there is still no landslide inventory with (a) polygons large
+enough for a 10 m detector and (b) Sentinel post-event provenance.
+
+## Flood regression run — inconclusive, and the reason is my error
+
+A Kanalia re-run was launched to confirm this session's changes did not
+regress the working S2 path. It was launched WITHOUT the historical date pin
+(`sentinel_clock_patch`), so it searched present-day Kanalia (Oct 2026,
+64.7% cloud) instead of the September 2023 flood. It refused correctly at
+35.291% coverage against the 80% floor — the guard behaving properly — but
+that says nothing about regression. 1,593 MB spent, no signal obtained.
+The scored comparison must use the date-pinned harness path.
+
+## Net position on validation
+
+| Hazard | Reference | Scoreable? |
+|---|---|---|
+| Flood S1 | EMS, Sentinel-backed | **YES — n=2 scored** |
+| Flood S2 | EMS, Sentinel-backed | **YES — n=1 scored** |
+| **Earthquake** | **EMSR317 Palu, 9,457 graded points** | **YES — by spatial agreement, NOT IoU** |
+| Landslide | none found | **NO** |
