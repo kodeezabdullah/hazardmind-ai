@@ -138,9 +138,14 @@ async def fetch_usgs(bbox: list, days: int = 7) -> dict:
 # coverage dataset it serves. Queries return elevation (m) for a list of points.
 _OPENTOPODATA_API = "https://api.opentopodata.org/v1/srtm30m"
 # Grid resolution per axis for the elevation sample (NxN points over the bbox).
-# 5x5 = 25 points keeps us within OpenTopoData's 100-locations/request limit and
-# its ~1 req/s public rate, while giving enough samples to estimate real slope.
-_DEM_GRID = 5
+# Phase 4b (science/full-pass): raised 5 -> 10. 5x5 = 25 points across a whole
+# district is far too coarse to see a single steep valley — the exact local
+# feature landslide risk is driven by — and pairing it with a mean made the
+# statistic doubly insensitive. 10x10 = 100 points is the maximum
+# OpenTopoData's public API accepts in ONE request (its documented
+# 100-locations/request limit), so this quadruples spatial detail at no extra
+# request cost and stays inside the ~1 req/s public rate.
+_DEM_GRID = 10
 
 
 def _slope_from_grid(elevations: list, lats: list, lngs: list) -> float | None:
@@ -181,7 +186,16 @@ def _slope_from_grid_traced(
         gy, gx = np.gradient(grid, dy, dx)
         slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
         slope_deg_grid = np.degrees(slope_rad)
+        # Phase 4b (science/full-pass): the 90th PERCENTILE replaces the mean.
+        # Landslides are local: a district holding one steep unstable valley
+        # and otherwise flat terrain averages to LOW under a mean, which is
+        # the wrong statistic for a hazard driven by the worst slope present,
+        # not the typical one. The 90th percentile reports the steep tail
+        # while still rejecting a single DEM-noise outlier (which a plain max
+        # would not). Both statistics are recorded so any past run's verdict
+        # remains re-derivable from its own stored per-cell values.
         mean_slope = float(slope_deg_grid.mean())
+        p90_slope = float(np.percentile(slope_deg_grid, 90))
         trace = {
             "per_cell_slopes_deg": [round(float(v), 3) for v in slope_deg_grid.flatten()],
             "metres_per_degree_lat": 111_320.0,
@@ -189,14 +203,13 @@ def _slope_from_grid_traced(
             "dy_metres_per_grid_step": round(dy, 3),
             "dx_metres_per_grid_step": round(dx, 3),
             # The statistic actually applied to the per-cell slope grid.
-            # Recorded explicitly since a future science pass is expected to
-            # change this to a percentile (see CLAUDE.md's slope-threshold
-            # revalidation note) -- this makes that change auditable against
-            # past runs' raw per-cell values.
-            "statistic": "mean",
-            "resulting_value_deg": round(mean_slope, 3),
+            "statistic": "p90",
+            "mean_slope_deg": round(mean_slope, 3),
+            "p90_slope_deg": round(p90_slope, 3),
+            "grid_n": n,
+            "resulting_value_deg": round(p90_slope, 3),
         }
-        return mean_slope, trace
+        return p90_slope, trace
     except Exception:  # noqa: BLE001 - any math failure -> caller falls back
         return None
 
@@ -536,18 +549,100 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     # provenance gap this function shares with analyze_landslide.
     usgs_fetch_failed = bool(usgs_data.get("error"))
 
-    if max_mag >= 7.0:
+    # Phase 5b (science/full-pass): DISTANCE DECAY. Previously the maximum
+    # magnitude anywhere in the query radius drove the verdict, so a M6.0 at
+    # 240 km and a M6.0 at 10 km produced an identical answer — which is
+    # wrong: ground shaking attenuates steeply with distance. Each event is
+    # now scored by an effective magnitude that decays with epicentral
+    # distance, and the verdict is driven by the event with the highest
+    # EFFECTIVE magnitude, recorded by its USGS event id.
+    #
+    # Decay form: M_eff = M - 1.5 * log10(max(R, 10) / 10)
+    #   - log10-of-distance is the standard functional form of every
+    #     ground-motion attenuation relation (intensity falls with the log
+    #     of distance, not linearly).
+    #   - the 1.5 coefficient and the 10 km saturation radius are
+    #     ENGINEERING JUDGEMENT calibrated to reproduce the widely-observed
+    #     ~1 intensity-unit drop per distance doubling in the near field;
+    #     they are NOT taken from a named GMPE (Boore-Atkinson, Campbell-
+    #     Bozorgnia etc.), and no site-condition (Vs30) or depth term is
+    #     applied. A real ShakeMap MMI raster would supersede this entirely
+    #     — see the Phase 5a note in SCIENCE_LOG.md for why that is deferred.
+    #   - saturating below 10 km prevents log10 blowing up at R -> 0.
+    #
+    # MAGNITUDE-TYPE CONFLATION, now surfaced rather than hidden: USGS mixes
+    # mb / ml / mw / md, which are NOT interchangeable scales (mb saturates
+    # above ~6.5; ml is regional). The driving event's magnitude_type is
+    # recorded in the verdict so a reader can see which scale the number is
+    # on. No conversion is applied — converting between scales without the
+    # station metadata would be a fabricated precision.
+    driving = None
+    best_eff = None
+    for feature in usgs_data.get("earthquakes", []):
+        if not isinstance(feature, dict):
+            continue
+        props = feature.get("properties", {}) or {}
+        mag = _to_float(props.get("mag"))
+        if mag is None:
+            continue
+        coords = (feature.get("geometry", {}) or {}).get("coordinates") or []
+        dist_km = None
+        try:
+            if bbox and len(bbox) == 4 and len(coords) >= 2:
+                centroid_lng = (bbox[0] + bbox[2]) / 2.0
+                centroid_lat = (bbox[1] + bbox[3]) / 2.0
+                dlat = (coords[1] - centroid_lat) * 111.32
+                dlng = (coords[0] - centroid_lng) * 111.32 * max(
+                    0.05, math.cos(math.radians(centroid_lat))
+                )
+                dist_km = math.sqrt(dlat**2 + dlng**2)
+        except (TypeError, ValueError, IndexError):
+            dist_km = None
+        if dist_km is None:
+            eff = mag  # no geometry -> cannot decay; treat at face value
+        else:
+            eff = mag - 1.5 * math.log10(max(dist_km, 10.0) / 10.0)
+        if best_eff is None or eff > best_eff:
+            best_eff = eff
+            driving = {
+                "usgs_event_id": feature.get("id"),
+                "magnitude": mag,
+                "magnitude_type": props.get("magType"),
+                "distance_km": round(dist_km, 2) if dist_km is not None else None,
+                "effective_magnitude": round(eff, 3),
+            }
+
+    effective_mag = round(best_eff, 3) if best_eff is not None else 0.0
+
+    # THRESHOLD BASIS — stated honestly, not falsely cited. 7.0/5.5/4.0 are
+    # ENGINEERING JUDGEMENT, not cut points from a named standard. They align
+    # loosely with the common descriptive bands (M>=7 "major", M5.5-7
+    # "moderate-strong damaging", M4-5.5 "light, felt but rarely damaging")
+    # used in general seismological communication, and the ORDERING is
+    # sound; the exact values are unvalidated and no intensity scale (MMI,
+    # EMS-98) is actually computed. They are now applied to the
+    # DISTANCE-DECAYED effective magnitude, not the raw maximum.
+    if effective_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
-        threshold_applied = f"max_magnitude>=7.0 -> CRITICAL (max_mag={max_mag})"
-    elif max_mag >= 5.5:
+        band = "effective_magnitude>=7.0 -> CRITICAL"
+    elif effective_mag >= 5.5:
         risk, confidence, liq = "HIGH", 0.8, 0.5
-        threshold_applied = f"max_magnitude>=5.5 -> HIGH (max_mag={max_mag})"
-    elif max_mag >= 4.0:
+        band = "effective_magnitude>=5.5 -> HIGH"
+    elif effective_mag >= 4.0:
         risk, confidence, liq = "MEDIUM", 0.7, 0.3
-        threshold_applied = f"max_magnitude>=4.0 -> MEDIUM (max_mag={max_mag})"
+        band = "effective_magnitude>=4.0 -> MEDIUM"
     else:
         risk, confidence, liq = "LOW", 0.85, 0.1
-        threshold_applied = f"max_magnitude<4.0 -> LOW (max_mag={max_mag})"
+        band = "effective_magnitude<4.0 -> LOW"
+    threshold_applied = (
+        f"{band} (effective_mag={effective_mag}, raw_max_mag={max_mag}"
+        + (
+            f", driven by {driving['usgs_event_id']} M{driving['magnitude']}"
+            f" [{driving['magnitude_type']}] at {driving['distance_km']}km"
+            if driving else ""
+        )
+        + "; distance decay M-1.5*log10(R/10), engineering judgement)"
+    )
 
     # events_returned: capped at the 20 LARGEST-by-magnitude events, with the
     # true total count recorded separately, so a seismically busy region
@@ -605,6 +700,19 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
         "evidence_basis": {
             "eq_count": eq_count,
             "max_magnitude": max_mag,
+            # Phase 5b: the verdict is driven by distance-decayed effective
+            # magnitude, not the raw maximum. The specific event that drove
+            # it is named (USGS id) with its magnitude_type, so the
+            # mb/ml/mw conflation is visible rather than hidden.
+            "effective_magnitude": effective_mag,
+            "verdict_driving_event": driving,
+            "distance_decay_model": "M_eff = M - 1.5*log10(max(R_km,10)/10)",
+            "distance_decay_basis": (
+                "engineering judgement; log-distance form matches standard "
+                "attenuation relations but the 1.5 coefficient / 10 km "
+                "saturation are not from a named GMPE, and no site or depth "
+                "term is applied"
+            ),
             "usgs_source": usgs_data.get("source"),
             "usgs_fetch_failed": usgs_fetch_failed,
             "usgs_error": usgs_data.get("error"),
@@ -653,19 +761,55 @@ async def analyze_landslide(bbox, gdacs_data, slope_data) -> dict:
     #     Return only JSON with keys: risk (CRITICAL/HIGH/MEDIUM/LOW),
     #     confidence (0.0-1.0), reasoning (string), high_risk_zones (list)."
     # )
+    # Phase 4b/5c (science/full-pass): `slope` is now the 90th-PERCENTILE
+    # slope over a 10x10 DEM grid (was the mean over 5x5) — see
+    # _slope_from_grid_traced. Landslides are driven by the steepest terrain
+    # present, not the district average.
+    #
+    # THRESHOLD BASIS — stated honestly rather than cited falsely. These cut
+    # points are ENGINEERING JUDGEMENT, not values taken from a named
+    # geotechnical standard. What can be said for them:
+    #   - 30 deg is the approximate angle of repose for loose granular
+    #     material (typically ~30-37 deg for dry sand/gravel), above which
+    #     unconsolidated slope material is at or beyond its natural
+    #     stability limit. That makes >30 a defensible HIGH boundary in
+    #     ORDER-OF-MAGNITUDE terms.
+    #   - 45 deg is well beyond the repose angle of essentially any
+    #     unconsolidated material, so slopes above it hold only where
+    #     bedrock or cohesion carries them — failure there is
+    #     high-consequence. Defensible as CRITICAL in the same qualitative
+    #     sense.
+    #   - 15 deg is NOT tied to any physical limit. It is a screening floor
+    #     chosen so that near-flat terrain reports LOW.
+    # No slope-stability analysis (factor-of-safety, soil strength,
+    # pore-pressure) is performed anywhere in this codebase, and none of
+    # these numbers are calibrated against a landslide inventory. Treat the
+    # ORDERING as meaningful and the exact numbers as unvalidated.
     slope = _to_float(slope_estimate)
     if slope > 45:
         risk, confidence = "CRITICAL", 0.8
-        threshold_applied = f"slope>45 -> CRITICAL (slope={slope:.2f})"
+        threshold_applied = (
+            f"p90_slope>45 -> CRITICAL (slope={slope:.2f}; engineering "
+            "judgement, far above any unconsolidated repose angle)"
+        )
     elif slope > 30:
         risk, confidence = "HIGH", 0.75
-        threshold_applied = f"slope>30 -> HIGH (slope={slope:.2f})"
+        threshold_applied = (
+            f"p90_slope>30 -> HIGH (slope={slope:.2f}; ~angle of repose for "
+            "loose granular material)"
+        )
     elif slope > 15:
         risk, confidence = "MEDIUM", 0.65
-        threshold_applied = f"slope>15 -> MEDIUM (slope={slope:.2f})"
+        threshold_applied = (
+            f"p90_slope>15 -> MEDIUM (slope={slope:.2f}; screening floor, "
+            "no physical basis claimed)"
+        )
     else:
         risk, confidence = "LOW", 0.8
-        threshold_applied = f"slope<=15 -> LOW (slope={slope:.2f})"
+        threshold_applied = (
+            f"p90_slope<=15 -> LOW (slope={slope:.2f}; screening floor, "
+            "no physical basis claimed)"
+        )
 
     return {
         "risk": risk,
