@@ -63,15 +63,14 @@ def test_unit_bimodal_and_guard():
 
 
 def test_integration_bimodal_uses_derived_cut():
-    """Flooded farmland at MNDWI ~ +0.15 — BELOW the fixed wet_soil floor of
-    0.0? No: 0.15 > 0. Use a mode at -0.05 (wet but sub-zero: invisible to
-    the fixed scheme) so the derived cut is what detects it."""
+    """Real flood (MNDWI ~ +0.35) against dry land (~ -0.45). KI must derive
+    a cut BETWEEN the modes. The cut may sit below zero when the water mode
+    is broad — that is legitimate; the invariant is that the upper mode is
+    genuinely water (positive mean), which is what the guard tests."""
     rng = np.random.default_rng(5)
     rows, cols = 200, 200
-    # land mode ~ -0.45, flood mode ~ -0.05 (sub-zero: fixed scheme misses it
-    # entirely; KI must find the cut between the modes).
     mndwi = rng.normal(-0.45, 0.05, (rows, cols)).astype("float32")
-    mndwi[:, :40] = rng.normal(-0.05, 0.04, (rows, 40)).astype("float32")  # 20% flood
+    mndwi[:, :40] = rng.normal(0.35, 0.05, (rows, 40)).astype("float32")  # 20% flood
     # Synthesise B03/B11 that produce exactly this index: fix B03+B11=2000.
     b03 = (1000.0 * (1 + mndwi)).astype("float32")
     b11 = (2000.0 - b03).astype("float32")
@@ -87,15 +86,52 @@ def test_integration_bimodal_uses_derived_cut():
         bad(f"KI not engaged: {res.get('threshold_method')} "
             f"({res.get('ki_fallback_reason')})")
         return
-    if -0.4 < res["derived_threshold"] < -0.1:
-        ok("derived cut sits between the land and flood modes")
+    # The cut itself may legitimately sit below zero when the water mode is
+    # broad — what must hold is that it separates the two modes and that the
+    # UPPER mode is genuinely water (see the guard in adaptive_threshold).
+    upper_mean = max(res["ki_diagnostics"]["means"])
+    if -0.45 < res["derived_threshold"] < 0.35 and upper_mean > 0.0:
+        ok(f"derived cut {res['derived_threshold']} separates the modes, "
+           f"upper mode is water (mean {upper_mean})")
     else:
-        bad(f"derived cut {res['derived_threshold']} not between modes")
+        bad(f"derived cut {res['derived_threshold']} / upper mean {upper_mean} "
+            "implausible")
     if abs(res["water_percent"] - 20.0) < 3.0:
-        ok(f"sub-zero flood mode detected via adaptive cut "
-           f"(water={res['water_percent']}% ~ 20%) — fixed 0.0 cut would see ~0%")
+        ok(f"flood detected at the derived cut (water={res['water_percent']}%)")
     else:
         bad(f"water_percent {res['water_percent']} (expected ~20)")
+
+
+def test_negative_derived_cut_rejected():
+    """The Insh regression, caught in production: a stale mostly-dry scene
+    can split cleanly into two DRY modes, and KI then returns a NEGATIVE cut
+    that manufactures phantom water. A water index is positive over water by
+    construction, so a negative cut must never be applied."""
+    rng = np.random.default_rng(21)
+    rows, cols = 200, 200
+    # Two dry-land modes: -0.45 and -0.12. Bimodal, but NO water anywhere.
+    mndwi = rng.normal(-0.45, 0.04, (rows, cols)).astype("float32")
+    mndwi[:, :50] = rng.normal(-0.12, 0.04, (rows, 50)).astype("float32")
+    b03 = (1000.0 * (1 + mndwi)).astype("float32")
+    b11 = (2000.0 - b03).astype("float32")
+    res = processor.calculate_indices(_clip({"B03": b03, "B08": b03.copy(), "B11": b11}),
+                                      "sentinel-2", "flood")
+    if res is None:
+        bad("calculate_indices returned None")
+        return
+    if res.get("threshold_method") == "fixed_fallback" and "not_water" in (
+        res.get("ki_fallback_reason") or ""
+    ):
+        ok(f"dry-vs-dry split rejected ({res['ki_fallback_reason'][:52]}...)")
+    else:
+        bad(f"dry split NOT rejected: method={res.get('threshold_method')} "
+            f"reason={res.get('ki_fallback_reason')}")
+    # The fixed 0.0 floor still applies, so only genuinely positive-index
+    # pixels can classify; two negative modes must yield ~no water.
+    if res["water_percent"] < 0.5:
+        ok(f"no phantom water from two dry-land modes ({res['water_percent']}%)")
+    else:
+        bad(f"phantom water: {res['water_percent']}% classified")
 
 
 def test_integration_dry_falls_back():
@@ -133,6 +169,7 @@ if __name__ == "__main__":
     print("=" * 64)
     test_unit_bimodal_and_guard()
     test_integration_bimodal_uses_derived_cut()
+    test_negative_derived_cut_rejected()
     test_integration_dry_falls_back()
     test_sar_untouched()
     print("=" * 64)

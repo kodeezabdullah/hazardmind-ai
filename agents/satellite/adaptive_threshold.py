@@ -150,6 +150,34 @@ def derive_water_threshold(
             "ki": ki,
             "fallback_reason": reason,
         }
+    # PHYSICAL-PLAUSIBILITY GUARD (added after the Phase 2 Insh measurement,
+    # which caught this in production). Bimodality alone is NOT sufficient:
+    # at Insh a stale, largely-dry scene split cleanly into two DRY-LAND
+    # modes (Ashman's D was comfortably high), KI returned a negative cut,
+    # and 1.26% of the AOI was classified "water" whose within-water mean
+    # was -0.127 — pixels that do not look like water at all.
+    #
+    # The invariant that actually matters is not the sign of the CUT but
+    # whether the upper class is plausibly water. On a water index
+    # (MNDWI/NDWI) water is positive by construction, so the upper mode's
+    # MEAN must be non-negative. Testing the mode mean rather than the cut
+    # keeps the legitimate case where KI places a minimum-error cut slightly
+    # below zero because the water mode is broad — there the upper mean is
+    # still clearly positive, and rejecting it would throw away the real
+    # adaptive benefit.
+    upper_mean = max(ki["means"])
+    if upper_mean < 0.0:
+        return {
+            "threshold": fixed_threshold,
+            "threshold_method": "fixed_fallback",
+            "ki": ki,
+            "fallback_reason": (
+                f"upper_mode_not_water (upper mode mean {upper_mean}) — a "
+                "water index is positive over water by construction, so both "
+                "modes being negative means this split separates dry land "
+                "from dry land, not water from land"
+            ),
+        }
     return {
         "threshold": ki["threshold"],
         "threshold_method": "kittler_illingworth",
