@@ -163,6 +163,48 @@ confirms **Sentinel-1, 10 m GSD, post-event 2018-02-28 / 03-01**.
 | 12 | Phase 4 IBI built-up (Xu 2008) | 9ca1a2b | — | — | — | — | — | not metric-bearing | **KEPT** | NDBI would call bare soil built-up (+0.1351); IBI rejects it (−12.65). A ratio instability was found by measurement and guarded on physics |
 | 13 | Phase 5 rainfall as bounded context | 172b60f | — | — | — | — | — | not metric-bearing | **KEPT** | rainfall can never veto a detection; caps enforced and asserted |
 
+| 14 | **Phase 0 RE-MEASURED on a peak-timed event** | 098955f | **Keramidi S1 (NEW)** | **0.1684** | **0.5858** | **0.1911** | **0.2882** | vs drop-only on the SAME scenes: **F1 x45** (0.0064 -> 0.2882) | **KEPT — the refutation is overturned** | 94% of the signal is a RISE (43,048 rise px vs 2,500 drop px). Kanalia showed rise_px=0 only because it was 8 days post-peak and drained |
+| 15 | S1 pre-flight acquisition-timing check | 098955f | — | — | — | — | — | not metric-bearing | **KEPT** | knows before spending 2.4 GB whether a scene can carry signal |
+| 16 | Landslide scar detector WIRED (was dead code) | 5033584 | — | — | — | — | — | 25/25 offline | **KEPT** | passed 8/8 with zero callers; no pre-event optical fetch existed |
+| 17 | Landslide susceptibility from DEM (not LHASA) | d392971 | — | — | — | — | — | 22/22 offline | **KEPT** | caught an INVERTED plan-curvature sign convention |
+| 18 | Earthquake SAR damage detection + wiring | c1d6dff, b0125fe | — | — | — | — | — | 21/21 + 26/26 | **KEPT** | uniform +3.4 dB brightening flags 6.4%, not ~100% |
+| 19 | R2 upload bounded (hung the whole pipeline) | 1a144d3 | — | — | — | — | — | — | **KEPT** | observed live twice: completed analysis discarded by a stalled upload |
+
+## THE HEADLINE CORRECTION — Phase 0 was NOT refuted
+
+Earlier in this session I recorded the bidirectional S1 fix as a measured
+no-op ("bit-identical, rise_px = 0") on Kanalia. **That measurement was
+correct for that scene and the general conclusion drawn from it was wrong.**
+
+Keramidi (EMSR271, Thessaly 2018, ~4 days post-peak), identical AOI and
+reference, scored from cached scenes:
+
+| Direction | IoU | Precision | Recall | F1 | Predicted |
+|---|---|---|---|---|---|
+| drop-only | 0.0032 | 0.1821 | 0.0033 | 0.0064 | 0.27 km2 |
+| **both** | **0.1684** | **0.5858** | **0.1911** | **0.2882** | 4.92 km2 |
+
+**F1 improves 45x.** The mechanism is measured, not inferred:
+**rise_px = 43,048 vs drop_px = 2,500 — 94% of the recoverable signal is a
+backscatter RISE**, the double-bounce return from water among emergent
+vegetation. Kanalia had `rise_px = 0` because at 8 days post-peak the basin
+had drained; there was no signal in EITHER direction there (ROC AUC 0.4870).
+
+**This also settles the `abs()` design call.** The two cuts are not mirror
+images — drop **-4.200 dB**, rise **+2.816 dB**. A single `abs(ratio) > 3.0`
+would have applied the drop-derived threshold to the rise population, i.e. to
+the majority of the signal. Pooling and thresholding separately by sign is
+what produced the 45x.
+
+**What is NOT claimed:** that S1 is good. F1 0.2882 is far below S2's 0.98,
+and recall 0.19 means most of the reference is still missed — consistent with
+a 4-day-post-peak scene under-reporting a maximum, and with this event's
+layer being `observed_event_a` (a SNAPSHOT) rather than a cumulative maximum.
+
+**The Kanalia row stands as recorded.** It was a true measurement of a scene
+with no signal. What changed is the conclusion drawn from it — corrected by a
+second event rather than by editing the first.
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
