@@ -1917,6 +1917,16 @@ def calculate_indices(
                     # defensible measurement.
                     "index_calibrated": True,
                     "index_units": "dB_change_ratio",
+                    # Signal-detectability verdict (2026-07-29). False means:
+                    # a mask exists, but the change image is a single narrow
+                    # mode, so the threshold cut noise rather than water and
+                    # the extent is INDETERMINATE — NOT evidence of low
+                    # flood. Surfaced at this level (not just inside
+                    # sar_change_detection) so `_finish_success` and the
+                    # confidence tracker can act on it without reaching into
+                    # the nested audit blob.
+                    "signal_detectable": cd.get("signal_detectable"),
+                    "deep_tail_fraction": cd.get("deep_tail_fraction"),
                     "sar_change_detection": {
                         k: cd[k] for k in (
                             "method", "speckle_filter", "speckle_window", "enl",
@@ -1934,6 +1944,8 @@ def calculate_indices(
                             "flooded_vegetation_rise_pixels",
                             "open_water_drop_percent",
                             "flooded_vegetation_rise_percent",
+                            "signal_detectable", "deep_tail_fraction",
+                            "signal_criteria",
                         )
                     },
                 }
@@ -2932,6 +2944,11 @@ def _render_clip(
         "permanent_water_occurrence_threshold": indices.get("permanent_water_occurrence_threshold"),
         "permanent_water_source": indices.get("permanent_water_source"),
         # Phase 2: adaptive-threshold audit trail.
+        # Signal-detectability verdict — MUST be carried here or the
+        # HIGH-severity concern in _finish_success can never fire (this
+        # renderer maps fields explicitly; anything unlisted is dropped).
+        "signal_detectable": indices.get("signal_detectable"),
+        "deep_tail_fraction": indices.get("deep_tail_fraction"),
         "threshold_method": indices.get("threshold_method"),
         "derived_threshold": indices.get("derived_threshold"),
         "affected_cut": indices.get("affected_cut"),
@@ -3849,6 +3866,26 @@ def _finish_success(
             "sigma0 dB — it must not be threshold-compared as an "
             "absolute water/flood cutoff.",
             "MEDIUM",
+        )
+
+    # Signal detectability (2026-07-29). Distinct from the calibration
+    # concern above: change detection CAN be calibrated and still be applied
+    # to a scene that contains no flood signal at all. Measured on the
+    # Kanalia 8-days-post-peak run, that produced a flood map whose precision
+    # LIFT was BELOW 1.0x — worse than labelling the whole AOI flooded — and
+    # the pipeline shipped it with nothing to indicate the problem. HIGH
+    # severity because the failure is silent and the output looks normal.
+    if merged_result.get("signal_detectable") is False and tracker is not None:
+        tail = merged_result.get("deep_tail_fraction")
+        tracker.add_concern(
+            "SAR change detection found NO flood signal in this scene: only "
+            f"{100.0 * (tail or 0.0):.2f}% of valid pixels show a change "
+            "beyond +-3 dB, so the change image is a single narrow mode and "
+            "any threshold cuts noise rather than water. The reported extent "
+            "is INDETERMINATE and must NOT be read as evidence of little or "
+            "no flooding. The most common cause is an acquisition that "
+            "post-dates the flood peak, with the water already receded.",
+            "HIGH",
         )
 
     if city_boundaries and len(city_boundaries) > 1:

@@ -101,4 +101,9 @@ check("empty stack still refuses, no absolute fallback",
       r6["status"] == "insufficient_reference")
 
 print(f"\n{'='*55}\nTOTAL: {PASS} PASS / {FAIL} FAIL\n{'='*55}")
-sys.exit(1 if FAIL else 0)
+# Run as a script -> exit code. Imported by pytest -> assert instead, so
+# collection of the whole directory is not aborted by a SystemExit.
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
+else:
+    assert FAIL == 0, f"{FAIL} check(s) failed"

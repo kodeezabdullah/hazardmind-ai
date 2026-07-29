@@ -111,6 +111,51 @@ MIN_FLOOD_PATCH_PIXELS = 50  # ~0.005 km2 at 10 m — below this is speckle resi
 TILE_SIZE_PX = 512
 MIN_BIMODAL_TILES = 1
 
+# --- Signal detectability ---------------------------------------------------
+# Measured 2026-07-29 on the Kanalia forced-S1 run: the change image inside
+# the confirmed EMS flood extent was statistically INDISTINGUISHABLE from dry
+# ground (Cohen's d 0.031, ROC AUC 0.487 — below chance). Every threshold
+# scored a precision LIFT BELOW 1.0x, i.e. worse than labelling the whole AOI
+# flooded. The pipeline nonetheless shipped that map with no indication the
+# scene carried no signal.
+#
+# **A first attempt at this guard was measured and DISCARDED**, and the
+# reason is worth recording. It compared the detected pixels against the
+# undetected ones (Cohen's d) — which is CIRCULAR: the detector defines those
+# two groups by thresholding the very values being compared, so they are
+# separated by construction. On the real no-signal scene that test returned
+# d = 4.18 and cheerfully passed, while the ground-truth-based separation was
+# 0.031. It measured the threshold, not the signal.
+#
+# What actually distinguishes the two cases is the SHAPE OF THE WHOLE
+# DISTRIBUTION, which is independent of where the cut lands. A real flood
+# adds a second, distinctly darker population, so the change image becomes
+# bimodal and heavy-tailed on the negative side. The no-signal scene was a
+# single narrow near-Gaussian mode centred just below 0 dB (p1 -3.05,
+# p50 -0.29, p99 +0.59) — the tail beyond -3 dB held only ~1% of pixels and
+# was tail, not mode.
+#
+# **A SECOND attempt was also measured and discarded** — using the tiled KI
+# estimator's bimodality vote. Measured: the no-signal scene returned a
+# bimodal-tile fraction of 0.75, HIGHER than a synthetic real flood's 0.25.
+# KI minimises classification error and will always split a tile somewhere,
+# so on a smooth near-Gaussian noise field it happily reports "bimodal".
+# Bimodality is evidence about a tile's histogram shape, not about whether a
+# flood exists. Discarded on measurement, like the first attempt.
+#
+# What DID separate the two cases cleanly is the mass in the deep-change
+# tail — the one quantity a real flood must produce and noise cannot fake:
+#
+#     no-signal Kanalia scene : 1.24% of pixels beyond +-3 dB
+#     synthetic real flood    : 17.38%                          (14x)
+#
+# A flood covering a meaningful share of the AOI necessarily puts real mass
+# there; a narrow noise distribution centred near 0 dB cannot. 2% is set an
+# order of magnitude below the real-flood case and comfortably above the
+# observed noise case, so it separates them without being tuned to either.
+MIN_DEEP_TAIL_FRACTION = 0.02      # >=2% of valid px beyond the deep cut
+DEEP_TAIL_DB = 3.0                 # |change| >= 3 dB — the conventional bar
+
 
 def refined_lee(img: np.ndarray, window: int = REFINED_LEE_WINDOW) -> np.ndarray:
     """Refined Lee speckle filter (edge-aware local-statistics MMSE).
@@ -480,6 +525,34 @@ def detect_flood_change(
     flood_count = int(flood.sum())
     drop_count = int(drop_final.sum())
     rise_count = int(rise_final.sum())
+
+    # --- Signal detectability (2026-07-29) --------------------------------
+    # Does this scene contain a flood signal at all, or did the threshold cut
+    # noise? Both criteria are computed WITHOUT reference to the flood mask,
+    # so neither can be satisfied by the act of thresholding (see the
+    # discarded-first-attempt note at MIN_BIMODAL_TILE_FRACTION).
+    vals = change[valid]
+    vals = vals[np.isfinite(vals)]
+    deep_tail_fraction = (
+        round(float((np.abs(vals) >= DEEP_TAIL_DB).mean()), 6)
+        if vals.size else None
+    )
+    signal_detectable = None
+    if deep_tail_fraction is not None:
+        signal_detectable = bool(deep_tail_fraction >= MIN_DEEP_TAIL_FRACTION)
+        if not signal_detectable:
+            logger.warning(
+                "SAR change detection: this scene shows NO flood signal — "
+                "only %.3f%% of valid pixels exceed +-%.1f dB (criterion "
+                "%.1f%%). The change image is a single narrow mode, so any "
+                "threshold cuts noise rather than water and the resulting "
+                "extent is INDETERMINATE, NOT a low flood reading. The most "
+                "common cause is an acquisition post-dating the flood peak, "
+                "with the water already receded.",
+                100.0 * deep_tail_fraction, DEEP_TAIL_DB,
+                100.0 * MIN_DEEP_TAIL_FRACTION,
+            )
+
     return {
         "status": "complete",
         "flood_mask": flood,
@@ -505,6 +578,20 @@ def detect_flood_change(
         "rise_threshold_db": thr["rise_threshold"],
         "rise_threshold_method": thr["rise_threshold_method"],
         "rise_bimodal_tiles": thr["rise_bimodal_tiles"],
+        # --- Signal detectability audit trail ----------------------------
+        # `signal_detectable is False` means: a mask was produced, but the
+        # detected pixels are not meaningfully different from the rest of
+        # the scene. Consumers must treat the extent as indeterminate rather
+        # than as a measurement of no/low flood. None = not computable
+        # (nothing detected, or a degenerate population).
+        "signal_detectable": signal_detectable,
+        "deep_tail_fraction": deep_tail_fraction,
+        
+        "signal_criteria": {
+            
+            "min_deep_tail_fraction": MIN_DEEP_TAIL_FRACTION,
+            "deep_tail_db": DEEP_TAIL_DB,
+        },
         # Full audit trail — a future comparison against a different filter,
         # baseline depth or threshold needs to know exactly what ran.
         "method": "sar_change_detection_log_ratio",

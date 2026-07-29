@@ -22,7 +22,48 @@ import sys
 from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, "..", "..", "hazard"))
+
+# The hazard agent's modules use the SAME bare names as the satellite agent's
+# (`agent.py`, `intelligence.py`) — the exact collision backend/graph.py's
+# isolated loader exists to work around. Importing them by putting
+# agents/hazard on sys.path permanently rebinds `agent` to the HAZARD one, so
+# every satellite test that runs after this file in the same pytest process
+# gets the wrong module. (Measured: it broke 7 tests in
+# test_verify_islamabad_fixes.py, which pass in isolation.)
+#
+# Load them under private names from an explicit file path instead, and leave
+# sys.modules/sys.path exactly as they were found.
+import importlib.util  # noqa: E402
+
+
+def _load_isolated(mod_name: str, path: str):
+    """Import a module from an explicit path without leaking its bare name."""
+    hazard_dir = os.path.dirname(path)
+    added = hazard_dir not in sys.path
+    if added:
+        sys.path.insert(0, hazard_dir)
+    saved = {k: sys.modules[k] for k in ("agent", "analyzer", "intelligence")
+             if k in sys.modules}
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        # Restore whatever the satellite tests had bound, and drop the bare
+        # names this import created.
+        for k in ("agent", "analyzer", "intelligence"):
+            sys.modules.pop(k, None)
+        sys.modules.update(saved)
+        if added:
+            try:
+                sys.path.remove(hazard_dir)
+            except ValueError:
+                pass
+
+
+_HAZARD = os.path.abspath(os.path.join(_HERE, "..", "..", "hazard"))
 
 PASS = FAIL = 0
 
@@ -37,8 +78,12 @@ def check(name, cond, detail=""):
         print(f"  FAIL  {name}  {detail}")
 
 
-import agent as hazard_agent  # noqa: E402
-import analyzer  # noqa: E402
+hazard_agent = _load_isolated(
+    "_hazard_agent_for_test", os.path.join(_HAZARD, "agent.py")
+)
+analyzer = _load_isolated(
+    "_hazard_analyzer_for_test", os.path.join(_HAZARD, "analyzer.py")
+)
 
 # A satellite payload shaped like the real one, carrying the Phase 3 fields.
 SAT = {
@@ -148,4 +193,9 @@ check("no context -> no 'none found' noise injected into the prompt",
       "permanent water" not in p2.lower(), p2[:160])
 
 print(f"\n{'='*58}\nTOTAL: {PASS} PASS / {FAIL} FAIL\n{'='*58}")
-sys.exit(1 if FAIL else 0)
+# Run as a script -> exit code. Imported by pytest -> assert instead, so
+# collection of the whole directory is not aborted by a SystemExit.
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
+else:
+    assert FAIL == 0, f"{FAIL} check(s) failed"

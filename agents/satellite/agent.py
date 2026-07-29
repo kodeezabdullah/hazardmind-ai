@@ -1130,6 +1130,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # ready-made prompt sentence the hazard flood analysis uses.
             "permanent_water_features": permanent_water_features,
             "permanent_water_context": permanent_water_context,
+            # Signal detectability (2026-07-29). False = the S1 change image
+            # carried no flood signal, so the extent is INDETERMINATE, not a
+            # low flood reading. Persisted so a stored result can never be
+            # re-read as "S1 found little flooding" when the truth is "this
+            # scene could not answer the question".
+            "signal_detectable": result.get("signal_detectable"),
+            "deep_tail_fraction": result.get("deep_tail_fraction"),
             # Phase 2 — adaptive-threshold audit trail (KI cut / method /
             # diagnostics; any run's classification is re-derivable).
             "threshold_method": result.get("threshold_method"),

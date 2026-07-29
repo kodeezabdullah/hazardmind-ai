@@ -129,4 +129,9 @@ check("water but no names -> still states the baseline",
       unnamed is not None and "unnamed in OSM" in unnamed, unnamed)
 
 print(f"\n{'='*58}\nTOTAL: {PASS} PASS / {FAIL} FAIL\n{'='*58}")
-sys.exit(1 if FAIL else 0)
+# Run as a script -> exit code. Imported by pytest -> assert instead, so
+# collection of the whole directory is not aborted by a SystemExit.
+if __name__ == "__main__":
+    sys.exit(1 if FAIL else 0)
+else:
+    assert FAIL == 0, f"{FAIL} check(s) failed"
