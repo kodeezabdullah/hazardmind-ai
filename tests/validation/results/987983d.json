@@ -1,0 +1,50 @@
+{
+  "commit": "987983d",
+  "commit_full": "987983da3dc80702090215b4a3a008a318e57e79",
+  "run_timestamp_utc": "2026-07-29T16:43:24.883026+00:00",
+  "events": [
+    {
+      "event_id": "e5619ac8-1130-49e8-867f-7e37043b31d9",
+      "location": "Tychero, Eastern Macedonia and Thrace, Greece",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "harness_forced_selection",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": {
+        "iou": 0.4639,
+        "precision": 0.8777,
+        "recall": 0.496,
+        "f1": 0.6338,
+        "predicted_area_km2": 13.191,
+        "reference_area_km2": 23.341,
+        "intersection_area_km2": 11.577,
+        "union_area_km2": 24.955
+      },
+      "metrics_excluding_permanent_water": {
+        "iou": 0.4641,
+        "precision": 0.8784,
+        "recall": 0.496,
+        "f1": 0.634,
+        "predicted_area_km2": 13.18,
+        "reference_area_km2": 23.341,
+        "intersection_area_km2": 11.577,
+        "union_area_km2": 24.944
+      },
+      "permanent_water_note": "excluding_permanent_water subtracts the supplied permanent-water polygon (JRC_GSW_occurrence_v1_4_2021 (occurrence >= 75%)) from both predicted and reference geometries before scoring.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 at 10 m \u2014 VERIFIED by reading the product's own source.dbf, not inferred from the activation page.",
+        "Reference clipped to the AOI is 23.341 km2 = 31.87% of 73.24 km2 \u2014 comfortably above the ~5% Paiporta floor where a perfect detector still scores near zero.",
+        "Layer of record is `observed_event_a` \u2014 the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumWaterExtentA`, which Kanalia/Insh use). A prediction from a different date will disagree partly for TIMING reasons, not only accuracy. State this whenever these numbers are compared against Kanalia's.",
+        "Highest flooded fraction in the qualified set (31.87%). The Evros delta is open farmland and marsh \u2014 same land-cover class as Kanalia.",
+        "RURAL/open-terrain event. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section).",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 2792.9840000000004,
+      "bytes_downloaded": 2368869902
+    }
+  ]
+}
