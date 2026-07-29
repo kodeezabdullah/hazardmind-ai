@@ -297,3 +297,146 @@ LLM asserting the population figure every response threshold depends on. A
 change from "cannot be right" to "defensible, with stated limits" is worth
 making even when the available references cannot measure it — provided, as
 here, the absence of measurement is stated rather than glossed.
+
+---
+
+# FINAL REPORT — science/full-pass
+
+## 1. Did precision rise without collapsing recall?
+
+**On the measurement frame that is actually comparable, the honest answer
+is: precision was never the problem this session's own baseline claimed,
+and the S2 numbers ended flat-to-marginally-better while becoming
+scientifically defensible.**
+
+| Frame | IoU | Precision | Recall | F1 |
+|---|---|---|---|---|
+| Session-1 "baseline to beat" (stale AOI) | 0.4837 | 0.4866 | 0.9878 | 0.6520 |
+| **0′ re-baseline, pinned AOI, pre-change code** | 0.9722 | 0.9839 | 0.9880 | 0.9859 |
+| **Final (Phase 2 + guard), excl-permanent-water** | 0.9624 | 0.9863 | 0.9754 | 0.9808 |
+
+The single most important finding of this session is in the first two
+rows: **the 0.4866 precision was substantially an artifact of AOI drift,
+not detector over-calling.** Nominatim resolved "Kanalia" differently
+between sessions (zero-area Point vs LineString), moving the ~6 km buffer
+and with it both the prediction and the clipped reference. Re-running the
+UNCHANGED pre-session code against a pinned AOI scored 0.9839 precision.
+Any claim that this session "fixed a precision problem" would be false;
+what it actually did was find that the problem was a measurement artifact,
+and then close the hole that produced it (`aoi_pin.py`).
+
+Against the valid 0′ frame: precision +0.0024 (0.9839 → 0.9863), recall
+−0.0126 (0.9880 → 0.9754), IoU −0.0098. **That recall cost is real and
+should not be waved away** — for a life-safety system missing flood is
+worse than over-calling it. Two things make it acceptable rather than a
+regression to revert: most of it is definitional (permanent-water masking
+means the prediction deliberately no longer claims Lake Karla, while the
+EMS reference still contains it), and the residual is ~30 m JRC edge
+effects on lake-adjacent flood. The excl-permanent-water column is the
+honest flood-only frame, and there the numbers hold.
+
+## 2. Does confidence track measured accuracy?
+
+**For the first time, yes — directionally, with n=3 and one scoreable
+point.** Before this session every run reported `evidence_contradicts`
+regardless of outcome quality, so the field carried no information at all.
+
+| Event | Measured | Confidence before | Confidence after |
+|---|---|---|---|
+| Kanalia | F1 0.9808 | 0.448 `contradicts` | **0.792 `evidence_supports`** |
+| Paiporta | unscoreable (EMS ceiling) | 0.318 `contradicts` | 0.434 `evidence_weak` |
+| Insh | 0 zones, stale scene | 0.263 `contradicts` | 0.322 `evidence_weak` |
+
+The ordering is now correct and the labels distinguish "supported",
+"weak", and "actively contradicted". This is a necessary condition
+restored, **not a validated correlation** — one scoreable accuracy point
+cannot establish calibration.
+
+## 3. The first scored S1 result
+
+**Not obtained this session.** The forced-S1 Kanalia run's first attempt
+died on `InternalServerError: Couldn't connect to compute node` (CDSE
+infrastructure, not a code defect); the retry was still running when the
+session's reporting deadline arrived. This is stated as an outstanding
+measurement rather than papered over — the project still has no scored S1
+result, for the fourth session running, now for a fourth distinct reason.
+
+What DID change: the S1 path is no longer *structurally* incapable of an
+answer. The absolute `SAR_WATER_THRESHOLD_DB = -15.0` could never fire on
+a `10*log10(raw DN)` index sitting at ~+23 dB, so every S1 run classified
+zero water always. Change detection replaces it, and its validity gate was
+verified against live data rather than assumed (section 4).
+
+## 4. Verdict: is calibration still needed after change detection?
+
+**No — and this was verified, not argued.** Three same-relative-orbit
+(107) acquisitions over Rawalpindi spanning 24 days have `sigmaNought`
+calibration LUTs agreeing to ~0.003% (704.4692 / 704.4496 / 704.4586 at
+the first vector element). In dB that residual is **0.00024 dB against a
+3 dB flood criterion — five orders of magnitude below the signal.** The
+calibration factor genuinely cancels in the same-orbit log-ratio, which is
+why the same-orbit constraint is enforced strictly rather than treated as
+a preference; relaxing it would silently invalidate the method. A unit
+test asserts the operational consequence directly: an arbitrary k=7.3
+calibration factor applied to every scene produces a **bit-identical**
+flood mask.
+
+Calibration would still be required for absolute sigma-nought reporting or
+cross-orbit comparison. It is not required for the flood answer.
+
+## 5. What made things worse, and what it taught
+
+**Phase 2 (KI adaptive thresholding) introduced a real regression at
+Insh**: KI found a genuinely bimodal histogram whose two modes were BOTH
+dry land, returned a negative cut, and manufactured 1.26% phantom "water"
+whose own within-water mean was −0.127. Confidence went to 0.0.
+
+Three lessons, all of which cost measurement time to learn:
+
+1. **Bimodality is not evidence of a water/land split.** The guard now
+   tests that the upper mode is plausibly water, not the sign of the cut.
+2. **My first fix was wrong and the harness caught it.** The cruder rule
+   `derived_cut >= 0` rejected a legitimate land −0.45 / water +0.35
+   split, because KI correctly places a minimum-error cut below zero when
+   the water mode is broad. **Discarded on measurement, not intuition.**
+3. **Phase 0b paid for itself here.** The confidence machinery is what
+   surfaced the regression as a 0.0 rather than letting a phantom flood
+   through as a confident answer.
+
+## 6. Which prior results the warp bug invalidated
+
+| Conclusion | Verdict |
+|---|---|
+| SAR `mean_index` is positive raw DN (basis of the false-CRITICAL H#4 analysis) | **STANDS** — real classic-format pixels, re-confirmed post-fix |
+| 3244s S1 timing baseline | **INVALIDATED** — partly spent chasing 0.000% readings a COG-blind warp produced; download path has since changed |
+| "Tiers 1–3 exactly-0.000% confirmed not a bug" | **DOWNGRADED** — overdetermined for COG frames; cannot distinguish the two causes from that run |
+| "Every prior S1 result was analysis of zeros" | **TOO STRONG** — only COG files zeroed; classic-format warped correctly |
+
+Closed by making the format choice deterministic and logged.
+
+## 7. Total download cost
+
+**~6.7 GB** across 13 harness runs (S2 events ~410 MB each; the S1
+attempts are excluded as they never completed a download cycle). Detailed
+per-run table above.
+
+## 8. What remains unaddressed, ranked
+
+1. **No scored S1 result** — the measurement, not the method, is missing.
+   Rerun forced-S1 on Kanalia and Insh. Highest priority: it is the only
+   claim in this session's work that rests on offline verification alone.
+2. **Confidence calibration is unvalidated** — n=1 scoreable point. Needs
+   more scoreable events before any calibration claim is defensible.
+3. **No urban-flood reference** — the EMS ceiling (Phase 7) means every
+   number here describes open-terrain flood only, and must not be assumed
+   to transfer to cities, where exposure concentrates.
+4. **WorldPop never exercised live** — the exposure path is survival-tested
+   through the real entry point but has not run against a real raster.
+5. **Landslide/earthquake changes unscoreable here** — no reference events
+   of those types exist in the harness.
+6. **Phase 4c/4d not attempted** — LHASA v2 susceptibility and GPM IMERG
+   rainfall triggering. Deliberately deferred: both add external
+   dependencies whose value cannot be measured by this event set.
+7. **Shape/threshold constants uncalibrated** — landslide geometry filters
+   and the magnitude bands encode documented qualitative properties but no
+   inventory calibration (NASA COOLR is the path).
