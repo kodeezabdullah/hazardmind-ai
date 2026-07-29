@@ -1423,3 +1423,61 @@ Sentinel-1 can resolve, so no accuracy figure is claimed.
 damage as contiguous district-scale extent at >= ~0.01 km2 per feature.
 Candidates are national-agency damage maps or research inventories derived
 FROM medium-resolution imagery, not EMS rapid-mapping grading products.
+
+---
+
+# CORRECTION — post-peak latency does NOT explain the flood scores
+
+An earlier passage in this log presented the three scored S1 flood events as
+a timing story ("precision climbs as acquisition moves closer to peak").
+**That claim was made before Tychero's acquisition date had been recovered,
+and it is WRONG.**
+
+Tychero's `scene_id` was resolved from the persisted DB row
+(`afcd8487-c5f9-48f3-88f4-1c59d1431339`) and looked up in the CDSE
+catalogue: **S1B_IW_GRDH_1SDV_20180402T160653**, acquired **2018-04-02**
+against a config event peak of **2018-03-24**.
+
+    POST-PEAK LATENCY = +9.67 days
+
+| Event | post-peak | flooded % | precision | F1 |
+|---|---|---|---|---|
+| **Tychero** | **+9.7 d** | 32% | **0.8784** | **0.6340** |
+| Keramidi | +4 d | 22% | 0.5858 | 0.2882 |
+| Kanalia | +8 d | 14% | 0.0567 | 0.0165 |
+
+**Tychero is the LATEST acquisition and the BEST result** — 15x Kanalia's
+precision despite being imaged ~1.7 days later. Latency and score are not
+monotonically related, so the timing narrative does not survive contact with
+this number.
+
+**What DOES track precision monotonically is FLOODED FRACTION** (14% -> 22%
+-> 32% against 0.06 -> 0.59 -> 0.88). That ordering holds across all three.
+
+**The likely mechanism, stated as a hypothesis and not a finding:** scene age
+is only a PROXY for "has the water receded", and recession rate is a property
+of the basin, not the calendar. The Evros delta (Tychero) is a low-gradient
+river delta that holds water for weeks; the drained Lake Karla basin
+(Kanalia) sheds it in days. A 9.7-day-old scene over a persistent flood
+carries more signal than an 8-day-old scene over a fast-draining one.
+
+**Consequences for the paper — both restrictive:**
+
+1. Do NOT claim acquisition timing drives detection performance. The
+   evidence does not support it, and Tychero directly contradicts it.
+2. Do NOT claim flooded fraction drives it either, on n=3. Three points
+   ordering correctly is suggestive, not a demonstrated relationship, and
+   flooded fraction is itself confounded with basin type here.
+
+**What the evidence DOES support:** (a) the bidirectional fix is a real
+improvement, isolated by an A/B on identical scenes (F1 x45); (b) precision
+0.8784 is achievable on a real event; (c) some scenes carry no recoverable
+signal at all, and the pipeline now detects that case rather than emitting a
+false negative (Kanalia measured at ROC AUC 0.4870; Zalgiriai caught live by
+the guard).
+
+**Harness gap this exposed:** `scene_age_days` and `scene_id` are computed by
+the pipeline but NOT persisted into the harness result JSON, so the
+acquisition date of a scored run is not recoverable from the results file
+alone — it required a DB lookup plus a CDSE catalogue query. Any future
+timing analysis needs those two fields stored per event.
