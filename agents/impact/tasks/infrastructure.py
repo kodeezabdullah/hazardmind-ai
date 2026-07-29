@@ -223,6 +223,38 @@ async def run_infrastructure_task(hazard_data: dict, event_id: str) -> dict:
             "confidence":              0.3,
         }
 
+    # Phase 6b (science/full-pass): CLAMP the LLM's at-risk counts against
+    # the real OSM totals. The base counts are real (Overpass), but the
+    # "at risk" fraction was an unconstrained LLM guess with no code-side
+    # check — so the model could (and per SYSTEM_ANALYSIS.md H#15 did)
+    # report more facilities at risk than exist in the AOI. A count that
+    # exceeds reality is not a conservative estimate, it is a wrong number a
+    # responder would act on. Each clamp records its basis so a reader can
+    # see whether the figure came from geometry, a clamped guess, or an
+    # unclamped one.
+    try:
+        from services.population_exposure import clamp_at_risk
+
+        for field, osm_key in (
+            ("hospitals_at_risk", "hospitals"),
+            ("schools_at_risk", "schools"),
+            ("bridges_at_risk", "bridges"),
+        ):
+            real_total = (osm or {}).get(osm_key)
+            decision = clamp_at_risk(
+                result.get(field), real_total=real_total, geometric=None
+            )
+            if decision["value"] is not None:
+                if decision["clamped"]:
+                    logger.warning(
+                        "[infrastructure] %s clamped %s -> %s (real OSM total)",
+                        field, result.get(field), decision["value"],
+                    )
+                result[field] = decision["value"]
+            result[f"{field}_basis"] = decision["basis"]
+    except Exception as exc:  # noqa: BLE001 — clamping must never fail a run
+        logger.warning("[infrastructure] at-risk clamping unavailable: %s", exc)
+
     result["model_used"]    = model_used
     result["criticality"]   = criticality
     result["llm_reasoning"] = reasoning

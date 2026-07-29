@@ -264,6 +264,47 @@ def test_llm_estimate_used_when_exposure_unavailable():
             f"basis={res.get('population_basis')}")
 
 
+def test_infrastructure_clamp_wired_in_production():
+    """Survival assertion for 6b: the clamp must run in the REAL task, not
+    only in the helper's own unit test."""
+    import asyncio
+
+    import tasks.infrastructure as infra
+
+    async def _fake_llm(prompt, criticality, task_name=None):
+        # LLM claims far more at risk than the AOI actually contains.
+        return ({"hospitals_at_risk": 500, "schools_at_risk": 900,
+                 "bridges_at_risk": 40, "roads_blocked_km": 5.0}, "stub", "stub")
+
+    async def _fake_osm(*a, **k):
+        return {"hospitals": 7, "schools": 21, "bridges": 3,
+                "major_roads": 12, "source": "stub-overpass"}
+
+    orig_llm = infra.smart_llm_call
+    orig_osm = infra._fetch_overpass  # the REAL name (test caught this)
+    infra.smart_llm_call = _fake_llm
+    infra._fetch_overpass = _fake_osm
+    try:
+        res = asyncio.run(infra.run_infrastructure_task(
+            {"bbox": [73.0, 33.0, 73.1, 33.1], "location": "Rawalpindi, Pakistan",
+             "severity": "HIGH", "flood_risk": "HIGH", "disaster_type": "flood"},
+            "test-event"))
+    finally:
+        infra.smart_llm_call = orig_llm
+        infra._fetch_overpass = orig_osm
+
+    h = res.get("hospitals_at_risk")
+    if h is not None and h <= 7:
+        ok(f"hospitals_at_risk clamped to the real OSM total in production "
+           f"(LLM said 500, result {h})")
+    else:
+        bad(f"clamp not applied in production: hospitals_at_risk={h}")
+    if res.get("hospitals_at_risk_basis"):
+        ok(f"clamp basis recorded ({res['hospitals_at_risk_basis']})")
+    else:
+        bad("clamp basis not recorded")
+
+
 if __name__ == "__main__":
     print("=" * 64)
     print("PHASE 6 — IMPACT SCIENCE (exposure, subsetting, rubric)")
@@ -276,6 +317,7 @@ if __name__ == "__main__":
     test_rubric_enforced_in_code()
     test_gridded_exposure_reaches_population_affected()
     test_llm_estimate_used_when_exposure_unavailable()
+    test_infrastructure_clamp_wired_in_production()
     print("=" * 64)
     print(f"RESULT: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 64)
