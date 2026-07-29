@@ -357,6 +357,62 @@ further down, in grid geometry.
   production, because every synthetic test fixture naturally used matching
   array shapes. The integration geometry was the untested surface.
 
+### Run 3 (`2a2b616-dirty`, event `d5c22536`, post-grid-fix) — change detection RAN
+
+| Field | Value |
+|---|---|
+| `index_calibrated` | **True** |
+| `index_units` | **dB_change_ratio** |
+| confidence / basis | **0.75 / evidence_supports** (run 2: 0.30 / evidence_weak) |
+| coverage | 100.0% |
+| `affected_area_km2` | 0.0 |
+| elapsed / downloaded | 2,044s / 2,242 MB (+~1.3 GB pre-event baseline) |
+
+**The grid fix worked.** For the first time in this project's history the S1
+path produced a physically defensible flood answer: a real same-orbit
+log-ratio, not the absolute threshold that could never fire. The audit
+fields prove which method ran — `dB_change_ratio` and `index_calibrated:
+True` are unreachable from the fallback path.
+
+**But this is still NOT a scored S1 result, for a reason that has nothing
+to do with detector quality.** The zero is fully explained by scene timing:
+
+- The reference event is pinned to **2023-09-06** (Storm Daniel).
+- The scene the run actually analysed has **`scene_age_days: 4.58`** — a
+  2026 acquisition.
+
+`sentinel_clock_patch` freezes `sentinel.datetime` so the *catalogue query*
+searches the historical window, but on this forced-S1 path the selected
+post-event scene was recent. Change detection then did exactly the right
+thing with what it was given: it compared a recent dry-season scene against
+its own recent same-orbit baseline and correctly found **no backscatter
+drop**, because there was no flood on that date. Confidence 0.75 /
+`evidence_supports` is the honest reading of that — the method is
+confident, and correctly so, that nothing changed.
+
+Scoring this against the 2023 EMS reference would be meaningless: it would
+measure a 2026 non-flood against a 2023 flood extent and report a false
+zero as detector failure.
+
+**What this does and does not establish:**
+
+- **Establishes:** the S1 change-detection path runs end to end in
+  production, on real CDSE data, with same-orbit reference acquisition,
+  grid alignment, speckle filtering, log-ratio and tiled thresholding all
+  executing — and it reports a *defensible* answer instead of a
+  structurally impossible one.
+- **Does NOT establish:** any accuracy figure. There is still no scored S1
+  IoU/precision/recall/F1, because no run has yet analysed flood-peak
+  imagery against a matching pre-flood baseline.
+
+**The remaining blocker, precisely stated** (this is the fourth distinct
+S1 blocker across four sessions, and the narrowest yet): the forced-S1
+harness path needs the post-event scene selection pinned to the reference
+date, not just the catalogue query window. That is a harness fix of
+bounded scope — `forced_satellite_override` bypasses `select_satellite`,
+and the scene chosen downstream is not constrained to the frozen clock's
+window. Fixing it is the single next step to a scored S1 result.
+
 ---
 
 # FINAL REPORT — science/full-pass
@@ -425,11 +481,23 @@ unknown.** Three attempts:
    zero water always. Reporting that zero as "S1 found no flood" would have
    been the most misleading possible outcome; the audit fields are what
    prevented it. Root-caused and fixed (see Phase 3i above).
-3. Post-fix rerun launched; not complete at reporting time.
+3. **Post-fix rerun (`2a2b616-dirty`): change detection RAN** —
+   `index_calibrated: True`, `index_units: dB_change_ratio`, confidence
+   **0.75 / evidence_supports** (up from 0.30 / weak). The grid fix worked
+   and the S1 path produced a defensible answer for the first time ever.
+   It reported zero flood — but the scene analysed has
+   `scene_age_days: 4.58` (a 2026 acquisition) while the reference event is
+   pinned to 2023-09-06, so change detection correctly found no backscatter
+   drop because there was no flood on that date. Scoring it against the
+   2023 EMS extent would measure a 2026 non-flood against a 2023 flood and
+   report a false zero as detector failure.
 
-So the project has no scored S1 result for the fourth session running — but
-unlike the previous three, the blocker is now a specific identified defect
-with a landed fix, not an open question.
+So the project has no scored S1 result for the fourth session running. The
+blocker is now the narrowest it has ever been and is in the HARNESS, not
+the science: `forced_satellite_override` bypasses `select_satellite`, and
+the post-event scene chosen downstream is not constrained to the frozen
+clock's window. Pinning that selection is the single next step to a scored
+S1 result.
 
 What DID change: the S1 path is no longer *structurally* incapable of an
 answer. The absolute `SAR_WATER_THRESHOLD_DB = -15.0` could never fire on
@@ -492,9 +560,11 @@ per-run table above.
 
 ## 8. What remains unaddressed, ranked
 
-1. **No scored S1 result** — the measurement, not the method, is missing.
-   Rerun forced-S1 on Kanalia and Insh. Highest priority: it is the only
-   claim in this session's work that rests on offline verification alone.
+1. **No scored S1 result** — the method is now PROVEN to run in production
+   (`dB_change_ratio`, confidence 0.75/supports); what is missing is a run
+   against flood-peak imagery. Concretely: pin the forced-S1 post-event
+   scene selection to the reference date, not just the catalogue query
+   window. Bounded harness fix, highest priority.
 2. **Confidence calibration is unvalidated** — n=1 scoreable point. Needs
    more scoreable events before any calibration claim is defensible.
 3. **No urban-flood reference** — the EMS ceiling (Phase 7) means every
