@@ -1,0 +1,52 @@
+event_key: emsr273_fshatiri
+activation_code: EMSR273
+aoi_number: 5
+aoi_name: "Fshat i Ri (Bushat / Drin-Buna plain) — Albania flood, March 2018"
+country: Albania
+disaster_type: flood
+status: confirmed
+
+# ---------------------------------------------------------------------------
+# QUALIFIED BY A PRE-FLIGHT GATE, not discovered after a multi-GB run.
+#
+# Every rejection earlier in this session cost a full pipeline run before the
+# disqualifier surfaced. Both gates are now checked on metadata + a small
+# vector download BEFORE any imagery is touched:
+#
+#   GATE 1  POST-EVENT SENSOR must be Sentinel. Scoring a 10 m prediction
+#           against a 0.5-6 m commercial VHR delineation measures SENSOR
+#           DIFFERENCE as pipeline error (this is what disqualified EMSR342
+#           Townsville, whose Sentinel-2 entry was the PRE-event source).
+#   GATE 2  FLOODED FRACTION at the densest 6 km AOI must be substantial.
+#           Below ~5% a perfect detector still scores near zero against a
+#           reference that maps almost nothing inside the polygon — the
+#           Paiporta ceiling (this rejected Verona 2.66%, Sciacca 0.62%,
+#           EMSR265 3.77%, EMSR251 0.68%, EMSR260 0.08%).
+#
+# AOI chosen by the same grid search used for Kanalia/Keramidi: the densest
+# 6 km disk over the reference, then the nearest settlement that Nominatim
+# actually resolves AND still contains most of that cluster.
+# ---------------------------------------------------------------------------
+
+pipeline_location: "Fshat i Ri, Northern Albania, Albania"
+
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2018-03-15"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_MONIT04"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2018-03-18T00:00:00Z"
+    download_url: "https://cems-mapping-website.s3.eu-west-1.amazonaws.com/static/activations/EMSR273/EMSR273_05BARBULLUSH_01DELINEATION_MONIT04_v1_vector.zip"
+    vector_layer_of_record: "observed_event_a"
+    search_window_center_utc: "2018-03-18T00:00:00Z"
+    search_window_days: 5
+
+caveats:
+  - "Post-event sensor is Sentinel-1 at 10 m — VERIFIED by reading the product's own source.dbf, not inferred from the activation page."
+  - "Reference clipped to the AOI is 13.502 km2 = 18.69% of 72.23 km2 — comfortably above the ~5% Paiporta floor where a perfect detector still scores near zero."
+  - "Layer of record is `observed_event_a` — the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumWaterExtentA`, which Kanalia/Insh use). A prediction from a different date will disagree partly for TIMING reasons, not only accuracy. State this whenever these numbers are compared against Kanalia's."
+  - "DISAMBIGUATION REQUIRED, same trap as Kanalia/Keramidi: bare 'Fshat i Ri, Albania' resolves elsewhere and clips the reference to 0.000 km2 (0.00%), which would have been reported as a detector failure. 'Fshat i Ri, Northern Albania, Albania' gives 13.502 km2. Verified by direct Nominatim query 2026-07-29."
+  - "RURAL/open-terrain event. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section)."
