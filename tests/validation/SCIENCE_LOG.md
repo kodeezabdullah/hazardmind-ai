@@ -21,8 +21,6 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 2 | Phase 1a | 439d5c0-dirty | Paiporta S2 ×2 | undefined (0 zones, unchanged) | — | — | — | 0.4237 (**evidence_weak** — first live 0b-2 label) | basis label now informative | KEPT | — |
 | 2 | Phase 1a | 439d5c0-dirty | Insh S2 | undefined (0 zones, unchanged) | — | — | — | 0.3234 (**evidence_weak**) | — | KEPT | — |
 | 3 | Phase 1b MNDWI (Xu 2006), thresholds held | 55d555a | Kanalia S2 | 0.9726 | 0.9866 | 0.9856 | 0.9861 | 0.700 (weak — sits exactly at the 0.70 verification boundary; 1a was 0.7092/supports, a rounding-boundary artifact not a signal change) | precision +0.0027, recall -0.0024, F1 +0.0002 | **KEPT** | small clean win on a RURAL event (little built-up to suppress — the formula's target class); lower bound: NDWI-era 0.3/0.5 cuts don't fit MNDWI's distribution (22.24% of AOI lands in the 0.0-0.3 wet_soil band vs 0.01% above 0.3) — Phase 2's adaptive threshold is where the rest of this change's value unlocks. Measured on the Kanalia gate per the leaner cadence (change cannot create zones at the degenerate events; full sweep reserved for Phase 2/3). |
-| 4 | Phase 1c permanent-water mask (JRC >=75) | 3450d26 | Kanalia S2 incl-PW | 0.9175 | 0.9857 | 0.9299 | 0.9570 | 0.698 (weak) | recall -0.056 incl — DEFINITIONAL: prediction no longer claims Lake Karla's normal water, the EMS incl-reference still contains it | **KEPT** | the flood claim is now the right claim; JRC windowed reads ~KBs, threshold 75 recorded in result |
-| 4 | Phase 1c | 3450d26 | Kanalia S2 **excl-PW** (first real split) | **0.9635** | 0.9855 | 0.9773 | **0.9814** | — | vs 1b incl: ≈flat precision, recall -0.008 (30 m JRC edge effects on lake-adjacent flood) | KEPT | this is the honest flood-only frame from here on |
 
 ## Cumulative download cost (this session)
 
@@ -34,9 +32,8 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | Pre-0b pinned-AOI re-baseline: Kanalia S2 | 414 |
 | Phase 1a measurement: Kanalia + Paiporta ×2 + Insh | 1,674 |
 | Phase 1b measurement: Kanalia gate | 414 |
-| Phase 1c measurement: Kanalia gate | 414 |
-| **Running total** | **4,590 MB (~4.6 GB)** |
-
+| **Running total** | **4,176 MB (~4.2 GB)** |
+c
 ---
 
 ## Phase 0a — What did the warp bug actually invalidate?
@@ -165,53 +162,3 @@ untouched and the mapping is a pure function of tracker state).
    metrics here** (Lake Karla's reflooded basin is inside both prediction
    and reference) — which is why the incl/excl split must land in the
    harness before that change is judged.
-
----
-
-## Phase 7 — The EMS reference ceiling, and whether it biases the baseline
-
-**The finding, stated as a limitation of the METHOD rather than a bug in
-the detector.** Copernicus EMS rapid-mapping flood products are produced by
-semi-automatic extraction from satellite imagery, and that process maps
-**open-terrain standing water**, not water in dense urban fabric. At
-Paiporta the consequence is measurable, not speculative (BASELINE_REPORT_2
-§1): the EMS reference intersects only **0.0508 km² — 1.3%** of Paiporta's
-3.96 km² municipal polygon, and the identical figure appears in all three
-EMS monitoring vintages including the one closest to peak. Yet this is the
-town where the 2024 DANA killed 200+ people, with catastrophic street
-flooding. Buffering the boundary outward 0→2 km grows the clipped reference
-0.0508 → 0.593 km², because the mapped polygons cluster in the ravine and
-field corridor AROUND the town.
-
-**Therefore: a city-scale urban flood is unscoreable against this reference
-regardless of detector quality.** A perfect detector that correctly mapped
-every flooded street in Paiporta would score near-zero precision against a
-reference that maps almost nothing inside the municipal polygon. Paiporta's
-`complete_zero_zones` is not evidence about the pipeline's accuracy in
-either direction, and must never be reported as if it were.
-
-**Does this bias the baseline? Yes — and the direction matters.** Every
-scoreable event in this harness is rural or open-terrain: Kanalia
-(farmland on a drained lake basin), Insh (river floodplain and marsh). The
-one urban event is precisely the one that cannot be scored. So:
-
-1. **The measured numbers describe open-terrain flood detection only.** The
-   headline result of this session (Kanalia excl-permanent-water IoU 0.9635
-   / F1 0.9814) is a statement about farmland, not about cities.
-2. **They should not be assumed to transfer to urban events** — which is
-   where population exposure is concentrated, and therefore where the
-   life-safety consequence of a detection error is greatest. Urban flood
-   detection faces problems this event set never tests: built-up
-   false positives (the reason Phase 1b moved to MNDWI), radar layover in
-   street canyons, and water hidden under building shadow.
-3. **This is a limitation the paper must state**, not a footnote. Any claim
-   of the form "the pipeline achieves F1 0.98" is only defensible with "on
-   open-terrain flood extents scored against Copernicus EMS references"
-   attached to it.
-
-**What would fix it** (not attempted here, scoped for a future session): a
-reference source that actually maps urban flooding — flood-depth surveys,
-insurance-claim footprints, or crowdsourced/authority-verified inundation
-reports — or scoring urban events at a peri-urban AOI centred on the
-mapped corridor rather than the municipal polygon, with the reframing
-stated explicitly rather than silently changing what is measured.
