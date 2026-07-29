@@ -1914,6 +1914,17 @@ def calculate_indices(
                             "baseline_scene_count", "baseline_confidence_penalty",
                             "threshold_db", "threshold_method", "hand_max_m",
                             "masks_applied", "min_flood_patch_px",
+                            # Bidirectional detection (2026-07-29): which
+                            # signature — open-water drop vs flooded-vegetation
+                            # double-bounce rise — actually produced the
+                            # detections. Carried so a stored result can be
+                            # attributed to a mechanism after the fact.
+                            "detection_direction", "rise_threshold_db",
+                            "rise_threshold_method", "rise_bimodal_tiles",
+                            "open_water_drop_pixels",
+                            "flooded_vegetation_rise_pixels",
+                            "open_water_drop_percent",
+                            "flooded_vegetation_rise_percent",
                         )
                     },
                 }

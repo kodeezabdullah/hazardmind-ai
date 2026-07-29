@@ -64,12 +64,35 @@ BASELINE_MAX_DAYS = 60  # ~5 repeat cycles at 12 days — same season, enough de
 BASELINE_MIN_SCENES = 1  # below target -> proceed, but penalise confidence
 
 # --- Change threshold -------------------------------------------------------
-# A backscatter DROP of >= 3 dB is the conventional open-water flood
+# A backscatter DROP of >= 3 dB is the conventional OPEN-WATER flood
 # indicator. Unlike -13/-15/-18 absolute cut points this one is physically
 # justified BECAUSE it is relative: smooth water reflects energy away from
 # the sensor, so newly-flooded ground loses several dB against its own
 # pre-event value, whatever that value's absolute calibration was.
 FLOOD_DROP_DB = 3.0
+
+# A backscatter RISE of >= 3 dB is the FLOODED-VEGETATION indicator, and it
+# is a different physical mechanism, not a symmetric convenience. Where water
+# stands among emergent vegetation (flooded farmland, reed beds, inundated
+# orchards) the water surface and the vertical plant stems form a dihedral
+# corner reflector: energy bounces water->stem->sensor instead of scattering
+# away, so backscatter RISES several dB. This double-bounce enhancement is
+# well established in the SAR flood literature (Richards et al. 1987 first
+# described it over flooded forest; Hess et al. 1995 and the whole
+# ScanSAR/ALOS wetland-mapping line rest on it) and is the dominant
+# signature over agricultural floodplains — precisely the terrain a
+# drop-only detector is blind to.
+#
+# Kept as a SEPARATE constant from FLOOD_DROP_DB even though both are 3.0
+# today: they encode different physics and there is no reason a future
+# calibration pass must move them together.
+FLOOD_RISE_DB = 3.0
+
+# Detection direction. "both" enables open-water (drop) AND flooded-vegetation
+# (rise) signatures; "drop" restores the pre-2026-07-29 drop-only behaviour.
+# Exposed as a named constant so an ablation can turn one direction off
+# without editing the detector.
+DETECTION_DIRECTION = "both"
 
 # --- HAND -------------------------------------------------------------------
 # Height Above Nearest Drainage ceiling. Water cannot pond more than ~15 m
@@ -237,6 +260,8 @@ def tiled_threshold(
     valid: np.ndarray,
     tile_size: int = TILE_SIZE_PX,
     fallback_db: float = -FLOOD_DROP_DB,
+    fallback_rise_db: float = FLOOD_RISE_DB,
+    direction: str = DETECTION_DIRECTION,
 ) -> dict:
     """Hierarchical tile-based threshold estimation on the change image.
 
@@ -247,12 +272,28 @@ def tiled_threshold(
     tiles that actually contain both populations, and applies the aggregate
     to the whole scene.
 
-    Returns `{"threshold", "method", "bimodal_tiles", "tiles_tested",
-    "tile_thresholds"}`. With no bimodal tile the physically-justified
-    -3 dB criterion is used and recorded as the fallback.
+    **Two thresholds, not one, and this is the load-bearing part of the
+    bidirectional fix.** A tile whose bimodal split sits at a NEGATIVE cut
+    carries the open-water (backscatter drop) population; a tile whose split
+    sits POSITIVE carries the flooded-vegetation (double-bounce rise)
+    population. Estimating them separately — rather than taking `abs()` of a
+    single cut — matters because the two mechanisms have genuinely different
+    magnitudes, so one pooled statistic would be a physically meaningless
+    average of two unrelated distributions. Pooling by sign also keeps the
+    audit trail honest about WHICH signature a given run actually fired on.
+
+    Returns `{"threshold", "rise_threshold", "method", "bimodal_tiles",
+    "rise_bimodal_tiles", "tiles_tested", "tile_thresholds",
+    "rise_tile_thresholds"}`. With no bimodal tile in a direction, that
+    direction falls back to its physically-justified +-3 dB criterion.
     """
+    want_drop = direction in ("both", "drop")
+    want_rise = direction in ("both", "rise")
+
     h, w = change_db.shape
-    thresholds, tested = [], 0
+    thresholds: list[float] = []
+    rise_thresholds: list[float] = []
+    tested = 0
     for r0 in range(0, h, tile_size):
         for c0 in range(0, w, tile_size):
             tile = change_db[r0:r0 + tile_size, c0:c0 + tile_size]
@@ -262,25 +303,42 @@ def tiled_threshold(
                 continue
             tested += 1
             ki = _ki_on_tile(vals)
-            if ki and ki["bimodal"] and ki["threshold"] < 0:
-                # Only a NEGATIVE cut is a flood signal (backscatter drop).
-                thresholds.append(ki["threshold"])
-    if thresholds:
-        # Median across bimodal tiles — robust to one oddly-split tile.
-        thr = float(np.median(thresholds))
-        return {
-            "threshold": round(thr, 3),
-            "method": "tiled_kittler_illingworth",
-            "bimodal_tiles": len(thresholds),
-            "tiles_tested": tested,
-            "tile_thresholds": [round(t, 3) for t in thresholds[:20]],
-        }
+            if not (ki and ki["bimodal"]):
+                continue
+            if ki["threshold"] < 0:
+                thresholds.append(ki["threshold"])   # open-water drop mode
+            else:
+                rise_thresholds.append(ki["threshold"])  # double-bounce rise mode
+
+    # Median across bimodal tiles — robust to one oddly-split tile.
+    if want_drop and thresholds:
+        drop_thr = round(float(np.median(thresholds)), 3)
+        drop_method = "tiled_kittler_illingworth"
+    else:
+        drop_thr = fallback_db
+        drop_method = "fixed_3db_drop_fallback"
+
+    if want_rise and rise_thresholds:
+        rise_thr = round(float(np.median(rise_thresholds)), 3)
+        rise_method = "tiled_kittler_illingworth"
+    else:
+        rise_thr = fallback_rise_db
+        rise_method = "fixed_3db_rise_fallback"
+
     return {
-        "threshold": fallback_db,
-        "method": "fixed_3db_drop_fallback",
-        "bimodal_tiles": 0,
+        # `threshold` keeps its original name/meaning (the drop cut) so every
+        # existing reader and stored result stays interpretable.
+        "threshold": drop_thr if want_drop else None,
+        "rise_threshold": rise_thr if want_rise else None,
+        "method": drop_method if want_drop else rise_method,
+        "drop_threshold_method": drop_method if want_drop else None,
+        "rise_threshold_method": rise_method if want_rise else None,
+        "bimodal_tiles": len(thresholds),
+        "rise_bimodal_tiles": len(rise_thresholds),
         "tiles_tested": tested,
-        "tile_thresholds": [],
+        "tile_thresholds": [round(t, 3) for t in thresholds[:20]],
+        "rise_tile_thresholds": [round(t, 3) for t in rise_thresholds[:20]],
+        "direction": direction,
     }
 
 
@@ -313,6 +371,7 @@ def detect_flood_change(
     valid_mask: Optional[np.ndarray] = None,
     orbit_direction: str = "DESCENDING",
     incidence_deg: float = 39.0,
+    direction: str = DETECTION_DIRECTION,
 ) -> dict:
     """Full S1 change-detection flood map.
 
@@ -321,6 +380,14 @@ def detect_flood_change(
     relative orbit. An empty stack returns
     `status="insufficient_reference"` — deliberately NOT a fallback to
     absolute thresholding, which is the defect this whole module removes.
+
+    `direction` selects which flood signature(s) to detect:
+      - "both" (default) — open-water backscatter DROP *and*
+        flooded-vegetation double-bounce RISE. Over agricultural floodplains
+        the rise is the dominant mechanism, so a drop-only detector is
+        structurally blind there.
+      - "drop" — open water only (the pre-2026-07-29 behaviour).
+      - "rise" — flooded vegetation only. Provided for ablation.
     """
     if not pre_event_stack:
         return {
@@ -386,12 +453,33 @@ def detect_flood_change(
         valid &= ~ls
         masks_applied.append("layover_shadow")
 
-    thr = tiled_threshold(change, valid)
-    flood = valid & (change <= thr["threshold"])
+    thr = tiled_threshold(change, valid, direction=direction)
+
+    # Bidirectional detection. The two masks are built separately, then
+    # unioned — NOT collapsed into a single `abs(change) > t` test, because
+    # the drop and rise cuts are independently estimated and generally have
+    # different magnitudes (see tiled_threshold's docstring).
+    drop_flood = (
+        valid & (change <= thr["threshold"])
+        if thr["threshold"] is not None else np.zeros_like(valid)
+    )
+    rise_flood = (
+        valid & (change >= thr["rise_threshold"])
+        if thr["rise_threshold"] is not None else np.zeros_like(valid)
+    )
+    flood = drop_flood | rise_flood
     flood = morphological_cleanup(flood)
+
+    # Attribute the surviving (post-cleanup) detections back to a mechanism,
+    # so the result says which physics actually fired rather than implying
+    # both did. Morphology can only remove pixels, so intersecting is exact.
+    drop_final = flood & drop_flood
+    rise_final = flood & rise_flood
 
     valid_count = int(valid.sum())
     flood_count = int(flood.sum())
+    drop_count = int(drop_final.sum())
+    rise_count = int(rise_final.sum())
     return {
         "status": "complete",
         "flood_mask": flood,
@@ -400,6 +488,23 @@ def detect_flood_change(
         "mean_change_db": (
             round(float(np.nanmean(change[flood])), 4) if flood_count else None
         ),
+        # --- Bidirectional audit trail -----------------------------------
+        # Which mechanism produced the detection. On flooded farmland the
+        # rise (double-bounce) share should dominate; on open water the drop
+        # share should. A run reporting ~100% of one direction is a
+        # meaningful physical statement, not a formatting detail.
+        "detection_direction": direction,
+        "open_water_drop_pixels": drop_count,
+        "flooded_vegetation_rise_pixels": rise_count,
+        "open_water_drop_percent": (
+            round(100.0 * drop_count / flood_count, 2) if flood_count else None
+        ),
+        "flooded_vegetation_rise_percent": (
+            round(100.0 * rise_count / flood_count, 2) if flood_count else None
+        ),
+        "rise_threshold_db": thr["rise_threshold"],
+        "rise_threshold_method": thr["rise_threshold_method"],
+        "rise_bimodal_tiles": thr["rise_bimodal_tiles"],
         # Full audit trail — a future comparison against a different filter,
         # baseline depth or threshold needs to know exactly what ran.
         "method": "sar_change_detection_log_ratio",
