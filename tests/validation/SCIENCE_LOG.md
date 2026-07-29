@@ -31,6 +31,9 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 5a | Phase 2 + guard | 1762f26 | Kanalia S2 excl-PW | 0.9624 | 0.9863 | 0.9754 | 0.9808 | 0.792 (supports) | identical to pre-guard | **KEPT** | guard costs nothing where KI was already correct |
 | — | (discarded) cruder guard `derived_cut >= 0` | not committed | — | — | — | — | — | — | — | **DISCARDED** | rejected a legitimate land -0.45 / water +0.35 split (KI correctly cuts below zero when the water mode is broad) — measurement, not intuition, distinguished the two rules |
 
+| 6 | **Phase 3i FIRST SCORED S1** (change detection, post-peak scene) | 95aa554 | Kanalia **S1** excl-PW | **0.0083** | **0.0567** | **0.0096** | **0.0165** | 0.0 (weak) | vs S2 same event (0.9624/0.9808): worse by ~2 orders of magnitude | **RECORDED, not kept as an improvement** | first trustworthy S1 measurement (change detection ran, post-peak 2023-09-13 imagery, 100% coverage); the detector performs POORLY here — 3.22 km2 predicted vs 18.97 km2 reference, ~94% of detections outside it |
+
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
@@ -44,7 +47,8 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | Phase 1c measurement: Kanalia gate | 414 |
 | Phase 2 sweep: Kanalia + Paiporta + Insh | 1,248 |
 | Phase 2 post-fix: Insh + Kanalia | 822 |
-| **Running total** | **6,660 MB (~6.7 GB)** |
+| S1 attempts 1-5 (forced-S1 Kanalia, incl. 4 diagnostic failures) | ~13,400 |
+| **Running total** | **~20,100 MB (~20.1 GB)** |
 
 ---
 
@@ -477,6 +481,73 @@ each reason was found and fixed rather than guessed at:
 **What is still NOT established:** any S1 accuracy figure. No run has yet
 compared genuine flood-peak imagery against a pre-flood baseline.
 
+### Run 5 (`95aa554`, event `7f82f748`) — THE FIRST SCORED S1 RESULT, and it is poor
+
+All four previously-identified blockers are fixed and verified in this run:
+`index_units: dB_change_ratio` (change detection ran), `scene_age_days:
+1050.14` = **2023-09-13**, eight days AFTER Storm Daniel's 09-05/06 peak,
+100% coverage, tier 1, status `complete` (not `complete_zero_zones`).
+
+**The numbers, stated plainly:**
+
+| Metric | S1 change detection | S2 (same event, excl-PW) |
+|---|---|---|
+| IoU | **0.0083** | 0.9624 |
+| Precision | **0.0567** | 0.9863 |
+| Recall | **0.0096** | 0.9754 |
+| F1 | **0.0165** | 0.9808 |
+| Predicted area | 3.22 km² | — |
+| Reference area | 18.97 km² | — |
+| Confidence / basis | 0.0 / evidence_weak | 0.792 / evidence_supports |
+
+**This is a bad result and it should be reported as one.** The S1 path
+detected 3.2 km² of flood, of which roughly 6% overlaps the EMS reference,
+and it missed ~99% of the 19 km² that EMS mapped. Against the same event's
+S2 result (F1 0.98) it is worse by two orders of magnitude. No amount of
+framing makes that a success, and the honest headline is: **the S1 change-
+detection path now runs correctly end-to-end and produces a demonstrably
+poor flood map on this event.**
+
+**What the result does establish:** the measurement itself is finally
+trustworthy. Every field needed to believe it is present and correct —
+change detection ran (not the absolute fallback), on post-peak imagery
+(not pre-flood, not 2026), at full coverage, against a same-orbit
+pre-flood baseline. Four sessions of "cannot score S1" are over; the
+number exists and it is unflattering.
+
+**Candidate explanations, none of them verified — this needs its own
+session, not a guess here:**
+
+1. **Eight days post-peak may be too late.** Storm Daniel's floodwater in
+   the Karla basin drained over days; the EMS reference is from 09-06,
+   one day post-peak. A 09-13 acquisition may be imaging substantially
+   receded water. The next same-orbit pass was the only post-peak option
+   inside the widened window — orbit 7's 12-day revisit is the binding
+   constraint, and that is a real operational limitation of S1 for rapid
+   flood mapping, not only a harness artifact.
+2. **The -3 dB threshold may be wrong for this terrain.** Flooded
+   farmland with emergent vegetation does not always drop 3 dB; partially
+   submerged crops can even INCREASE backscatter via double-bounce. A
+   basin of flooded fields is close to the worst case for a
+   smooth-water-assumption threshold.
+3. **HAND/layover masking may be over-aggressive** on the basin's flat
+   margins, removing real flood.
+4. **The 3.2 km² that WAS detected may be largely false positive** —
+   precision 0.057 means ~94% of the detected area is outside the
+   reference.
+
+**What must NOT be concluded:** that change detection is the wrong method.
+This is n=1, on one event, at one acquisition eight days post-peak, over
+flooded agricultural land — close to the hardest case for SAR flood
+mapping. The Insh event (76% flooded fraction) remains unscored on S1 and
+would be a materially different test.
+
+**What this DOES settle, definitively:** the S2 path is dramatically
+better than the S1 path on this event (F1 0.98 vs 0.017), so the
+pipeline's existing cloud-aware preference for S2 whenever the sky is
+clear is not merely defensible — it is strongly supported by the only
+head-to-head measurement this project has ever had.
+
 ---
 
 # FINAL REPORT — science/full-pass
@@ -533,49 +604,44 @@ cannot establish calibration.
 
 ## 3. The first scored S1 result
 
-**Still not obtained — but the reason is now a fixed bug rather than an
-unknown.** Three attempts:
+**Obtained — and it is poor.** After five attempts, each blocked by a
+different real defect (four found and fixed this session), the S1 change
+-detection path finally ran on genuinely post-peak imagery and was scored:
 
-1. CDSE `InternalServerError` (infrastructure, no code reached).
-2. Completed on the real SAR path (2.2 GB, 1901s, 100% coverage) but
-   persisted `index_calibrated: False` / `index_units: dB_uncalibrated` —
-   **change detection never ran.** A grid-shape mismatch between the
-   pre- and post-event clips made the elementwise log-ratio impossible, so
-   the pipeline fell through to the absolute-threshold path that classifies
-   zero water always. Reporting that zero as "S1 found no flood" would have
-   been the most misleading possible outcome; the audit fields are what
-   prevented it. Root-caused and fixed (see Phase 3i above).
-3. **Grid-fix rerun (`2a2b616-dirty`): change detection RAN** —
-   `index_calibrated: True`, `index_units: dB_change_ratio`, confidence
-   **0.75 / evidence_supports** (up from 0.30 / weak). The grid fix worked
-   and the S1 path produced a defensible answer for the first time ever.
-   It reported zero flood — but the scene analysed has
-   `scene_age_days: 4.58` (a 2026 acquisition) while the reference event is
-   pinned to 2023-09-06, so change detection correctly found no backscatter
-   drop because there was no flood on that date. Scoring it against the
-   2023 EMS extent would measure a 2026 non-flood against a 2023 flood and
-   report a false zero as detector failure.
+| Metric | S1 change detection | S2 (same event, excl-PW) |
+|---|---|---|
+| IoU | **0.0083** | 0.9624 |
+| Precision | **0.0567** | 0.9863 |
+| Recall | **0.0096** | 0.9754 |
+| F1 | **0.0165** | 0.9808 |
 
-4. **Date-bound rerun (`4d1dabd-dirty`): correct 2023 imagery, wrong side
-   of the flood.** `scene_age_days: 1062.1` confirms the window fix worked,
-   and the same-orbit baseline resolved cleanly. But the selected
-   post-event scene is **2023-09-01** — five days BEFORE Storm Daniel's
-   09-05/06 peak — because the search window looks *backwards* from
-   `as_of`. Change detection compared pre-flood against pre-flood and
-   correctly returned ~0 dB change (`mean_index -0.0312`).
+Provenance verified before interpreting: `index_units: dB_change_ratio`
+(change detection ran, not the absolute fallback), `scene_age_days:
+1050.14` = 2023-09-13, eight days after Storm Daniel's peak, 100%
+coverage, tier 1, status `complete`.
 
-So the project has no scored S1 result. The blocker is again scene
-SELECTION, not science: the harness needs the first same-orbit
-acquisition at-or-AFTER the event peak (orbit 7 DESCENDING's next pass is
-2023-09-13), not the best-scoring scene in a backward-looking 7-day
-window. Every S1 failure this session was a different, real, identified
-defect — three of the four are fixed.
+**The honest headline: the S1 path now runs correctly and produces a
+demonstrably bad flood map on this event.** It detected 3.22 km² against
+a 18.97 km² reference, with ~94% of its detections outside the reference
+and ~99% of the reference missed. Against the same event's S2 result it
+is worse by two orders of magnitude.
 
-What DID change: the S1 path is no longer *structurally* incapable of an
-answer. The absolute `SAR_WATER_THRESHOLD_DB = -15.0` could never fire on
-a `10*log10(raw DN)` index sitting at ~+23 dB, so every S1 run classified
-zero water always. Change detection replaces it, and its validity gate was
-verified against live data rather than assumed (section 4).
+Four candidate explanations — none verified, and this needs its own
+session rather than a guess: (1) eight days post-peak may be imaging
+receded water, and orbit 7's 12-day revisit made no earlier post-peak
+pass available, which is a real operational limit of S1 for rapid flood
+mapping; (2) the −3 dB criterion suits smooth open water, while flooded
+farmland with emergent vegetation can hold or even raise backscatter via
+double-bounce; (3) HAND/layover masking may be over-aggressive on the
+basin margins; (4) the detected 3.22 km² may be largely false positive.
+
+**What must not be concluded:** that change detection is the wrong
+method. This is n=1, on one event, at a late acquisition, over flooded
+agricultural land — close to the hardest case for SAR flood mapping.
+
+**What it does settle:** S2 is dramatically better than S1 on this event,
+so the pipeline's existing preference for S2 whenever the sky is clear is
+now supported by the only head-to-head measurement the project has.
 
 ## 4. Verdict: is calibration still needed after change detection?
 
@@ -626,19 +692,19 @@ Closed by making the format choice deterministic and logged.
 
 ## 7. Total download cost
 
-**~6.7 GB** across 13 harness runs (S2 events ~410 MB each; the S1
+**~20.1 GB** across 18 harness runs (S2 events ~410 MB each; the S1
 attempts are excluded as they never completed a download cycle). Detailed
 per-run table above.
 
 ## 8. What remains unaddressed, ranked
 
-1. **No scored S1 result** — the method is PROVEN to run end-to-end in
-   production on real 2023 imagery (`dB_change_ratio`, correct same-orbit
-   baseline). What is missing is a post-event scene from AFTER the flood
-   peak: the harness window looks backwards from `as_of`, so it selected
-   2023-09-01 for a 09-05/06 event. Fix: select the first same-orbit
-   acquisition at-or-after peak (2023-09-13 here). Bounded harness change,
-   highest priority.
+1. **S1 accuracy is poor and unexplained** (IoU 0.0083 / F1 0.0165 vs
+   S2's 0.9808 on the same event). The measurement is now trustworthy;
+   the cause is not established. Ranked hypotheses in the Run 5 section —
+   most likely the 8-day-post-peak acquisition (orbit revisit constraint)
+   and/or the −3 dB criterion being wrong for flooded vegetated farmland.
+   Needs a dedicated session; do NOT ship S1 as a flood detector on this
+   evidence.
 2. **Confidence calibration is unvalidated** — n=1 scoreable point. Needs
    more scoreable events before any calibration claim is defensible.
 3. **No urban-flood reference** — the EMS ceiling (Phase 7) means every
