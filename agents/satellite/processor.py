@@ -278,7 +278,13 @@ def memory_report() -> dict:
 # TOA and L2A surface reflectance, so the 0.3/0.5 NDWI and 0.2 NDVI thresholds
 # were observed against L1C and REQUIRE REVALIDATION against L2A.
 _S2_BANDS = {
-    "flood": ["B03", "B08", "B11", "TCI", "SCL"],
+    # B04 (red) added 2026-07-29 for Phase 4's IBI built-up layer: SAVI needs
+    # red, and IBI needs SAVI to avoid NDBI's bare-soil-as-built-up error —
+    # the error class that matters most in semi-arid Pakistan. B04 is a native
+    # 10 m band (~130 MB), so this is one extra band on the flood path, not a
+    # new download strategy. Without it `compute_ibi` returns None rather than
+    # substituting NDBI (see built_up.py's module docstring).
+    "flood": ["B03", "B04", "B08", "B11", "TCI", "SCL"],
     "earthquake": ["B02", "B04", "B08", "TCI", "SCL"],
     "landslide": ["B03", "B04", "B08", "TCI", "SCL"],
 }
@@ -1785,6 +1791,20 @@ def clip_to_polygon(
 # --------------------------------------------------------------------------- #
 # Step 7E: spectral / backscatter indices + classification
 # --------------------------------------------------------------------------- #
+def _pixel_area_km2(clipped: dict) -> float:
+    """Ground area of one pixel, in km2, from the clip's own transform.
+
+    Derived rather than assumed: the clip is in a projected (UTM) CRS whose
+    units are metres, so |a*e| is the pixel area — but the resolution differs
+    between S1 (10 m) and a resampled S2 stack, and hardcoding 10 m would
+    silently mis-scale every derived area on any other grid.
+    """
+    t = clipped.get("transform")
+    if t is None:
+        return 0.0001  # 10 m x 10 m fallback, in km2
+    return abs(t.a * t.e) / 1e6
+
+
 def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     """Element-wise num/den, with 0 where the denominator is ~0."""
     out = np.full_like(num, np.nan, dtype="float32")
@@ -2202,11 +2222,50 @@ def calculate_indices(
         mean_value,
         class_counts,
     )
+
+    # Phase 4 (science/detection-pass): built-up layer via IBI (Xu 2008).
+    # Two purposes the pipeline previously served for neither: it marks where
+    # the water index deserves LESS confidence (built-up is the classic
+    # water-index false positive), and it is the exposure base that
+    # distinguishes flooded streets from flooded farmland. Best-effort — a
+    # missing band returns None with a named reason, never a substituted index
+    # under the IBI name (see built_up.py).
+    built_up = None
+    flood_builtup = None
+    try:
+        from built_up import compute_ibi, flood_builtup_overlap
+
+        built_up = compute_ibi(bands, valid)
+        if built_up is not None:
+            affected_now = (classification >= 1) & (classification != NODATA_CLASS)
+            px_km2 = _pixel_area_km2(clipped)
+            flood_builtup = flood_builtup_overlap(
+                affected_now, built_up["built_up_mask"], px_km2
+            )
+            logger.info(
+                "IBI built-up: %.2f%% of valid pixels; flood over built-up "
+                "%.4f km2 (%.2f%% of detected flood)",
+                built_up["built_up_percent"],
+                flood_builtup.get("flood_over_built_up_km2") or 0.0,
+                flood_builtup.get("flood_over_built_up_percent") or 0.0,
+            )
+    except Exception as exc:  # noqa: BLE001 — exposure layer is optional
+        logger.warning("Built-up (IBI) layer unavailable (%s)", exc)
+
     return {
         "index_type": index_type,
         "scheme_key": scheme_key,
         "array": index,
         "classification_array": classification,
+        # Phase 4 — built-up/exposure. `built_up_available` is explicit so a
+        # consumer can tell "no built-up here" from "could not be computed".
+        "built_up_available": built_up is not None,
+        "built_up_percent": (built_up or {}).get("built_up_percent"),
+        "built_up_area_km2": (flood_builtup or {}).get("built_up_area_km2"),
+        "built_up_threshold": (built_up or {}).get("threshold"),
+        "built_up_formula": (built_up or {}).get("formula"),
+        "flood_over_built_up_km2": (flood_builtup or {}).get("flood_over_built_up_km2"),
+        "flood_over_built_up_percent": (flood_builtup or {}).get("flood_over_built_up_percent"),
         "water_percent": water_percent,
         "mean_value": mean_value,
         "affected_mean_index": affected_mean_index,
@@ -2949,6 +3008,16 @@ def _render_clip(
         # renderer maps fields explicitly; anything unlisted is dropped).
         "signal_detectable": indices.get("signal_detectable"),
         "deep_tail_fraction": indices.get("deep_tail_fraction"),
+        # Phase 4 — built-up/exposure. Carried explicitly for the same reason
+        # signal_detectable is: this renderer maps fields by name, so anything
+        # unlisted is silently dropped before it can reach a consumer.
+        "built_up_available": indices.get("built_up_available"),
+        "built_up_percent": indices.get("built_up_percent"),
+        "built_up_area_km2": indices.get("built_up_area_km2"),
+        "built_up_threshold": indices.get("built_up_threshold"),
+        "built_up_formula": indices.get("built_up_formula"),
+        "flood_over_built_up_km2": indices.get("flood_over_built_up_km2"),
+        "flood_over_built_up_percent": indices.get("flood_over_built_up_percent"),
         "threshold_method": indices.get("threshold_method"),
         "derived_threshold": indices.get("derived_threshold"),
         "affected_cut": indices.get("affected_cut"),

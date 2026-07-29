@@ -1137,6 +1137,16 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             # scene could not answer the question".
             "signal_detectable": result.get("signal_detectable"),
             "deep_tail_fraction": result.get("deep_tail_fraction"),
+            # Phase 4 — built-up exposure. `flood_over_built_up_*` is the
+            # figure that distinguishes flooded streets from flooded farmland,
+            # which the pipeline previously could not express at all.
+            "built_up_available": result.get("built_up_available"),
+            "built_up_percent": result.get("built_up_percent"),
+            "built_up_area_km2": result.get("built_up_area_km2"),
+            "built_up_threshold": result.get("built_up_threshold"),
+            "built_up_formula": result.get("built_up_formula"),
+            "flood_over_built_up_km2": result.get("flood_over_built_up_km2"),
+            "flood_over_built_up_percent": result.get("flood_over_built_up_percent"),
             # Phase 2 — adaptive-threshold audit trail (KI cut / method /
             # diagnostics; any run's classification is re-derivable).
             "threshold_method": result.get("threshold_method"),
