@@ -508,6 +508,113 @@ async def analyze_flood(
     }
 
 
+
+async def fetch_shakemap_pager(event_id: str, timeout_s: int = 15) -> dict:
+    """Phase 5a (science/full-pass): USGS ShakeMap MMI + PAGER loss estimates.
+
+    Magnitude and distance are a crude proxy for what actually harms people:
+    GROUND SHAKING at the site, which depends on depth, rupture geometry and
+    local site conditions. USGS ShakeMap models exactly that and publishes
+    `mmi` (Modified Mercalli Intensity) as a per-event maximum; PAGER
+    publishes modelled fatality and economic-loss alert levels from the same
+    shaking field crossed with exposure.
+
+    Both are far better grounded than this codebase's own magnitude cut
+    points, and neither needs imagery. Fetched from the event's detail
+    endpoint, which lists the products USGS actually produced for it.
+
+    Best-effort: an event with no ShakeMap (most small quakes have none)
+    returns `available: False` with the reason — never a fabricated MMI.
+    """
+    if not event_id:
+        return {"available": False, "reason": "no usgs event id"}
+    url = f"{USGS_API}/query"
+    params = {"format": "geojson", "eventid": event_id}
+    started = datetime.now(timezone.utc)
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as response:
+                status = response.status
+                response.raise_for_status()
+                data = await _read_json(response)
+    except Exception as exc:  # noqa: BLE001 — best-effort enrichment
+        return {
+            "available": False,
+            "reason": f"detail fetch failed: {exc}",
+            "query": {"url": url, "params": params},
+        }
+
+    props = (data or {}).get("properties", {}) or {}
+    products = props.get("products", {}) or {}
+    latency_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1)
+
+    out = {
+        "available": False,
+        "mmi": None,
+        "mmi_source": None,
+        "pager_alert": None,
+        "fatalities_alert": None,
+        "economic_alert": None,
+        "query": {"url": url, "params": params, "http_status": status,
+                  "latency_ms": latency_ms},
+    }
+
+    # ShakeMap: maximum modelled intensity for the event.
+    shakemap = (products.get("shakemap") or [{}])[0]
+    sm_props = (shakemap or {}).get("properties", {}) or {}
+    mmi = sm_props.get("maxmmi") or props.get("mmi")
+    if mmi is not None:
+        try:
+            out["mmi"] = float(mmi)
+            out["mmi_source"] = "usgs_shakemap" if sm_props.get("maxmmi") else "usgs_event_mmi"
+            out["available"] = True
+        except (TypeError, ValueError):
+            pass
+
+    # PAGER: modelled fatality/economic alert levels (green/yellow/orange/red).
+    pager = (products.get("losspager") or [{}])[0]
+    pg_props = (pager or {}).get("properties", {}) or {}
+    if pg_props:
+        out["pager_alert"] = pg_props.get("alertlevel") or props.get("alert")
+        out["fatalities_alert"] = pg_props.get("fatalitylevel")
+        out["economic_alert"] = pg_props.get("economiclevel")
+        if out["pager_alert"]:
+            out["available"] = True
+    elif props.get("alert"):
+        out["pager_alert"] = props.get("alert")
+        out["available"] = True
+
+    if not out["available"]:
+        out["reason"] = "no shakemap/pager product published for this event"
+    return out
+
+
+def mmi_to_risk(mmi: float) -> tuple:
+    """Map ShakeMap MMI to this pipeline's risk bands.
+
+    UNLIKE the magnitude cut points, these ARE grounded in a named,
+    published scale: the Modified Mercalli Intensity scale's own damage
+    descriptions, as summarised in USGS's standard MMI/PGA-to-damage table.
+      MMI >= VIII  — "severe" shaking, considerable damage even to
+                     well-built structures -> CRITICAL
+      MMI >= VI    — "strong" shaking, felt by all, slight-to-moderate
+                     damage begins -> HIGH
+      MMI >= IV    — "light" shaking, widely felt, damage unlikely -> MEDIUM
+      below IV     — weak/not felt -> LOW
+    The MAPPING of an intensity band onto this system's four risk labels is
+    still an engineering choice, but the intensity thresholds themselves are
+    the scale's own boundaries, not round numbers picked by feel.
+    """
+    if mmi >= 8.0:
+        return "CRITICAL", 0.9, "MMI>=VIII (severe shaking, considerable damage)"
+    if mmi >= 6.0:
+        return "HIGH", 0.85, "MMI>=VI (strong shaking, damage begins)"
+    if mmi >= 4.0:
+        return "MEDIUM", 0.8, "MMI>=IV (light shaking, widely felt)"
+    return "LOW", 0.85, "MMI<IV (weak/not felt)"
+
+
 async def analyze_earthquake(bbox, usgs_data) -> dict:
     magnitudes = [
         feature.get("properties", {}).get("mag")
@@ -622,7 +729,33 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     # sound; the exact values are unvalidated and no intensity scale (MMI,
     # EMS-98) is actually computed. They are now applied to the
     # DISTANCE-DECAYED effective magnitude, not the raw maximum.
-    if effective_mag >= 7.0:
+    # Phase 5a: ShakeMap MMI SUPERSEDES the magnitude heuristic when USGS
+    # published one. Modelled shaking intensity at the site accounts for
+    # depth, rupture geometry and local site conditions — everything a
+    # magnitude-plus-distance proxy cannot see — and its bands come from the
+    # Modified Mercalli scale's own damage descriptions rather than round
+    # numbers chosen by feel. The heuristic remains the fallback for the
+    # majority of (small) events that have no ShakeMap product.
+    shakemap = {}
+    if driving and driving.get("usgs_event_id"):
+        try:
+            shakemap = await fetch_shakemap_pager(driving["usgs_event_id"])
+        except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+            shakemap = {"available": False, "reason": f"fetch raised: {exc}"}
+
+    verdict_basis = "magnitude_heuristic"
+    if shakemap.get("available") and shakemap.get("mmi") is not None:
+        risk, confidence, mmi_band = mmi_to_risk(float(shakemap["mmi"]))
+        liq = {"CRITICAL": 0.8, "HIGH": 0.5, "MEDIUM": 0.3, "LOW": 0.1}[risk]
+        verdict_basis = "usgs_shakemap_mmi"
+        threshold_applied = (
+            f"{mmi_band} from USGS ShakeMap (mmi={shakemap['mmi']}, "
+            f"source={shakemap.get('mmi_source')}, event="
+            f"{driving['usgs_event_id']}); supersedes the magnitude heuristic "
+            f"(effective_mag={effective_mag}) — MMI bands are the Modified "
+            "Mercalli scale's own damage boundaries"
+        )
+    elif effective_mag >= 7.0:
         risk, confidence, liq = "CRITICAL", 0.85, 0.8
         band = "effective_magnitude>=7.0 -> CRITICAL"
     elif effective_mag >= 5.5:
@@ -634,7 +767,8 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
     else:
         risk, confidence, liq = "LOW", 0.85, 0.1
         band = "effective_magnitude<4.0 -> LOW"
-    threshold_applied = (
+    if verdict_basis == "magnitude_heuristic":
+        threshold_applied = (
         f"{band} (effective_mag={effective_mag}, raw_max_mag={max_mag}"
         + (
             f", driven by {driving['usgs_event_id']} M{driving['magnitude']}"
@@ -642,7 +776,7 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
             if driving else ""
         )
         + "; distance decay M-1.5*log10(R/10), engineering judgement)"
-    )
+        )
 
     # events_returned: capped at the 20 LARGEST-by-magnitude events, with the
     # true total count recorded separately, so a seismically busy region
@@ -713,6 +847,10 @@ async def analyze_earthquake(bbox, usgs_data) -> dict:
                 "saturation are not from a named GMPE, and no site or depth "
                 "term is applied"
             ),
+            # Phase 5a: which basis actually decided the verdict, and the
+            # ShakeMap/PAGER evidence behind it when one was available.
+            "verdict_basis": verdict_basis,
+            "shakemap": shakemap,
             "usgs_source": usgs_data.get("source"),
             "usgs_fetch_failed": usgs_fetch_failed,
             "usgs_error": usgs_data.get("error"),

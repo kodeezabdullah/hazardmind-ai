@@ -188,6 +188,70 @@ def test_risk_polygons_points_at_real_source():
         bad("geometry helper returned something for an unreachable URL")
 
 
+def test_shakemap_supersedes_magnitude_heuristic():
+    """Phase 5a: when USGS published a ShakeMap, modelled MMI decides the
+    verdict instead of the magnitude heuristic — and the basis is recorded."""
+    bbox = [73.0, 33.0, 73.2, 33.2]
+    data = {"earthquakes": [_quake(4.2, 73.1, 33.1, "us_shake")], "count": 1,
+            "source": "usgs"}
+
+    async def _fake_shakemap(event_id, timeout_s=15):
+        # A shallow M4.2 right under the city can shake hard (MMI VII)
+        # even though the magnitude heuristic would call it MEDIUM.
+        return {"available": True, "mmi": 7.2, "mmi_source": "usgs_shakemap",
+                "pager_alert": "yellow", "fatalities_alert": "yellow",
+                "economic_alert": "green"}
+
+    orig = analyzer.fetch_shakemap_pager
+    analyzer.fetch_shakemap_pager = _fake_shakemap
+    try:
+        res = asyncio.run(analyzer.analyze_earthquake(bbox, data))
+    finally:
+        analyzer.fetch_shakemap_pager = orig
+
+    eb = res["evidence_basis"]
+    if eb.get("verdict_basis") == "usgs_shakemap_mmi" and res["risk"] == "HIGH":
+        ok(f"ShakeMap MMI 7.2 drove the verdict to HIGH (magnitude heuristic "
+           f"would have said MEDIUM at M4.2)")
+    else:
+        bad(f"ShakeMap did not supersede: basis={eb.get('verdict_basis')} "
+            f"risk={res['risk']}")
+    if "Modified Mercalli" in res["diagnostics"]["threshold_applied"]:
+        ok("threshold string cites the Modified Mercalli scale — a REAL named "
+           "scale, unlike the magnitude cut points")
+    else:
+        bad(f"threshold string: {res['diagnostics']['threshold_applied']}")
+    if eb.get("shakemap", {}).get("pager_alert") == "yellow":
+        ok("PAGER loss alert carried into the evidence for the impact agent")
+    else:
+        bad(f"PAGER not carried: {eb.get('shakemap')}")
+
+
+def test_no_shakemap_falls_back_to_heuristic():
+    bbox = [73.0, 33.0, 73.2, 33.2]
+    data = {"earthquakes": [_quake(6.2, 73.1, 33.1, "us_nosm")], "count": 1,
+            "source": "usgs"}
+
+    async def _none(event_id, timeout_s=15):
+        return {"available": False, "reason": "no shakemap product"}
+
+    orig = analyzer.fetch_shakemap_pager
+    analyzer.fetch_shakemap_pager = _none
+    try:
+        res = asyncio.run(analyzer.analyze_earthquake(bbox, data))
+    finally:
+        analyzer.fetch_shakemap_pager = orig
+
+    if res["evidence_basis"].get("verdict_basis") == "magnitude_heuristic":
+        ok("no ShakeMap -> magnitude heuristic, basis labelled honestly")
+    else:
+        bad(f"basis wrong: {res['evidence_basis'].get('verdict_basis')}")
+    if "engineering judgement" in res["diagnostics"]["threshold_applied"]:
+        ok("fallback still states its thresholds are engineering judgement")
+    else:
+        bad(f"fallback string: {res['diagnostics']['threshold_applied']}")
+
+
 if __name__ == "__main__":
     print("=" * 64)
     print("PHASES 4b/5b/5c — HAZARD SCIENCE (p90 slope, distance decay)")
@@ -198,6 +262,8 @@ if __name__ == "__main__":
     test_driving_event_named_with_magtype()
     test_threshold_strings_are_honest()
     test_risk_polygons_points_at_real_source()
+    test_shakemap_supersedes_magnitude_heuristic()
+    test_no_shakemap_falls_back_to_heuristic()
     print("=" * 64)
     print(f"RESULT: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 64)
