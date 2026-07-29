@@ -1367,3 +1367,59 @@ products are per-building too.
 1.4-day pre-event baseline; not validated, because every available reference
 maps damage per-building at a granularity Sentinel-1 cannot resolve — a
 stated limit of the sensor, documented in the detector's own output."
+
+## EARTHQUAKE, THIRD ATTEMPT — Nepal 2015 Gorkha (EMSR125): also unusable
+
+Gorkha was the best remaining candidate on paper: M7.8, whole villages
+levelled (so damage might be mapped as CONTIGUOUS AREA rather than
+per-building), and the S1 timing is excellent —
+
+    Kathmandu      orbit 121 DESC  pre 2015-04-24 (-1.3 d) -> post 2015-05-06
+    Sindhupalchok  orbit 121 DESC  pre 2015-04-24 (-1.3 d) -> post 2015-05-06
+    Gorkha/Barpak  orbit  85 ASC   pre 2015-04-21 (-3.7 d) -> post 2015-05-03
+
+All three TIGHT. Timing is not the obstacle here.
+
+**But EMSR125 publishes NO graded damage POLYGONS.** Its damage grading is
+entirely POINT geometry:
+
+    Gorkha points_of_interest_grading   n=5054  Not Affected 4638,
+                                        Unknown 397, Possibly Affected 14,
+                                        Totally Affected 5
+    Kathmandu utilities_point_grading   n=28    Not Affected 25,
+                                        Negligible to slight 3
+
+The only polygon layers are the AOI outline, general-information and
+transportation footprints — and every one of those is graded "Not Affected".
+There are **5 "Totally Affected" features in the entire Gorkha product**, all
+zero-area points.
+
+**Verdict: not scoreable.** A 10 m SAR damage mask cannot be measured against
+5 zero-area points, and there is no areal damage layer to compare extents
+with.
+
+## Earthquake validation: THREE attempts, THREE independent obstacles
+
+| Attempt | Timing | Reference | Blocker |
+|---|---|---|---|
+| Palu (EMSR317) | 112-day lead | 9,457 graded points, 20.8 km2 | seasonal confound; no tight same-orbit pair exists at that AOI |
+| Amatrice (EMSR177) | **1.4 d — good** | 472 polygons, 0.10 km2 | PER-BUILDING granularity (median 143 m2 vs a 100 m2 pixel) |
+| Gorkha (EMSR125) | **1.3 d — good** | 5,054 points | NO areal damage layer at all; 5 "Totally Affected" points |
+
+The pattern across all three is consistent and now well-evidenced: **EMS
+grading products are produced from sub-metre VHR imagery for per-structure
+assessment.** That is the wrong granularity for a 10 m SAR detector by
+roughly two orders of magnitude in area, and it is not fixed by choosing a
+better-timed event — Amatrice and Gorkha both had excellent timing and
+failed on granularity instead.
+
+**This is now a well-supported negative finding rather than an untested
+assumption**, and it is the honest statement for the paper: earthquake damage
+detection is implemented and verified end-to-end on real dual-pol
+Sentinel-1, but no available public reference operates at a granularity
+Sentinel-1 can resolve, so no accuracy figure is claimed.
+
+**What would actually close it** (out of scope here): a reference mapping
+damage as contiguous district-scale extent at >= ~0.01 km2 per feature.
+Candidates are national-agency damage maps or research inventories derived
+FROM medium-resolution imagery, not EMS rapid-mapping grading products.
