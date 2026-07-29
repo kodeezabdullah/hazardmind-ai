@@ -113,6 +113,48 @@ def _normalise_satellite_payload(payload: dict, event_id: str) -> dict:
     }
 
 
+def _hazard_geometry_geojson(result: dict) -> str | None:
+    """GeoJSON string of the satellite-derived flood extent, or None.
+
+    Phase 5d: sources `hazard_zones.geometry` from the polygons the satellite
+    agent already vectorised and uploaded to R2. Reads the geojson_url the
+    satellite payload carries, dissolves the feature collection to a single
+    geometry, and returns it as a GeoJSON string for PostGIS
+    (ST_GeomFromGeoJSON). Best-effort by design: an unreachable R2 object or
+    an empty/zero-zone result returns None so the column stays NULL — an
+    absent geometry is honest, a fabricated one is not. Never raises.
+    """
+    url = (result.get("satellite_data") or {}).get("geojson_url") or result.get(
+        "geojson_url"
+    )
+    if not url:
+        return None
+    try:
+        import requests
+        from shapely.geometry import mapping, shape
+        from shapely.ops import unary_union
+
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        fc = resp.json()
+        geoms = [
+            shape(f["geometry"])
+            for f in (fc.get("features") or [])
+            if f.get("geometry")
+        ]
+        if not geoms:
+            return None
+        merged = unary_union(geoms)
+        if merged.is_empty:
+            return None
+        return json.dumps(mapping(merged))
+    except Exception as exc:  # noqa: BLE001 — geometry is optional, run is not
+        # This module logs via print (no logger configured here); keep the
+        # failure visible rather than silently returning NULL geometry.
+        print(f"[hazard] Could not source hazard geometry from {url}: {exc}")
+        return None
+
+
 async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> None:
     """Write hazard results to the hazard_zones table (matches shared/db/schema.sql).
 
@@ -168,6 +210,23 @@ async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> N
             }
         )
 
+    # Phase 5d (science/full-pass): hazard_zones.geometry is a real,
+    # GIST-indexed PostGIS column that until now had NO WRITER ANYWHERE —
+    # a documented capability that did not exist, returning {} on every run.
+    # The satellite agent already vectorises the hazard extent and publishes
+    # it to R2; that geometry is the correct content for this column, so it
+    # is fetched and written rather than the claim being deleted.
+    #
+    # It applies to the FLOOD row only, and deliberately so: the satellite
+    # polygons are derived from the water index (MNDWI/SAR change), which is
+    # a flood observation. Writing the same polygons to the earthquake and
+    # landslide rows would attach a flood-derived extent to hazards that
+    # never consumed satellite output at all (confirmed system-wide in
+    # SYSTEM_ANALYSIS.md D.1) — a false-provenance claim. Those rows keep
+    # geometry NULL, which is honest: no per-hazard extent is computed for
+    # them anywhere in this pipeline.
+    flood_geometry = _hazard_geometry_geojson(result)
+
     rows = [
         {
             "hazard_type": "flood",
@@ -178,6 +237,7 @@ async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> N
             "landslide_probability": None,
             "confirmed_by": _confirmed_by("flood"),
             "diagnostics": _diagnostics("flood"),
+            "geometry_geojson": flood_geometry,
         },
         {
             "hazard_type": "earthquake",
@@ -211,8 +271,12 @@ async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> N
                     event_id, risk_level, hazard_type, severity,
                     confirmed_by, flood_depth_estimate, earthquake_mmi,
                     landslide_probability, overall_confidence, diagnostics,
-                    created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    created_at, geometry
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                          CASE WHEN $12::text IS NULL THEN NULL
+                               ELSE ST_Multi(ST_CollectionExtract(
+                                   ST_MakeValid(ST_GeomFromGeoJSON($12::text)), 3))
+                          END)
                 ON CONFLICT (event_id, hazard_type) DO UPDATE SET
                     risk_level = EXCLUDED.risk_level,
                     severity = EXCLUDED.severity,
@@ -222,7 +286,8 @@ async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> N
                     landslide_probability = EXCLUDED.landslide_probability,
                     overall_confidence = EXCLUDED.overall_confidence,
                     diagnostics = EXCLUDED.diagnostics,
-                    created_at = EXCLUDED.created_at
+                    created_at = EXCLUDED.created_at,
+                    geometry = EXCLUDED.geometry
                 """,
                 result["event_id"],
                 row["risk_level"],
@@ -235,6 +300,7 @@ async def write_to_db(result: dict, primary_hazard_risk: str | None = None) -> N
                 row["overall_confidence"],
                 row["diagnostics"],
                 created_at,
+                row.get("geometry_geojson"),
             )
     finally:
         await conn.close()

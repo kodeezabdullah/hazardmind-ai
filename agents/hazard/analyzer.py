@@ -989,7 +989,25 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
         },
         "satellite_confidence": satellite_confidence,
         "confidence_cap_applied": confidence_cap_applied,
-        "risk_polygons": {},
+        # Phase 5d (science/full-pass): `risk_polygons` was documented as a
+        # PostGIS capability but was hardcoded {} on every run — a feature
+        # that did not exist. This agent does not compute its own polygons
+        # (it consumes scalar index/area figures, not rasters), so rather
+        # than inventing geometry here it now points at the REAL source: the
+        # satellite agent's vectorised extent, which agent.write_to_db reads
+        # and writes into hazard_zones.geometry (the GIST-indexed column that
+        # previously had no writer anywhere).
+        "risk_polygons": {
+            "source": "satellite_vectorized_extent",
+            "geojson_url": (satellite_data.get("artifacts") or {}).get("geojson_url"),
+            "written_to": "hazard_zones.geometry (flood row only)",
+            "note": (
+                "Hazard does not compute polygons itself; earthquake/landslide "
+                "rows keep geometry NULL because no per-hazard extent is "
+                "computed for them anywhere in this pipeline."
+            ),
+        },
+        "geojson_url": (satellite_data.get("artifacts") or {}).get("geojson_url"),
         # Evidence provenance for earthquake/landslide (see analyze_earthquake/
         # analyze_landslide) — lets a downstream reader tell a genuine
         # no-seismicity/flat-terrain verdict apart from a fetch failure that

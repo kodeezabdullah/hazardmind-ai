@@ -158,6 +158,36 @@ def test_threshold_strings_are_honest():
         bad(f"low-slope string: {ls_low['diagnostics']['threshold_applied']}")
 
 
+def test_risk_polygons_points_at_real_source():
+    """Phase 5d: risk_polygons must stop claiming {} and name the real
+    source; hazard_zones.geometry gets a writer for the flood row only."""
+    import agent as hazard_agent
+
+    sample = {
+        "boundaries": {"bbox": [73.0, 33.0, 73.2, 33.2], "risk_cities": ["X"]},
+        "analysis": {"affected_area_km2": 12.0, "mean_value": 0.2},
+        "artifacts": {"geojson_url": "https://example.invalid/zones.geojson"},
+        "satellite": {"type": "sentinel-2"},
+    }
+    res = asyncio.run(analyzer.run_parallel_analysis(sample))
+    rp = res.get("risk_polygons")
+    if isinstance(rp, dict) and rp.get("geojson_url") == sample["artifacts"]["geojson_url"]:
+        ok("risk_polygons names the real satellite geojson source (not {})")
+    else:
+        bad(f"risk_polygons still empty/wrong: {rp}")
+    if res.get("geojson_url") == sample["artifacts"]["geojson_url"]:
+        ok("geojson_url survives into the result write_to_db reads")
+    else:
+        bad(f"geojson_url did not survive: {res.get('geojson_url')}")
+    # Unreachable URL -> None (NULL geometry), never a raise, never fabricated.
+    if hazard_agent._hazard_geometry_geojson(
+        {"geojson_url": "http://127.0.0.1:9/nope.json"}
+    ) is None:
+        ok("unreachable geometry source -> NULL, not a fabricated polygon")
+    else:
+        bad("geometry helper returned something for an unreachable URL")
+
+
 if __name__ == "__main__":
     print("=" * 64)
     print("PHASES 4b/5b/5c — HAZARD SCIENCE (p90 slope, distance decay)")
@@ -167,6 +197,7 @@ if __name__ == "__main__":
     test_distance_decay_separates_near_and_far()
     test_driving_event_named_with_magtype()
     test_threshold_strings_are_honest()
+    test_risk_polygons_points_at_real_source()
     print("=" * 64)
     print(f"RESULT: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 64)
