@@ -1803,7 +1803,12 @@ def _classify(index: np.ndarray, valid: np.ndarray, scheme: dict) -> np.ndarray:
 
 
 def calculate_indices(
-    clipped: dict, satellite_type: str, disaster_type: str
+    clipped: dict,
+    satellite_type: str,
+    disaster_type: str,
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
+    orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
     """Compute the disaster-appropriate index and a classification mask.
 
@@ -1837,6 +1842,89 @@ def calculate_indices(
         if vv is None:
             logger.error("Sentinel-1 VV band missing; cannot compute SAR index")
             return None
+        # Phase 3 (science/full-pass): when same-relative-orbit pre-event
+        # scenes are supplied, the SAR flood answer comes from CHANGE
+        # DETECTION, not an absolute threshold. The absolute path below is
+        # structurally incapable of producing a flood answer on this
+        # codebase's uncalibrated index (10*log10(raw DN) is ~+23 dB;
+        # SAR_WATER_THRESHOLD_DB is -15 dB in calibrated-sigma0 space, so it
+        # can never fire) — see sar_change_detection.py for the verified
+        # calibration-cancellation argument.
+        if pre_event_vv:
+            try:
+                from sar_change_detection import detect_flood_change
+
+                cd = detect_flood_change(
+                    vv,
+                    pre_event_vv,
+                    dem=dem,
+                    valid_mask=mask,
+                    orbit_direction=orbit_direction or "DESCENDING",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SAR change detection failed (%s)", exc)
+                cd = None
+            if cd and cd.get("status") == "complete":
+                index = cd["change_db"]
+                classification = np.full(index.shape, NODATA_CLASS, dtype="uint8")
+                valid_cd = np.isfinite(index)
+                if mask is not None:
+                    valid_cd = valid_cd & mask
+                classification[valid_cd] = 0
+                classification[cd["flood_mask"]] = 2  # "water" severity band
+                valid_count = int(valid_cd.sum())
+                affected_count = int(cd["flood_mask"].sum())
+                return {
+                    "index_type": "SAR_CHANGE",
+                    "scheme_key": "SAR",
+                    "array": index,
+                    "classification_array": classification,
+                    "water_percent": cd["water_percent"],
+                    "mean_value": (
+                        round(float(np.nanmean(index[valid_cd])), 4)
+                        if valid_count else 0.0
+                    ),
+                    "affected_mean_index": cd["mean_change_db"],
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": cd["threshold_method"],
+                    "derived_threshold": cd["threshold_db"],
+                    "affected_cut": cd["threshold_db"],
+                    "ki_diagnostics": {
+                        "bimodal_tiles": cd["bimodal_tiles"],
+                        "tiles_tested": cd["tiles_tested"],
+                    },
+                    "ki_fallback_reason": None,
+                    "threshold_used": cd["threshold_db"],
+                    "class_counts": (
+                        {"water": round(100.0 * affected_count / valid_count, 2)}
+                        if valid_count else {}
+                    ),
+                    # The RATIO is calibration-independent (verified against
+                    # live CDSE LUTs), so unlike the absolute path this IS a
+                    # defensible measurement.
+                    "index_calibrated": True,
+                    "index_units": "dB_change_ratio",
+                    "sar_change_detection": {
+                        k: cd[k] for k in (
+                            "method", "speckle_filter", "speckle_window", "enl",
+                            "baseline_scene_count", "baseline_confidence_penalty",
+                            "threshold_db", "threshold_method", "hand_max_m",
+                            "masks_applied", "min_flood_patch_px",
+                        )
+                    },
+                }
+            if cd and cd.get("status") == "insufficient_reference":
+                logger.warning(
+                    "SAR change detection unavailable: %s", cd.get("reason")
+                )
+        # Absolute fallback (no same-orbit reference). Retained ONLY because
+        # the surrounding pipeline still expects an index array; it is
+        # explicitly labelled uncalibrated and its flood verdict must not be
+        # trusted in either direction (root CLAUDE.md's standing warning).
         # GRD products are linear power; convert to dB. Guard non-positive.
         index = np.full_like(vv, np.nan, dtype="float32")
         finite = np.isfinite(vv) & (vv > 0)
