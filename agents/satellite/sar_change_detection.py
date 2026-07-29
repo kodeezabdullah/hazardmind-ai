@@ -335,7 +335,36 @@ def detect_flood_change(
             "flood_mask": None,
         }
 
-    base = build_baseline([refined_lee(s) for s in pre_event_stack])
+    # Shape contract, enforced explicitly (the first live forced-S1 run
+    # failed here with a bare numpy broadcast error, which the caller then
+    # swallowed into the unusable absolute-threshold fallback). Mismatched
+    # references are dropped with a named reason rather than allowed to
+    # abort the whole method: a 2-scene aligned baseline is worth more than
+    # no change detection at all.
+    post_shape = np.asarray(post_vv).shape
+    aligned, dropped = [], 0
+    for scene in pre_event_stack:
+        arr = np.asarray(scene)
+        if arr.shape == post_shape:
+            aligned.append(arr)
+        else:
+            dropped += 1
+            logger.warning(
+                "Pre-event scene shape %s != post-event %s — excluded from "
+                "the baseline (the log-ratio is elementwise; an unaligned "
+                "reference cannot be compared)", arr.shape, post_shape,
+            )
+    if not aligned:
+        return {
+            "status": "insufficient_reference",
+            "reason": (
+                f"All {dropped} pre-event scene(s) were misaligned with the "
+                "post-event grid. Absolute thresholding is NOT substituted."
+            ),
+            "flood_mask": None,
+        }
+
+    base = build_baseline([refined_lee(s) for s in aligned])
     if base is None:
         return {"status": "insufficient_reference", "reason": "empty baseline stack",
                 "flood_mask": None}
@@ -378,6 +407,7 @@ def detect_flood_change(
         "speckle_window": REFINED_LEE_WINDOW,
         "enl": ENL,
         "baseline_scene_count": base["scene_count"],
+        "baseline_scenes_dropped_misaligned": dropped,
         "baseline_confidence_penalty": base["confidence_penalty"],
         "baseline_target_scenes": BASELINE_TARGET_SCENES,
         "threshold_db": thr["threshold"],

@@ -3252,7 +3252,11 @@ def process_satellite_imagery(
                 len(accepted), spread, orbit_dir,
             )
             pre_stack = _fetch_pre_event_stack(
-                accepted, bbox, merged_polygon, event_id, token, satellite_type
+                accepted, bbox, merged_polygon, event_id, token, satellite_type,
+                post_shape=(clipped.get("bands") or {}).get("VV").shape
+                if (clipped.get("bands") or {}).get("VV") is not None else None,
+                post_transform=clipped.get("transform"),
+                post_crs=clipped.get("crs"),
             )
             return _finish_success(
                 clipped, cov, accepted, tier, orbit_dir, spread,
@@ -3289,7 +3293,11 @@ def process_satellite_imagery(
             best_interior, min_cov, COVERAGE_FLOOR,
         )
         pre_stack = _fetch_pre_event_stack(
-            best_accepted, bbox, merged_polygon, event_id, token, satellite_type
+            best_accepted, bbox, merged_polygon, event_id, token, satellite_type,
+            post_shape=(best_clipped.get("bands") or {}).get("VV").shape
+            if (best_clipped.get("bands") or {}).get("VV") is not None else None,
+            post_transform=best_clipped.get("transform"),
+            post_crs=best_clipped.get("crs"),
         )
         return _finish_success(
             best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
@@ -3429,6 +3437,9 @@ def _fetch_pre_event_stack(
     event_id: str,
     token,
     satellite_type: str,
+    post_shape=None,
+    post_transform=None,
+    post_crs=None,
 ) -> list:
     """Phase 3: same-relative-orbit pre-event VV scenes, clipped to the AOI.
 
@@ -3483,8 +3494,48 @@ def _fetch_pre_event_stack(
                 if clipped_pre is None:
                     continue
                 vv = (clipped_pre.get("bands") or {}).get("VV")
-                if vv is not None:
-                    stack.append(vv)
+                if vv is None:
+                    continue
+                # GRID ALIGNMENT (found by the first live forced-S1 run,
+                # which failed with "all input arrays must have the same
+                # shape"): each scene clips to its OWN footprint-derived
+                # grid, so a pre-event clip is generally a different shape
+                # from the post-event clip even for the same AOI polygon.
+                # The log-ratio is elementwise, so the reference MUST be
+                # resampled onto the post-event grid. Reproject rather than
+                # crop/pad: the two grids can differ in origin and extent,
+                # not merely size, and a naive slice would silently
+                # mis-register the ratio (worse than failing).
+                if post_shape is not None and vv.shape != post_shape:
+                    try:
+                        from rasterio.warp import reproject
+
+                        dest = np.full(post_shape, np.nan, dtype="float32")
+                        reproject(
+                            source=vv.astype("float32"),
+                            destination=dest,
+                            src_transform=clipped_pre["transform"],
+                            src_crs=clipped_pre["crs"],
+                            dst_transform=post_transform,
+                            dst_crs=post_crs,
+                            resampling=Resampling.bilinear,
+                            src_nodata=np.nan,
+                            dst_nodata=np.nan,
+                        )
+                        vv = dest
+                        logger.info(
+                            "Pre-event scene %d resampled %s -> %s onto the "
+                            "post-event grid", idx, clipped_pre["bands"]["VV"].shape,
+                            post_shape,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Pre-event scene %d could not be aligned to the "
+                            "post-event grid (%s) — excluded from the baseline",
+                            idx, exc,
+                        )
+                        continue
+                stack.append(vv)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Pre-event scene %d unusable: %s", idx, exc)
         logger.info(
