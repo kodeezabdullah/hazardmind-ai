@@ -99,7 +99,7 @@ def _install_stubs(targets):
     return restore
 
 
-def _fake_render_clip(clipped, satellite_type, disaster_type, out_id):
+def _fake_render_clip(clipped, satellite_type, disaster_type, out_id, **kwargs):
     """Stand in for the real PNG/GeoJSON render — returns a minimal result dict."""
     return {
         "satellite_type": satellite_type,

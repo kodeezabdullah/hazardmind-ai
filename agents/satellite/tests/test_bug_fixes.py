@@ -555,7 +555,7 @@ def test_bug3_tier3_lowers_confidence_and_anomaly():
             "gaps": [], "gap_cause": {"nodata": 0, "cloud": 0},
         }
 
-    def fake_render_clip(clipped, sat, dt, oid):
+    def fake_render_clip(clipped, sat, dt, oid, **kwargs):
         return {"satellite_type": sat, "index_type": "NDWI",
                 "water_percent": 12.0, "mean_index": 0.2,
                 "class_counts": {}, "affected_area_km2": 5.0,

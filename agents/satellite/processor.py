@@ -2794,6 +2794,9 @@ def _render_clip(
     satellite_type: str,
     disaster_type: str,
     out_id: str,
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
+    orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
     """Render the cheap tail for one clipped cube.
 
@@ -2802,8 +2805,20 @@ def _render_clip(
     result and `<event_id>/cities/<slug>` for a per-city one. Returns the
     per-clip result dict (without `valid_percent`, which the caller sets) or
     None if indices/PNG export fails.
+
+    Phase 3: `pre_event_vv`/`dem`/`orbit_direction` carry the same-relative-
+    orbit reference stack into the SAR path so `calculate_indices` can run
+    change detection instead of the (structurally unusable) absolute
+    threshold. Absent them the behaviour is exactly as before.
     """
-    indices = calculate_indices(clipped, satellite_type, disaster_type)
+    indices = calculate_indices(
+        clipped,
+        satellite_type,
+        disaster_type,
+        pre_event_vv=pre_event_vv,
+        dem=dem,
+        orbit_direction=orbit_direction,
+    )
     if indices is None:
         logger.error("Index calculation failed for %s", out_id)
         return None
@@ -3236,11 +3251,15 @@ def process_satellite_imagery(
                 min_cov, tier, cov["interior_coverage_percent"],
                 len(accepted), spread, orbit_dir,
             )
+            pre_stack = _fetch_pre_event_stack(
+                accepted, bbox, merged_polygon, event_id, token, satellite_type
+            )
             return _finish_success(
                 clipped, cov, accepted, tier, orbit_dir, spread,
                 satellite_type, disaster_type, event_id, city_boundaries,
                 tracker, bytes_before, min_cov, budget_exhausted=None,
                 marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
+                pre_event_vv=pre_stack,
             )
 
         if budget_exhausted or marginal_stop or gap_limited_by:
@@ -3269,11 +3288,15 @@ def process_satellite_imagery(
             budget_exhausted or ("marginal_return" if marginal_stop else "exhausted_tiers"),
             best_interior, min_cov, COVERAGE_FLOOR,
         )
+        pre_stack = _fetch_pre_event_stack(
+            best_accepted, bbox, merged_polygon, event_id, token, satellite_type
+        )
         return _finish_success(
             best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
             spread, satellite_type, disaster_type, event_id, city_boundaries,
             tracker, bytes_before, min_cov, budget_exhausted=budget_exhausted,
             marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
+            pre_event_vv=pre_stack,
         )
 
     # Below COVERAGE_FLOOR — fail honestly with gap geometry. NEVER analyse a
@@ -3398,6 +3421,82 @@ def _scene_cloud_for_gap_check(scene: Optional[dict]) -> Optional[float]:
     return None
 
 
+
+def _fetch_pre_event_stack(
+    accepted: list,
+    bbox,
+    merged_polygon: dict,
+    event_id: str,
+    token,
+    satellite_type: str,
+) -> list:
+    """Phase 3: same-relative-orbit pre-event VV scenes, clipped to the AOI.
+
+    The same-relative-orbit constraint is enforced STRICTLY here because it
+    is the entire basis of the change-detection method's validity (matching
+    incidence angle, look direction and terrain geometry are what make the
+    calibration factor cancel in the ratio — verified against live CDSE
+    LUTs, see sar_change_detection.py). A scene from a different relative
+    orbit is never substituted; an empty list is returned instead, and the
+    caller reports insufficient_reference rather than silently falling back
+    to absolute thresholding.
+
+    Returns a list of clipped VV arrays on the SAME grid as the post-event
+    clip, oldest-first. Best-effort: any failure returns [] and the SAR path
+    degrades to the (labelled, untrusted) absolute index.
+    """
+    if satellite_type != "sentinel-1" or not accepted:
+        return []
+    try:
+        from sentinel import (
+            BASELINE_SEARCH_DAYS,
+            search_pre_event_same_orbit,
+        )
+    except ImportError:
+        return []
+    try:
+        post_scene = accepted[0]
+        pre_scenes = search_pre_event_same_orbit(
+            post_scene, bbox, merged_polygon=merged_polygon
+        )
+        if not pre_scenes:
+            logger.warning(
+                "No same-relative-orbit pre-event scene found — SAR change "
+                "detection unavailable (absolute thresholding is NOT "
+                "substituted; see sar_change_detection.py)"
+            )
+            return []
+        stack = []
+        dst_crs = _dst_crs_from_polygon(merged_polygon)
+        for idx, scene in enumerate(pre_scenes):
+            try:
+                dl = download_imagery(
+                    {"satellite_type": satellite_type}, scene,
+                    f"{event_id}/pre_{idx}", token, "flood",
+                )
+                if not dl or not dl.get("band_paths"):
+                    continue
+                stacked = stack_bands(dl["band_paths"], satellite_type, dst_crs)
+                if stacked is None:
+                    continue
+                clipped_pre = clip_to_polygon(stacked, merged_polygon)
+                if clipped_pre is None:
+                    continue
+                vv = (clipped_pre.get("bands") or {}).get("VV")
+                if vv is not None:
+                    stack.append(vv)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Pre-event scene %d unusable: %s", idx, exc)
+        logger.info(
+            "Pre-event baseline: %d same-orbit scene(s) usable of %d found",
+            len(stack), len(pre_scenes),
+        )
+        return stack
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pre-event stack unavailable: %s", exc)
+        return []
+
+
 def _finish_success(
     clipped: dict,
     cov: dict,
@@ -3415,6 +3514,8 @@ def _finish_success(
     budget_exhausted: Optional[str],
     marginal_stop: bool,
     gap_limited_by: Optional[str],
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
 ) -> Optional[dict]:
     """Render + finalize a successful (target-met or best-effort) coverage result.
 
@@ -3431,7 +3532,8 @@ def _finish_success(
         gc.collect()
 
     merged_result = _render_clip(
-        clipped, satellite_type, disaster_type, event_id
+        clipped, satellite_type, disaster_type, event_id,
+        pre_event_vv=pre_event_vv, dem=dem, orbit_direction=orbit_dir,
     )
     if merged_result is None:
         logger.error("Aborting pipeline: merged render failed")

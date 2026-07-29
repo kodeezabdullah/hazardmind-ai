@@ -1171,3 +1171,104 @@ if __name__ == "__main__":
             print(f"Found scene: {scene.get('Name')}")
         else:
             print("No scene found")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 (science/full-pass): same-relative-orbit pre-event reference search
+# --------------------------------------------------------------------------- #
+# Baseline window: 60 days back from the post-event acquisition. The measured
+# same-relative-orbit S1 revisit for this AOI class is ~11-12 days (see
+# agents/satellite/CLAUDE.md's tier-window revisit analysis), so 60 days is
+# ~5 repeat cycles — deep enough to find the 3 scenes a median needs, while
+# staying inside one season so vegetation/soil-moisture drift does not enter
+# the flood signal as a false change.
+BASELINE_SEARCH_DAYS = 60
+BASELINE_TARGET_SCENES = 3
+
+
+def search_pre_event_same_orbit(
+    post_scene: dict,
+    bbox: tuple,
+    merged_polygon: Optional[dict] = None,
+    days_back: int = BASELINE_SEARCH_DAYS,
+    max_scenes: int = BASELINE_TARGET_SCENES,
+    timeout: int = 60,
+):
+    """Pre-event S1 GRD scenes sharing the post-event scene's RELATIVE ORBIT.
+
+    The same-relative-orbit constraint is not a preference — it is what makes
+    change detection valid on uncalibrated GRD (identical incidence angle and
+    look direction mean the calibration factor and terrain-induced
+    backscatter cancel in the ratio; verified against live CDSE LUTs, see
+    agents/satellite/sar_change_detection.py). This function therefore
+    filters on relativeOrbitNumber AND orbit direction and returns [] rather
+    than ever substituting a different orbit.
+
+    Returns up to `max_scenes` scenes, newest-first, strictly BEFORE the
+    post-event acquisition.
+    """
+    rel_orbit = _scene_attr(post_scene, "relativeOrbitNumber")
+    direction = scene_orbit_direction(post_scene)
+    post_dt = scene_datetime(post_scene)
+    if rel_orbit is None or post_dt is None:
+        logger.warning(
+            "Pre-event search: post-event scene lacks relativeOrbitNumber/date "
+            "— cannot guarantee the same-orbit constraint, refusing to guess"
+        )
+        return []
+
+    start = (post_dt - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end = post_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    minx, miny, maxx, maxy = bbox
+    aoi_wkt = (
+        f"POLYGON(({minx} {miny},{maxx} {miny},{maxx} {maxy},"
+        f"{minx} {maxy},{minx} {miny}))"
+    )
+    filters = [
+        "Collection/Name eq 'SENTINEL-1'",
+        f"OData.CSC.Intersects(area=geography'SRID=4326;{aoi_wkt}')",
+        f"ContentDate/Start ge {start}",
+        f"ContentDate/Start lt {end}",
+        "contains(Name,'GRD')",
+    ]
+    params = {
+        "$filter": " and ".join(filters),
+        "$orderby": "ContentDate/Start desc",
+        "$top": "100",
+        "$expand": "Attributes",
+    }
+    try:
+        response = requests.get(CATALOGUE_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        results = response.json().get("value", []) or []
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Pre-event catalogue search failed: %s", exc)
+        return []
+
+    same_orbit = []
+    for scene in results:
+        if str(_scene_attr(scene, "relativeOrbitNumber")) != str(rel_orbit):
+            continue
+        if direction and scene_orbit_direction(scene) != direction:
+            continue
+        same_orbit.append(scene)
+
+    same_orbit = dedupe_by_acquisition(same_orbit)
+    # One acquisition per calendar day is enough — consecutive frames of the
+    # same pass add no temporal independence to a median.
+    seen_days, picked = set(), []
+    for scene in same_orbit:
+        day = scene_acq_date(scene)
+        if day in seen_days:
+            continue
+        seen_days.add(day)
+        picked.append(scene)
+        if len(picked) >= max_scenes:
+            break
+
+    logger.info(
+        "Pre-event same-orbit search: %d candidate(s) on relative orbit %s "
+        "(%s), %d selected over the last %d days",
+        len(same_orbit), rel_orbit, direction, len(picked), days_back,
+    )
+    return picked
