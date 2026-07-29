@@ -24,6 +24,13 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 4 | Phase 1c permanent-water mask (JRC >=75) | 3450d26 | Kanalia S2 incl-PW | 0.9175 | 0.9857 | 0.9299 | 0.9570 | 0.698 (weak) | recall -0.056 incl — DEFINITIONAL: prediction no longer claims Lake Karla's normal water, the EMS incl-reference still contains it | **KEPT** | the flood claim is now the right claim; JRC windowed reads ~KBs, threshold 75 recorded in result |
 | 4 | Phase 1c | 3450d26 | Kanalia S2 **excl-PW** (first real split) | **0.9635** | 0.9855 | 0.9773 | **0.9814** | — | vs 1b incl: ≈flat precision, recall -0.008 (30 m JRC edge effects on lake-adjacent flood) | KEPT | this is the honest flood-only frame from here on |
 
+| 5 | Phase 2 KI adaptive threshold (as first written) | 65ea424 | Kanalia S2 excl-PW | 0.9624 | 0.9863 | 0.9754 | 0.9808 | 0.792 (**supports**) | vs 1c: -0.001 IoU (noise); conf +0.094 | (superseded) | flat metrics, higher confidence |
+| 5 | Phase 2 as first written | 65ea424-dirty | Paiporta S2 | 0 zones | — | — | — | 0.4342 (weak) | unchanged | (superseded) | **guard worked**: unimodal histogram refused, no phantom flood invented |
+| 5 | Phase 2 as first written | 65ea424-dirty | Insh S2 | 0 zones | — | — | — | **0.0** | conf -0.32 | **REGRESSION** | KI split two DRY modes, negative cut, 1.26% phantom "water" at within-water mean -0.127 |
+| 5a | Phase 2 + upper-mode-is-water guard | 1762f26 | Insh S2 | 0 zones | — | — | — | **0.3223 (weak)** | conf restored (+0.3223 vs regression; 0.3234 pre-Phase-2) | **KEPT** | regression eliminated, no phantom water |
+| 5a | Phase 2 + guard | 1762f26 | Kanalia S2 excl-PW | 0.9624 | 0.9863 | 0.9754 | 0.9808 | 0.792 (supports) | identical to pre-guard | **KEPT** | guard costs nothing where KI was already correct |
+| — | (discarded) cruder guard `derived_cut >= 0` | not committed | — | — | — | — | — | — | — | **DISCARDED** | rejected a legitimate land -0.45 / water +0.35 split (KI correctly cuts below zero when the water mode is broad) — measurement, not intuition, distinguished the two rules |
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
@@ -35,7 +42,9 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | Phase 1a measurement: Kanalia + Paiporta ×2 + Insh | 1,674 |
 | Phase 1b measurement: Kanalia gate | 414 |
 | Phase 1c measurement: Kanalia gate | 414 |
-| **Running total** | **4,590 MB (~4.6 GB)** |
+| Phase 2 sweep: Kanalia + Paiporta + Insh | 1,248 |
+| Phase 2 post-fix: Insh + Kanalia | 822 |
+| **Running total** | **6,660 MB (~6.7 GB)** |
 
 ---
 
