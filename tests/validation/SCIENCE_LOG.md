@@ -413,12 +413,23 @@ cannot establish calibration.
 
 ## 3. The first scored S1 result
 
-**Not obtained this session.** The forced-S1 Kanalia run's first attempt
-died on `InternalServerError: Couldn't connect to compute node` (CDSE
-infrastructure, not a code defect); the retry was still running when the
-session's reporting deadline arrived. This is stated as an outstanding
-measurement rather than papered over — the project still has no scored S1
-result, for the fourth session running, now for a fourth distinct reason.
+**Still not obtained — but the reason is now a fixed bug rather than an
+unknown.** Three attempts:
+
+1. CDSE `InternalServerError` (infrastructure, no code reached).
+2. Completed on the real SAR path (2.2 GB, 1901s, 100% coverage) but
+   persisted `index_calibrated: False` / `index_units: dB_uncalibrated` —
+   **change detection never ran.** A grid-shape mismatch between the
+   pre- and post-event clips made the elementwise log-ratio impossible, so
+   the pipeline fell through to the absolute-threshold path that classifies
+   zero water always. Reporting that zero as "S1 found no flood" would have
+   been the most misleading possible outcome; the audit fields are what
+   prevented it. Root-caused and fixed (see Phase 3i above).
+3. Post-fix rerun launched; not complete at reporting time.
+
+So the project has no scored S1 result for the fourth session running — but
+unlike the previous three, the blocker is now a specific identified defect
+with a landed fix, not an open question.
 
 What DID change: the S1 path is no longer *structurally* incapable of an
 answer. The absolute `SAR_WATER_THRESHOLD_DB = -15.0` could never fire on
