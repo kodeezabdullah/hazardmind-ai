@@ -34,6 +34,130 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 6 | **Phase 3i FIRST SCORED S1** (change detection, post-peak scene) | 95aa554 | Kanalia **S1** excl-PW | **0.0083** | **0.0567** | **0.0096** | **0.0165** | 0.0 (weak) | vs S2 same event (0.9624/0.9808): worse by ~2 orders of magnitude | **RECORDED, not kept as an improvement** | first trustworthy S1 measurement (change detection ran, post-peak 2023-09-13 imagery, 100% coverage); the detector performs POORLY here — 3.22 km2 predicted vs 18.97 km2 reference, ~94% of detections outside it |
 
 
+---
+
+# Session 4 — `science/detection-pass` (2026-07-29)
+
+| # | Change | Commit | Event | IoU | Precision | Recall | F1 | Δ vs prev | Kept? | Why |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 7 | **Phase 0 bidirectional S1** (detect double-bounce RISE as well as open-water DROP) | cfcd301 | Kanalia S1 | 0.0228 | 0.1384 | 0.0265 | 0.0445 | **bit-identical to drop-only**; `rise_px = 0` | **KEPT as a no-op correctness change, NOT an improvement** | the physics is real and offline-proven (6 dB rise block: 17.38% both vs 0.00% drop-only) but this scene contains no rise signal at all |
+| — | (discarded) fixed **−1.0 dB** threshold | not shipped | Kanalia S1 | 0.0566 | 0.1691 | 0.0784 | 0.1071 | looks like **2.5× IoU** over production | **DISCARDED** | precision lift **0.78× — worse than chance**. Noise-fitting one event's reference, not skill |
+| 8 | Phase 3a permanent water as a CLASS (overlay, not subtraction) | df21d51 | — | — | — | — | — | no metric change expected (same pixels excluded from the flood claim) | **KEPT** | the river is now rendered + separately quantified instead of merged into "safe land"; caught a real trap (class 10 would have vectorized AS a hazard zone and inflated `affected_area_km2`) |
+| 9 | Phase 3b named water features + contract/prompt wiring | a217f28, c18cc05 | — | — | — | — | — | not metric-bearing | **KEPT** | hazard's flood prompt now states the flood-only figure and directs assessment at it; survival-tested 12/12 through the REAL adapter + REAL prompt builder |
+
+**Note on the 0.0228 vs the previous session's 0.0083.** Both are Kanalia S1
+against the same pinned AOI and reference. They differ because this session
+measures the detector **directly on the cached scenes** (a strict A/B where
+only `direction` varies) while 0.0083 came through the full pipeline (which
+adds permanent-water masking and zone-area filtering). The 0.0228/0.0083
+difference is measurement-frame, **not** an improvement — every conclusion
+below is drawn from within-frame comparisons only.
+
+## Phase 0 — the bidirectional fix, and why it changed nothing
+
+**Hypothesis (from the task):** Kanalia is flooded farmland; in flooded
+vegetation the water surface and plant stems form a corner reflector, so
+double-bounce RAISES backscatter. A drop-only detector looks for a decrease
+where an increase is occurring.
+
+**The physics is correct and the implementation works** — offline, a 6 dB
+rise block scores 17.38% with both-direction detection and **0.00%**
+drop-only. But note the fix required was **not** the proposed
+`abs(ratio) > 3.0`: `tiled_threshold` separately discarded any tile whose
+Kittler-Illingworth cut came out positive (`ki["threshold"] < 0`), so the
+*estimator itself* never saw the rise mode. Taking `abs()` of the final
+comparison would have applied a drop-derived cut to a rise population. The
+two modes are pooled and thresholded separately by sign (measured on a mixed
+synthetic scene: drop −5.223 dB, rise +2.686 dB — not mirror images).
+
+**Measured on the real event: bit-identical, `rise_px = 0`.** There is no
+double-bounce signature in this scene.
+
+## The real finding — this scene has no recoverable flood signal
+
+Change-image statistics **inside the EMS flood reference** (167,011 pixels of
+confirmed flood) versus dry ground:
+
+| | mean | median | std |
+|---|---|---|---|
+| flood (167,011 px) | **−0.3940 dB** | −0.2908 | 0.6230 |
+| dry (590,034 px) | **−0.4152 dB** | −0.3415 | 0.7483 |
+
+- **Cohen's d = 0.0308** — essentially zero separation.
+- **ROC AUC = 0.4870** — *below* 0.5. Flooded pixels are, if anything,
+  marginally **brighter** than dry ones.
+- **≥ +3 dB inside confirmed flood: 0 pixels.** No double-bounce anywhere.
+- **≤ −3 dB inside confirmed flood: 1.06%** — which is exactly why recall
+  was ~0.01.
+
+**Skill test — every threshold is worse than chance:**
+
+| | precision | lift vs chance | F1 |
+|---|---|---|---|
+| zero-skill (label whole AOI flood) | 0.2206 | 1.00× | **0.3615** |
+| cut −1.000 dB | 0.1729 | **0.78×** | 0.1288 |
+| cut −1.782 dB (production KI) | 0.1588 | **0.72×** | 0.0544 |
+| cut −3.000 dB | 0.1881 | **0.85×** | 0.0200 |
+
+The trivial "everything is flooded" baseline beats every tuned variant. The
+best F1 obtainable by **any** global cut is 0.3740 (at +0.35 dB, precision
+0.2323) — barely above the 22.1% base rate.
+
+**What this eliminates, by measurement rather than argument:** threshold
+choice, speckle filtering, morphology, baseline depth (a 3-scene same-orbit
+median baseline was *already* in use — so **Phase 2 was not built**, since
+deepening a baseline reduces reference noise and cannot create a target
+signal), and detection direction. By elimination the remaining explanation is
+**acquisition timing**: 2023-09-13 is 8 days past the 09-05/06 peak, and
+orbit 7's 12-day revisit offered no earlier post-peak pass. The basin had
+drained.
+
+**This is an operational limit of S1 at this revisit cadence, not a tunable
+defect** — and it is more useful than a tuned number would have been.
+
+## Phase 1d/1e — the reference gate: BOTH FAIL, Phases 6 and 7 SKIPPED
+
+**1d, NASA COOLR (landslide).** The polygon service (`COOLR_Events_Polygons`)
+is **down** — HTTP 500, "service not started". Points are plentiful (40,310
+events + 14,753 reports) but support no IoU. The one reachable polygon layer
+holds **48 records total**, of which **18 are post-2018** (the S2 L2A era):
+
+- **15 of 18 are under 0.04 km².** At 10 m that is ~40 pixels — at or below
+  the floor where Phase 6a's shape filtering (elongation, orientation,
+  downslope tapering) can measure a shape at all.
+- Only 2 exceed 1 km²: Ultar Glacier (Pakistan) — a rock-and-ice avalanche on
+  a glacier, where the NDVI-loss signal Phase 6a keys on does not exist — and
+  Fagraskógarfjall (Iceland).
+
+**n ≤ 2 usable. Not a validation set.** Landslide detection was therefore
+**not built**.
+
+**1e, xBD/xView2 (earthquake).** Exactly **one** earthquake event (Mexico
+2017; Palu is labelled tsunami), on **sub-metre Maxar commercial optical**.
+It cannot score a 10 m Sentinel SAR detector. Earthquake damage detection was
+therefore **not built**.
+
+Per the task's Phase 1f instruction — building unmeasurable detectors is the
+trap the flood work escaped — both phases are skipped rather than built
+anyway.
+
+## Phase 1a — the prior "no references below EMSR500" conclusion was WRONG
+
+The previous session concluded no further Sentinel-backed EMS references
+exist. That conclusion came from probing
+`rapidmapping.emergency.copernicus.eu`, which returns **403 "Authentication
+credentials were not provided"** for older activations (verified
+deterministic, not rate-limiting: EMSR692/698 return 200 while EMSR373/450
+return 403 on the same session, repeatedly).
+
+The older archive lives on a **different portal** with open S3 links.
+Verified end-to-end on **EMSR271** (Thessaly, Feb 2018): **1,729
+riverine-flood polygons, 183.9 km²**, and the product's own `source.dbf`
+confirms **Sentinel-1, 10 m GSD, post-event 2018-02-28 / 03-01**.
+
+**124 flood activations below EMSR500 carry downloadable vector packages**
+(63 with MONIT products, 39 of those post-2018).
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
