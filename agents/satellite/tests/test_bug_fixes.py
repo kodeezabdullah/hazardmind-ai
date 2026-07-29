@@ -331,10 +331,19 @@ def test_bug4_dedup_cog_twins():
         "2026-07-07T05:46:41.024Z", 91, pid="p-other")
     deduped = sentinel.dedupe_by_acquisition([non_cog, cog, other])
     ids = [s["Id"] for s in deduped]
-    if len(deduped) == 2 and "p-std" in ids and "p-cog" not in ids:
-        ok("COG twin collapsed: kept p-std + p-other, dropped p-cog")
+    # Phase 0a determinism: the COG twin is now DETERMINISTICALLY preferred
+    # (regardless of catalogue order), occupying the first twin's rank slot.
+    if len(deduped) == 2 and "p-cog" in ids and "p-std" not in ids:
+        ok("COG twin collapsed: kept p-cog + p-other, dropped p-std")
     else:
         bad(f"dedup wrong: {ids}")
+    # Order-independence: reversed input must yield the same surviving format.
+    deduped_rev = sentinel.dedupe_by_acquisition([cog, non_cog, other])
+    ids_rev = [s["Id"] for s in deduped_rev]
+    if ids_rev == ids:
+        ok("dedup is order-independent (same survivors for reversed input)")
+    else:
+        bad(f"dedup order-dependent: {ids} vs {ids_rev}")
 
 
 def test_bug3_s1_never_mixes_asc_desc():
@@ -546,7 +555,7 @@ def test_bug3_tier3_lowers_confidence_and_anomaly():
             "gaps": [], "gap_cause": {"nodata": 0, "cloud": 0},
         }
 
-    def fake_render_clip(clipped, sat, dt, oid):
+    def fake_render_clip(clipped, sat, dt, oid, **kwargs):
         return {"satellite_type": sat, "index_type": "NDWI",
                 "water_percent": 12.0, "mean_index": 0.2,
                 "class_counts": {}, "affected_area_km2": 5.0,

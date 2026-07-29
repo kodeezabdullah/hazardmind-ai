@@ -821,7 +821,10 @@ def _index_type_label(satellite_type: str | None) -> str:
     if "sentinel-1" in sat or sat in ("sar", "s1"):
         return "SAR"
     if "sentinel-2" in sat or sat in ("optical", "s2"):
-        return "NDWI/NDVI"
+        # Family label, not a per-row claim (satellite_results has no
+        # index_type column). Flood rows written after 2026-07-29 are MNDWI
+        # (Phase 1b); earlier rows were NDWI; earthquake/landslide are NDVI.
+        return "MNDWI/NDVI"
     return "unknown"
 
 

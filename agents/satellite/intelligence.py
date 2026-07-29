@@ -490,6 +490,23 @@ Return ONLY valid JSON:
         Model: google/gemma-4-31B-it. Returns the parsed interpretation dict or
         ``None``.
         """
+        # Phase 0b: spell out the spatial-mean geometry so the model never
+        # reads a negative whole-AOI mean as contradicting a small flooded
+        # fraction (the "characteristic of dry soil" defect class).
+        stats = index_stats if isinstance(index_stats, dict) else {}
+        mean_note = ""
+        if stats.get("water_percent") is not None:
+            mean_note = f"""
+
+Interpretation facts (read BEFORE judging the index values):
+- 'water_percent' is the flooded fraction: {stats.get("water_percent")}% of
+  the AOI (a 0-100 percent, NOT a 0-1 fraction).
+- 'affected_mean_index' is the mean index over the CLASSIFIED WATER pixels
+  only: {stats.get("affected_mean_index")}. Judge water physics from THIS.
+- 'mean_index' is the mean over the WHOLE AOI including all dry land:
+  {stats.get("mean_index")}. A negative whole-AOI mean is EXPECTED whenever
+  the flooded fraction is small (dry land dominates the average) — it is NOT
+  a contradiction of the detection and must not be reported as one."""
         prompt = f"""\
 You are a senior disaster response analyst.
 Interpret these satellite analysis results.
@@ -500,7 +517,7 @@ Disaster type: {disaster_type}
 Location: {location}
 Hazard zones detected: {total_zones}
 Affected area: {area_km2} km^2
-Satellite used: {satellite_used}
+Satellite used: {satellite_used}{mean_note}
 
 Provide expert interpretation.
 Be specific — mention actual numbers.

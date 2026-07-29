@@ -101,6 +101,7 @@ def run_pipeline_for_event(
     max_download_gb: Optional[float] = None,
     max_search_seconds: Optional[float] = None,
     forced_satellite_type: Optional[str] = None,
+    event_peak_utc=None,
 ) -> dict:
     """Invoke the real satellite pipeline end to end:
 
@@ -141,11 +142,24 @@ def run_pipeline_for_event(
     import agent as satellite_agent  # type: ignore
     from sentinel_clock_patch import frozen_sentinel_clock  # local harness module
     from forced_satellite_override import forced_satellite  # local harness module
+    from aoi_pin import pinned_aoi  # local harness module
+    from post_peak_scene_floor import post_peak_floor  # local harness module
     import contextlib
 
     satellite_override_cm = (
         forced_satellite(forced_satellite_type)
         if forced_satellite_type
+        else contextlib.nullcontext()
+    )
+    # Post-peak floor: for a flood the useful post-event scene is the first
+    # same-orbit pass at/after the peak. The search window looks BACKWARDS
+    # from as_of, so without this it can select pre-flood imagery and the
+    # change detection then correctly reports no change (run 4 did exactly
+    # that: 2023-09-01 selected for a 09-05/06 event). See
+    # post_peak_scene_floor.py.
+    peak_floor_cm = (
+        post_peak_floor(event_peak_utc)
+        if event_peak_utc is not None
         else contextlib.nullcontext()
     )
 
@@ -200,7 +214,12 @@ def run_pipeline_for_event(
             await backend_db.update_event_status(event_id, status="processing", step="satellite")
 
             started = time.monotonic()
-            with frozen_sentinel_clock(as_of), satellite_override_cm:
+            # pinned_aoi: boundary resolution replayed from the on-disk cache
+            # (tests/validation/cache/aoi/) so Nominatim drift can never move
+            # the AOI between runs of the same event — see aoi_pin.py for the
+            # live confound this closed (Kanalia's reference area shifted
+            # 16.082 -> 20.308 km² across two harness sessions).
+            with frozen_sentinel_clock(as_of), satellite_override_cm,                     peak_floor_cm, pinned_aoi():
                 # _run_pipeline_sync is blocking (it does its own internal
                 # asyncio.run() for the DB persist and synchronous I/O for
                 # everything else) — run it in a worker thread so it doesn't

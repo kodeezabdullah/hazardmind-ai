@@ -1,0 +1,55 @@
+{
+  "commit": "439d5c0-dirty",
+  "commit_full": "439d5c036235502c93e9619361ab7c31acb1491f",
+  "run_timestamp_utc": "2026-07-28T21:02:41.396975+00:00",
+  "events": [
+    {
+      "event_id": "f8fdb75b-b302-45a7-aacd-0e28c241d16c",
+      "location": "Paiporta, Spain",
+      "satellite_type": "sentinel-2",
+      "satellite_type_reason": "scene_metadata_clear",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.4237,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "complete_zero_zones",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Reference products are ~1 week after the 29 Oct event peak (receding/late flood state, not peak).",
+        "maximumFloodExtentA (cumulative max extent) used as the reference layer.",
+        "Reference geometry is the FULL Valencia-province delineation, clipped to Paiporta's town boundary at scoring time \u2014 not a separately-published city-level EMS product (none exists).",
+        "No permanent-water mask available for this AOI in this pass.",
+        "Pipeline completed but produced zero hazard zones \u2014 IoU/precision/recall against the EMS reference are undefined (0/0), not a score of 0."
+      ],
+      "elapsed_seconds": 407.23399999999674,
+      "bytes_downloaded": 426276970
+    },
+    {
+      "event_id": "a1c1fea0-c615-4bcd-8de4-d27ca3a64553",
+      "location": "Paiporta, Spain",
+      "satellite_type": "sentinel-2",
+      "satellite_type_reason": "scene_metadata_clear",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.4237,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "complete_zero_zones",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Reference products are ~1 week after the 29 Oct event peak (receding/late flood state, not peak).",
+        "maximumFloodExtentA (cumulative max extent) used as the reference layer.",
+        "Reference geometry is the FULL Valencia-province delineation, clipped to Paiporta's town boundary at scoring time \u2014 not a separately-published city-level EMS product (none exists).",
+        "No permanent-water mask available for this AOI in this pass.",
+        "Pipeline completed but produced zero hazard zones \u2014 IoU/precision/recall against the EMS reference are undefined (0/0), not a score of 0."
+      ],
+      "elapsed_seconds": 209.96899999999732,
+      "bytes_downloaded": 426276970
+    }
+  ]
+}

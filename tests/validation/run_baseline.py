@@ -26,7 +26,7 @@ import argparse
 import os
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -144,9 +144,14 @@ def _run_one_path(
             # Using the SAME function here means the harness scores against
             # the same geometry the pipeline itself actually analyses.
             from boundary import get_risk_city_boundaries  # local import, needs agents/satellite on sys.path
+            from aoi_pin import pinned_aoi  # deterministic AOI replay (see aoi_pin.py)
 
             headline_city = event_cfg["pipeline_location"].split(",")[0].strip()
-            city_boundaries = get_risk_city_boundaries(event_cfg["pipeline_location"], [headline_city])
+            with pinned_aoi():
+                import boundary as _boundary_mod  # patched inside the context
+                city_boundaries = _boundary_mod.get_risk_city_boundaries(
+                    event_cfg["pipeline_location"], [headline_city]
+                )
             if not city_boundaries:
                 raise RuntimeError(
                     f"Could not resolve pipeline boundary for "
@@ -241,6 +246,22 @@ def _run_one_path(
     as_of = datetime.fromisoformat(
         product_cfg["acquisition_datetime_utc"].replace("Z", "+00:00")
     )
+    # The event's flood peak, when the config records one. Two uses:
+    #   1. scenes before the peak are rejected (post_peak_scene_floor), so a
+    #      backward-looking window cannot select pre-flood imagery;
+    #   2. as_of is advanced past the peak so a post-peak same-orbit pass is
+    #      inside the searchable window at all (S1 revisit here is ~12 days,
+    #      and the reference acquisition is only ~1 day post-peak).
+    peak_raw = event_cfg.get("event_peak_date")
+    event_peak_utc = None
+    if peak_raw:
+        event_peak_utc = datetime.fromisoformat(
+            str(peak_raw).replace("Z", "+00:00")
+        )
+        if event_peak_utc.tzinfo is None:
+            event_peak_utc = event_peak_utc.replace(tzinfo=timezone.utc)
+        if as_of < event_peak_utc + timedelta(days=14):
+            as_of = event_peak_utc + timedelta(days=14)
     try:
         run = run_pipeline_for_event(
             location=event_cfg["pipeline_location"],
@@ -252,6 +273,7 @@ def _run_one_path(
             max_download_gb=BUDGET_MAX_DOWNLOAD_GB,
             max_search_seconds=BUDGET_MAX_SEARCH_SECONDS,
             forced_satellite_type=forced_satellite_type,
+            event_peak_utc=event_peak_utc,
         )
     except Exception as exc:
         return EventResult(
@@ -349,14 +371,46 @@ def _run_one_path(
             bytes_downloaded=bytes_downloaded,
         )
 
-    # 4. Score.
+    # 4. Score. Phase 1c: the excluding-permanent-water split is now REAL —
+    # the permanent-water geometry comes from the SAME source and threshold
+    # the pipeline masks with (agents/satellite/permanent_water.py, JRC GSW
+    # occurrence >= 75), so the split measures the pipeline's own definition
+    # of "normally water", not a diverging harness-side one. Best-effort: an
+    # unreachable JRC bucket degrades to the pre-1c no-split behaviour with
+    # the note metrics.py already emits.
+    pw_geom = None
+    pw_source = None
+    try:
+        from permanent_water import (  # agents/satellite on sys.path
+            JRC_SOURCE_LABEL,
+            DEFAULT_OCCURRENCE_THRESHOLD,
+            permanent_water_geojson,
+        )
+        from shapely.geometry import shape as _shp_shape
+
+        bounds_geom = ref_geom.union(predicted_geom)
+        west, south, east, north = bounds_geom.bounds
+        pw_json = permanent_water_geojson(
+            west - 0.005, south - 0.005, east + 0.005, north + 0.005
+        )
+        if pw_json is not None:
+            pw_shape = _shp_shape(pw_json)
+            if not pw_shape.is_empty:
+                pw_geom = pw_shape
+            pw_source = (
+                f"{JRC_SOURCE_LABEL} (occurrence >= "
+                f"{DEFAULT_OCCURRENCE_THRESHOLD}%)"
+            )
+    except Exception as exc:  # noqa: BLE001 — split is optional, scoring is not
+        print(f"[permanent-water] split unavailable: {exc}")
+
     split = compute_with_permanent_water_split(
         predicted_geom=predicted_geom,
         predicted_crs="EPSG:4326",
         reference_geom=ref_geom,
         reference_crs=ref_crs,
-        permanent_water_geom=None,  # no permanent-water mask sourced this pass
-        permanent_water_source=None,
+        permanent_water_geom=pw_geom,
+        permanent_water_source=pw_source,
     )
 
     return EventResult(

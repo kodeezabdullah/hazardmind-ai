@@ -78,9 +78,22 @@ def _peek_cloud_cover(
     except (TypeError, ValueError):
         return None
 
-    start = (datetime.now(timezone.utc) - timedelta(days=date_range)).strftime(
+    # The window is [now - date_range, now]. The UPPER bound matters and was
+    # missing: with only `gt start`, a search returns everything from the
+    # window start to the present, so ranking can select an acquisition from
+    # AFTER the moment the pipeline is notionally analysing. In production
+    # that is merely odd (there is no future imagery); under a frozen clock
+    # it is a correctness bug — the historical validation harness pinned the
+    # search to a 2023 event and still received (and selected) 2026 scenes,
+    # which silently made the S1 change-detection baseline compare a recent
+    # scene against its own recent reference instead of flood-peak imagery.
+    # `now` is read from the module-level `datetime`, so a frozen clock
+    # bounds both ends consistently.
+    _now = datetime.now(timezone.utc)
+    start = (_now - timedelta(days=date_range)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
+    end = _now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     polygon = (
         f"POLYGON(({minx} {miny},{maxx} {miny},{maxx} {maxy},"
         f"{minx} {maxy},{minx} {miny}))"
@@ -91,6 +104,7 @@ def _peek_cloud_cover(
                 "Collection/Name eq 'SENTINEL-2'",
                 f"OData.CSC.Intersects(area=geography'SRID=4326;{polygon}')",
                 f"ContentDate/Start gt {start}",
+                f"ContentDate/Start le {end}",
             ]
         ),
         "$orderby": "ContentDate/Start desc",
@@ -674,17 +688,46 @@ def dedupe_by_acquisition(scenes: list) -> list:
     acquisition id, preserving input order. Products with no derivable id are
     kept as-is (never silently dropped).
     """
-    seen = set()
+    # DETERMINISM (science/full-pass Phase 0a): COG/non-COG twins carry
+    # identical footprint+cloud, so they tie on `_score` and the stable sort
+    # leaves them in CDSE's arbitrary catalogue row order — "keep first seen"
+    # therefore let CDSE decide which FORMAT the pipeline processed, run to
+    # run. The two formats exercised different warp code health historically
+    # (the implicit-WarpedVRT bug read COG-organised S1 GRD files as all-zero
+    # while classic strip TIFFs warped fine), so the choice must be
+    # deterministic and logged. Preference: keep the COG twin — the format
+    # the explicit-GCP reproject fix was live-validated on (Islamabad
+    # trace-s1-islamabad, S1D..._COG) and the format CDSE increasingly
+    # serves. The kept product occupies the FIRST twin's rank position so
+    # ordering semantics are unchanged.
+    kept_index: dict[str, int] = {}
     out = []
     dropped = 0
     for scene in scenes:
         key = _base_acquisition_id(scene)
-        if key is not None and key in seen:
-            dropped += 1
+        if key is None:
+            out.append(scene)
             continue
-        if key is not None:
-            seen.add(key)
-        out.append(scene)
+        if key not in kept_index:
+            kept_index[key] = len(out)
+            out.append(scene)
+            continue
+        dropped += 1
+        idx = kept_index[key]
+        incumbent = out[idx]
+        if _is_cog_product(scene) and not _is_cog_product(incumbent):
+            out[idx] = scene
+            preferred, other = scene, incumbent
+        else:
+            preferred, other = incumbent, scene
+        logger.info(
+            "Acquisition twin collapsed [%s]: kept %s (%s), dropped %s (%s)",
+            key,
+            preferred.get("Name"),
+            "COG" if _is_cog_product(preferred) else "non-COG",
+            other.get("Name"),
+            "COG" if _is_cog_product(other) else "non-COG",
+        )
     if dropped:
         logger.info(
             "Deduped %d duplicate acquisition product(s) (COG/non-COG twins) "
@@ -693,6 +736,12 @@ def dedupe_by_acquisition(scenes: list) -> list:
             len(out),
         )
     return out
+
+
+def _is_cog_product(scene: dict) -> bool:
+    """True when the product Name marks the Cloud-Optimized (COG) variant."""
+    name = (scene.get("Name") or "").upper()
+    return "_COG" in name or name.endswith("COG.SAFE") or name.endswith("COG")
 
 
 def backfill_uncovered_cities(
@@ -959,9 +1008,22 @@ def search_imagery(
         logger.error("Invalid bbox %r: %s", bbox, exc)
         return None
 
-    start = (datetime.now(timezone.utc) - timedelta(days=date_range)).strftime(
+    # The window is [now - date_range, now]. The UPPER bound matters and was
+    # missing: with only `gt start`, a search returns everything from the
+    # window start to the present, so ranking can select an acquisition from
+    # AFTER the moment the pipeline is notionally analysing. In production
+    # that is merely odd (there is no future imagery); under a frozen clock
+    # it is a correctness bug — the historical validation harness pinned the
+    # search to a 2023 event and still received (and selected) 2026 scenes,
+    # which silently made the S1 change-detection baseline compare a recent
+    # scene against its own recent reference instead of flood-peak imagery.
+    # `now` is read from the module-level `datetime`, so a frozen clock
+    # bounds both ends consistently.
+    _now = datetime.now(timezone.utc)
+    start = (_now - timedelta(days=date_range)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
+    end = _now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     # OData polygon: counter-clockwise ring closing on the first vertex.
     polygon = (
@@ -973,6 +1035,7 @@ def search_imagery(
         f"Collection/Name eq '{collection}'",
         f"OData.CSC.Intersects(area=geography'SRID=4326;{polygon}')",
         f"ContentDate/Start gt {start}",
+        f"ContentDate/Start le {end}",
     ]
 
     if satellite_type == SENTINEL_2:
@@ -1136,3 +1199,104 @@ if __name__ == "__main__":
             print(f"Found scene: {scene.get('Name')}")
         else:
             print("No scene found")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 (science/full-pass): same-relative-orbit pre-event reference search
+# --------------------------------------------------------------------------- #
+# Baseline window: 60 days back from the post-event acquisition. The measured
+# same-relative-orbit S1 revisit for this AOI class is ~11-12 days (see
+# agents/satellite/CLAUDE.md's tier-window revisit analysis), so 60 days is
+# ~5 repeat cycles — deep enough to find the 3 scenes a median needs, while
+# staying inside one season so vegetation/soil-moisture drift does not enter
+# the flood signal as a false change.
+BASELINE_SEARCH_DAYS = 60
+BASELINE_TARGET_SCENES = 3
+
+
+def search_pre_event_same_orbit(
+    post_scene: dict,
+    bbox: tuple,
+    merged_polygon: Optional[dict] = None,
+    days_back: int = BASELINE_SEARCH_DAYS,
+    max_scenes: int = BASELINE_TARGET_SCENES,
+    timeout: int = 60,
+):
+    """Pre-event S1 GRD scenes sharing the post-event scene's RELATIVE ORBIT.
+
+    The same-relative-orbit constraint is not a preference — it is what makes
+    change detection valid on uncalibrated GRD (identical incidence angle and
+    look direction mean the calibration factor and terrain-induced
+    backscatter cancel in the ratio; verified against live CDSE LUTs, see
+    agents/satellite/sar_change_detection.py). This function therefore
+    filters on relativeOrbitNumber AND orbit direction and returns [] rather
+    than ever substituting a different orbit.
+
+    Returns up to `max_scenes` scenes, newest-first, strictly BEFORE the
+    post-event acquisition.
+    """
+    rel_orbit = _scene_attr(post_scene, "relativeOrbitNumber")
+    direction = scene_orbit_direction(post_scene)
+    post_dt = scene_datetime(post_scene)
+    if rel_orbit is None or post_dt is None:
+        logger.warning(
+            "Pre-event search: post-event scene lacks relativeOrbitNumber/date "
+            "— cannot guarantee the same-orbit constraint, refusing to guess"
+        )
+        return []
+
+    start = (post_dt - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end = post_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    minx, miny, maxx, maxy = bbox
+    aoi_wkt = (
+        f"POLYGON(({minx} {miny},{maxx} {miny},{maxx} {maxy},"
+        f"{minx} {maxy},{minx} {miny}))"
+    )
+    filters = [
+        "Collection/Name eq 'SENTINEL-1'",
+        f"OData.CSC.Intersects(area=geography'SRID=4326;{aoi_wkt}')",
+        f"ContentDate/Start ge {start}",
+        f"ContentDate/Start lt {end}",
+        "contains(Name,'GRD')",
+    ]
+    params = {
+        "$filter": " and ".join(filters),
+        "$orderby": "ContentDate/Start desc",
+        "$top": "100",
+        "$expand": "Attributes",
+    }
+    try:
+        response = requests.get(CATALOGUE_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        results = response.json().get("value", []) or []
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Pre-event catalogue search failed: %s", exc)
+        return []
+
+    same_orbit = []
+    for scene in results:
+        if str(_scene_attr(scene, "relativeOrbitNumber")) != str(rel_orbit):
+            continue
+        if direction and scene_orbit_direction(scene) != direction:
+            continue
+        same_orbit.append(scene)
+
+    same_orbit = dedupe_by_acquisition(same_orbit)
+    # One acquisition per calendar day is enough — consecutive frames of the
+    # same pass add no temporal independence to a median.
+    seen_days, picked = set(), []
+    for scene in same_orbit:
+        day = scene_acq_date(scene)
+        if day in seen_days:
+            continue
+        seen_days.add(day)
+        picked.append(scene)
+        if len(picked) >= max_scenes:
+            break
+
+    logger.info(
+        "Pre-event same-orbit search: %d candidate(s) on relative orbit %s "
+        "(%s), %d selected over the last %d days",
+        len(same_orbit), rel_orbit, direction, len(picked), days_back,
+    )
+    return picked

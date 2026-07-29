@@ -378,29 +378,140 @@ class CrossValidator:
         if (disaster_type or "").lower() == "flood":
             index_type = satellite_result.get("index_type")
             index_calibrated = satellite_result.get("index_calibrated")
-            if index_type == "NDWI" and index_calibrated is not False:
-                ndwi = _coerce_float(satellite_result.get("mean_index"))
+            # Phase 1b: MNDWI (Xu 2006) is the flood index since 2026-07-29;
+            # it is a calibrated bounded water ratio exactly like NDWI, with
+            # the same water-positive/land-negative sign convention, so the
+            # same physics check applies to both labels.
+            if index_type in ("NDWI", "MNDWI") and index_calibrated is not False:
+                # Phase 0b (science/full-pass): the physics check previously
+                # judged the WHOLE-AOI mean NDWI against water thresholds.
+                # With dry land ~-0.3 and open water ~+0.4, the whole-AOI mean
+                # only crosses 0 when ~43% of the AOI is water — so the old
+                # check read every realistic partial flood (1-15% of an admin
+                # AOI) as weak/contradicting evidence, including the baseline
+                # run that scored 0.65 F1. The correct support is the
+                # CLASSIFIED-WATER pixel population: if the classification is
+                # physically sound, ITS mean sits in water-index territory
+                # regardless of how small the flooded fraction is. The
+                # whole-AOI mean is context only, never counter-evidence.
+                ndwi_aoi = _coerce_float(satellite_result.get("mean_index"))
+                within_water = _coerce_float(
+                    satellite_result.get("affected_mean_index")
+                )
                 water_pct = _normalise_percent(satellite_result.get("water_percent")) or 0.0
                 gdacs_red = bool(gdacs and gdacs.get("alert") == "RED")
-                if ndwi is not None:
-                    if ndwi < 0 and gdacs_red:
+                if water_pct == 0.0:
+                    # Nothing classified as water at all. Only THIS case can
+                    # genuinely contradict an external RED alert — a small
+                    # positive fraction is a plausible real flood (urban EMS
+                    # references sit at ~1% of an admin AOI).
+                    if gdacs_red:
                         tracker.add_concern(
-                            "NDWI negative but GDACS RED alert — cloud interference likely",
+                            "No water classified but GDACS RED alert — "
+                            "cloud interference or missed detection likely",
                             "CRITICAL",
                         )
                         validations.append(
                             {
                                 "source": "INDEX",
                                 "status": "CONTRADICTION",
-                                "detail": "NDWI shows no water yet GDACS is RED",
+                                "detail": "0% water classified yet GDACS is RED",
                             }
                         )
-                    elif ndwi > 0.3 and water_pct > 20:
-                        tracker.add_evidence("index_validation", 0.95, weight=0.3)
-                    elif ndwi > 0.1:
-                        tracker.add_evidence("index_validation", 0.75, weight=0.3)
                     else:
-                        tracker.add_evidence("index_validation", 0.4, weight=0.3)
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "NO_WATER",
+                                "detail": (
+                                    f"No water classified (whole-AOI mean NDWI "
+                                    f"{ndwi_aoi}); no external source contradicts"
+                                ),
+                            }
+                        )
+                elif within_water is not None:
+                    # Water was classified — judge whether those pixels
+                    # actually look like water. (With the current fixed
+                    # >=0.0 wet_soil class this mean cannot be negative, but
+                    # an adaptive threshold (Phase 2) can move the class
+                    # floor, so the <=0 contradiction branch is a real guard
+                    # against future drift, not dead code.)
+                    frac_note = (
+                        f"flooded fraction {water_pct:.2f}% of AOI; a "
+                        f"negative whole-AOI mean ({ndwi_aoi}) is expected "
+                        f"at this fraction and is not counter-evidence"
+                    )
+                    if within_water > 0.3:
+                        tracker.add_evidence("index_validation", 0.95, weight=0.3)
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "CONFIRMED",
+                                "detail": (
+                                    f"Within-water mean NDWI {within_water:.3f} "
+                                    f"is open-water territory; {frac_note}"
+                                ),
+                            }
+                        )
+                    elif within_water > 0.1:
+                        tracker.add_evidence("index_validation", 0.75, weight=0.3)
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "CONFIRMED",
+                                "detail": (
+                                    f"Within-water mean NDWI {within_water:.3f} "
+                                    f"consistent with water/wet surfaces; {frac_note}"
+                                ),
+                            }
+                        )
+                    elif within_water > 0.0:
+                        tracker.add_evidence("index_validation", 0.55, weight=0.3)
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "WEAK",
+                                "detail": (
+                                    f"Within-water mean NDWI {within_water:.3f} "
+                                    f"is marginal (wet soil rather than open "
+                                    f"water); {frac_note}"
+                                ),
+                            }
+                        )
+                    else:
+                        tracker.add_evidence("index_validation", 0.3, weight=0.3)
+                        tracker.add_concern(
+                            f"Pixels classified as water average NDWI "
+                            f"{within_water:.3f} (non-positive) — "
+                            "classification internally inconsistent",
+                            "HIGH",
+                        )
+                        validations.append(
+                            {
+                                "source": "INDEX",
+                                "status": "CONTRADICTION",
+                                "detail": (
+                                    f"Classified-water mean NDWI "
+                                    f"{within_water:.3f} does not look like water"
+                                ),
+                            }
+                        )
+                else:
+                    # Water classified but no within-water mean available
+                    # (older payload) — record that the physics check could
+                    # not run on the correct support rather than silently
+                    # falling back to the whole-AOI-mean defect.
+                    validations.append(
+                        {
+                            "source": "INDEX",
+                            "status": "SKIPPED",
+                            "detail": (
+                                "affected_mean_index missing — physics check "
+                                "needs the within-water mean, not the "
+                                "whole-AOI mean"
+                            ),
+                        }
+                    )
             elif index_type == "SAR" or index_calibrated is False:
                 # Uncalibrated SAR backscatter cannot be threshold-compared —
                 # explicitly skip evidence/concern generation rather than
@@ -476,11 +587,32 @@ class CrossValidator:
         suits the judgement call).
         """
         intel = self._intel()
+        # Phase 0b: state the flooded fraction and the within-water mean
+        # explicitly, and pre-empt the "mean NDWI is characteristic of dry
+        # soil" misreading that fired on every partial flood — a negative
+        # whole-AOI mean is expected geometry whenever the flooded fraction
+        # is small, not a contradiction.
+        water_pct = _normalise_percent(result.get("water_percent"))
+        within_water = _coerce_float(result.get("affected_mean_index"))
+        index_context = ""
+        if water_pct is not None:
+            index_context = f"""
+Index interpretation facts (read BEFORE judging the index):
+- Flooded fraction: {water_pct:.2f}% of the AOI is classified water.
+- Mean index over the CLASSIFIED WATER pixels only: {within_water}
+- Mean index over the WHOLE AOI (water + dry land): {result.get("mean_index")}
+A negative WHOLE-AOI mean is EXPECTED whenever the flooded fraction is small
+(dry land dominates the spatial average; the whole-AOI mean NDWI only turns
+positive when roughly 43% of the AOI is water). It is NOT evidence against
+the detection and must not be described as contradicting the water percent.
+Judge water physics from the within-water mean only.
+"""
         prompt = f"""\
 You are a senior remote sensing expert validating a disaster analysis.
 
 Satellite analysis results:
 {json.dumps(result, indent=2, default=str)}
+{index_context}
 
 Cross-validation findings so far:
 {json.dumps(validations, indent=2, default=str)}

@@ -1569,10 +1569,21 @@ def stack_bands(
                 continue
             src_ds, src_raw = _open_georeferenced(path, dst_crs)
             try:
+                # Phase 1a: SCL is a CATEGORICAL class layer — bilinear
+                # interpolation of class ids invents non-existent classes at
+                # every boundary (e.g. midway between cloud-shadow 3 and
+                # vegetation 4 reads as 3.5). Nearest keeps every resampled
+                # pixel a real ESA class id; continuous spectral bands stay
+                # bilinear as before.
+                resampling = (
+                    Resampling.nearest
+                    if token.upper() == "SCL"
+                    else Resampling.bilinear
+                )
                 arr = src_ds.read(
                     1,
                     out_shape=(ref_h, ref_w),
-                    resampling=Resampling.bilinear,
+                    resampling=resampling,
                 ).astype("float32")
                 bands[token] = arr
             finally:
@@ -1792,7 +1803,12 @@ def _classify(index: np.ndarray, valid: np.ndarray, scheme: dict) -> np.ndarray:
 
 
 def calculate_indices(
-    clipped: dict, satellite_type: str, disaster_type: str
+    clipped: dict,
+    satellite_type: str,
+    disaster_type: str,
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
+    orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
     """Compute the disaster-appropriate index and a classification mask.
 
@@ -1826,6 +1842,89 @@ def calculate_indices(
         if vv is None:
             logger.error("Sentinel-1 VV band missing; cannot compute SAR index")
             return None
+        # Phase 3 (science/full-pass): when same-relative-orbit pre-event
+        # scenes are supplied, the SAR flood answer comes from CHANGE
+        # DETECTION, not an absolute threshold. The absolute path below is
+        # structurally incapable of producing a flood answer on this
+        # codebase's uncalibrated index (10*log10(raw DN) is ~+23 dB;
+        # SAR_WATER_THRESHOLD_DB is -15 dB in calibrated-sigma0 space, so it
+        # can never fire) — see sar_change_detection.py for the verified
+        # calibration-cancellation argument.
+        if pre_event_vv:
+            try:
+                from sar_change_detection import detect_flood_change
+
+                cd = detect_flood_change(
+                    vv,
+                    pre_event_vv,
+                    dem=dem,
+                    valid_mask=mask,
+                    orbit_direction=orbit_direction or "DESCENDING",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SAR change detection failed (%s)", exc)
+                cd = None
+            if cd and cd.get("status") == "complete":
+                index = cd["change_db"]
+                classification = np.full(index.shape, NODATA_CLASS, dtype="uint8")
+                valid_cd = np.isfinite(index)
+                if mask is not None:
+                    valid_cd = valid_cd & mask
+                classification[valid_cd] = 0
+                classification[cd["flood_mask"]] = 2  # "water" severity band
+                valid_count = int(valid_cd.sum())
+                affected_count = int(cd["flood_mask"].sum())
+                return {
+                    "index_type": "SAR_CHANGE",
+                    "scheme_key": "SAR",
+                    "array": index,
+                    "classification_array": classification,
+                    "water_percent": cd["water_percent"],
+                    "mean_value": (
+                        round(float(np.nanmean(index[valid_cd])), 4)
+                        if valid_count else 0.0
+                    ),
+                    "affected_mean_index": cd["mean_change_db"],
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": cd["threshold_method"],
+                    "derived_threshold": cd["threshold_db"],
+                    "affected_cut": cd["threshold_db"],
+                    "ki_diagnostics": {
+                        "bimodal_tiles": cd["bimodal_tiles"],
+                        "tiles_tested": cd["tiles_tested"],
+                    },
+                    "ki_fallback_reason": None,
+                    "threshold_used": cd["threshold_db"],
+                    "class_counts": (
+                        {"water": round(100.0 * affected_count / valid_count, 2)}
+                        if valid_count else {}
+                    ),
+                    # The RATIO is calibration-independent (verified against
+                    # live CDSE LUTs), so unlike the absolute path this IS a
+                    # defensible measurement.
+                    "index_calibrated": True,
+                    "index_units": "dB_change_ratio",
+                    "sar_change_detection": {
+                        k: cd[k] for k in (
+                            "method", "speckle_filter", "speckle_window", "enl",
+                            "baseline_scene_count", "baseline_confidence_penalty",
+                            "threshold_db", "threshold_method", "hand_max_m",
+                            "masks_applied", "min_flood_patch_px",
+                        )
+                    },
+                }
+            if cd and cd.get("status") == "insufficient_reference":
+                logger.warning(
+                    "SAR change detection unavailable: %s", cd.get("reason")
+                )
+        # Absolute fallback (no same-orbit reference). Retained ONLY because
+        # the surrounding pipeline still expects an index array; it is
+        # explicitly labelled uncalibrated and its flood verdict must not be
+        # trusted in either direction (root CLAUDE.md's standing warning).
         # GRD products are linear power; convert to dB. Guard non-positive.
         index = np.full_like(vv, np.nan, dtype="float32")
         finite = np.isfinite(vv) & (vv > 0)
@@ -1840,16 +1939,43 @@ def calculate_indices(
         index_calibrated = False
         index_units = "dB_uncalibrated"
     elif disaster == "flood":
-        b03, b08 = bands.get("B03"), bands.get("B08")
-        if b03 is None or b08 is None:
-            logger.error("NDWI needs B03 and B08; one is missing")
+        # Phase 1b (science/full-pass): MNDWI (Xu 2006) replaces McFeeters
+        # NDWI as the primary flood index. (B03-B11)/(B03+B11) — B11 (SWIR)
+        # was chosen by Xu specifically because built-up surfaces, NDWI's
+        # documented false-positive class, reflect strongly in SWIR and are
+        # suppressed in the ratio, while water absorbs SWIR even more
+        # strongly than NIR. B11 is already in the flood band set (no new
+        # fetch) and is resampled 20m->10m bilinearly in stack_bands —
+        # appropriate for a continuous radiometric band feeding a continuous
+        # ratio (nearest would tile 2x2 blocks of identical reflectance and
+        # put blocky artifacts on every water edge; SCL, the categorical
+        # layer, is the one that gets nearest).
+        # Threshold: HELD at the NDWI-era constant this phase so the
+        # measured delta is the index formula alone (Phase 2 replaces the
+        # fixed threshold adaptively) — the measured number is therefore a
+        # lower bound on MNDWI's value, stated in SCIENCE_LOG.md.
+        # Fallback: if B11 is genuinely absent (non-flood band set reuse,
+        # legacy cache), compute NDWI and LABEL IT NDWI — the label always
+        # follows the formula actually used, never the intended one.
+        b03, b08, b11 = bands.get("B03"), bands.get("B08"), bands.get("B11")
+        if b03 is None or (b11 is None and b08 is None):
+            logger.error("Flood index needs B03 plus B11 (MNDWI) or B08 (NDWI fallback)")
             return None
-        index = _safe_ratio(b03 - b08, b03 + b08)
-        index_type = "NDWI"
+        if b11 is not None:
+            index = _safe_ratio(b03 - b11, b03 + b11)
+            index_type = "MNDWI"
+            index_units = "MNDWI_ratio"
+        else:
+            logger.warning(
+                "B11 missing — falling back to NDWI (B03/B08); built-up "
+                "false-positive suppression unavailable on this run"
+            )
+            index = _safe_ratio(b03 - b08, b03 + b08)
+            index_type = "NDWI"
+            index_units = "NDWI_ratio"
         scheme_key = "NDWI"
         threshold = NDWI_WATER_THRESHOLD
         index_calibrated = True
-        index_units = "NDWI_ratio"
     else:
         b08, b04 = bands.get("B08"), bands.get("B04")
         if b08 is None or b04 is None:
@@ -1866,8 +1992,139 @@ def calculate_indices(
     valid = np.isfinite(index)
     if mask is not None:
         valid = valid & mask
+    # Phase 1a (science/full-pass): per-pixel SCL masking INSIDE the index.
+    # SCL was used for the coverage metric but not for the index itself —
+    # cloud shadow (class 3) is spectrally almost identical to water in any
+    # water index and is the largest false-positive source after built-up
+    # surfaces. Masked pixels (same _SCL_INVALID_CLASSES set coverage uses:
+    # 0 nodata, 1 saturated, 3 cloud shadow, 8/9 cloud, 10 cirrus, 11 snow)
+    # are excluded from the index, the classification, mean_value,
+    # affected_mean_index, water_percent and affected_area_km2 — they become
+    # NODATA_CLASS, never silently "safe land" or zero.
+    scl_masked_percent = None
+    cloud_invalid = _scl_cloud_mask(clipped) if satellite_type == "sentinel-2" else None
+    if cloud_invalid is not None:
+        in_aoi = mask if mask is not None else np.isfinite(index)
+        aoi_count = int(np.count_nonzero(in_aoi))
+        masked_count = int(np.count_nonzero(cloud_invalid & in_aoi & valid))
+        scl_masked_percent = (
+            round(100.0 * masked_count / aoi_count, 2) if aoi_count else 0.0
+        )
+        valid = valid & ~cloud_invalid
     scheme = _CLASS_SCHEMES[scheme_key]
+
+    # Phase 2 (science/full-pass): Kittler-Illingworth adaptive thresholding
+    # for the calibrated S2 water index. Fixed cut points don't hold across
+    # seasons/regions/index formulas — Phase 1b measured MNDWI putting 22% of
+    # a flooded AOI in the fixed scheme's 0.0-0.3 "wet_soil" band with 0.01%
+    # above 0.3. KI fits the AOI's own histogram and derives the
+    # minimum-error water/land cut; the graded severity boundaries keep the
+    # fixed scheme's internal spacing (+0.3/+0.5) relative to the derived
+    # cut. Guarded by a bimodality test (Ashman's D >= 2 + class-fraction
+    # floor, see adaptive_threshold.py) — a barely-flooded AOI's unimodal
+    # histogram falls back to the fixed scheme with the reason recorded.
+    # Either way the derived value + method ride in the result so any run's
+    # classification can be re-derived. S2 calibrated water index only —
+    # the SAR path is Phase 3's change-detection work, not this.
+    threshold_method = None
+    derived_threshold = None
+    affected_cut = None
+    ki_diagnostics = None
+    ki_fallback_reason = None
+    if scheme_key == "NDWI" and index_calibrated:
+        try:
+            from adaptive_threshold import derive_water_threshold
+
+            fixed_affected_cut = scheme["bands"][0][0]  # 0.0, the legacy cut
+            decision = derive_water_threshold(index[valid], fixed_affected_cut)
+            threshold_method = decision["threshold_method"]
+            ki_fallback_reason = decision.get("fallback_reason")
+            ki_diagnostics = decision.get("ki")
+            affected_cut = decision["threshold"]
+            if threshold_method == "kittler_illingworth":
+                derived_threshold = decision["threshold"]
+                t = derived_threshold
+                scheme = {
+                    "order": "asc",
+                    "bands": [
+                        (t, 1, "wet_soil", (147, 197, 253), 150),
+                        (t + 0.3, 2, "water", (37, 99, 235), 200),
+                        (t + 0.5, 3, "deep_water", (30, 58, 138), 220),
+                    ],
+                }
+                logger.info(
+                    "Adaptive threshold: KI cut %.4f (ashman_d=%.2f, "
+                    "class_fractions=%s) replaces fixed %.2f",
+                    t,
+                    (ki_diagnostics or {}).get("ashman_d", float("nan")),
+                    (ki_diagnostics or {}).get("class_fractions"),
+                    fixed_affected_cut,
+                )
+            else:
+                logger.info(
+                    "Adaptive threshold fallback to fixed %.2f: %s",
+                    fixed_affected_cut,
+                    ki_fallback_reason,
+                )
+        except Exception as exc:  # noqa: BLE001 — adaptive is optional
+            logger.warning("Adaptive thresholding unavailable (%s)", exc)
+            threshold_method = "fixed_fallback"
+            ki_fallback_reason = f"error: {exc}"
+            affected_cut = scheme["bands"][0][0]
+
     classification = _classify(index, valid, scheme)
+
+    # Phase 1c (science/full-pass): permanent-water masking. Flood means
+    # water where water is NOT normally present — rivers/lakes/reservoirs
+    # (JRC Global Surface Water occurrence >= 75% of observed months,
+    # 1984-2021) were previously counted as flood on every run. Pixels
+    # classified water that are NORMALLY water are reclassified to 0
+    # ("not flood-affected" — the honest flood-purpose claim) and excluded
+    # from water_percent / affected_mean_index / affected_area_km2, with
+    # the share recorded as permanent_water_percent. Best-effort: an
+    # unreachable JRC bucket degrades to no mask with the applied-flag
+    # False — it never fails a run. See permanent_water.py for the
+    # sourcing decision (windowed /vsicurl/ reads, disk cache) and the
+    # 75-vs-50 occurrence-threshold argument (75 errs toward NOT masking
+    # seasonal water: recall cost beats precision cost in life safety).
+    permanent_water_percent = None
+    permanent_water_threshold = None
+    permanent_water_source = None
+    permanent_water_mask_applied = False
+    if disaster == "flood":
+        try:
+            from permanent_water import (
+                DEFAULT_OCCURRENCE_THRESHOLD,
+                JRC_SOURCE_LABEL,
+                permanent_water_mask_for_clip,
+            )
+
+            pw_mask = permanent_water_mask_for_clip(
+                index.shape, clipped.get("transform"), clipped.get("crs")
+            )
+        except Exception as exc:  # noqa: BLE001 — mask is optional, run is not
+            logger.warning("Permanent-water masking unavailable (%s)", exc)
+            pw_mask = None
+        if pw_mask is not None:
+            affected_now = (classification >= 1) & (classification != NODATA_CLASS)
+            reclassified = affected_now & pw_mask
+            classification[reclassified] = 0
+            valid_now = int(valid.sum())
+            permanent_water_percent = (
+                round(100.0 * int(reclassified.sum()) / valid_now, 2)
+                if valid_now
+                else 0.0
+            )
+            permanent_water_threshold = DEFAULT_OCCURRENCE_THRESHOLD
+            permanent_water_source = JRC_SOURCE_LABEL
+            permanent_water_mask_applied = True
+            logger.info(
+                "Permanent-water mask applied: %.2f%% of valid pixels "
+                "reclassified water->normally-water (occurrence >= %d, %s)",
+                permanent_water_percent,
+                permanent_water_threshold,
+                permanent_water_source,
+            )
 
     valid_count = int(valid.sum())
     affected_mask = (classification >= 1) & (classification != NODATA_CLASS)
@@ -1877,6 +2134,20 @@ def calculate_indices(
     )
     mean_value = (
         round(float(np.nanmean(index[valid])), 4) if valid_count else 0.0
+    )
+    # Phase 0b (science/full-pass): mean index over the CLASSIFIED-AFFECTED
+    # pixels only (for flood: the within-water mean). The whole-AOI
+    # `mean_value` stays negative until ~43% of the AOI is water, so any
+    # physics check comparing IT against a water threshold fires on every
+    # realistic partial flood. The correct support for that comparison is the
+    # affected-pixel population — if the classification is physically sound,
+    # THIS mean sits above the water threshold regardless of flooded fraction.
+    # None (not 0.0) when nothing was classified affected: "no affected
+    # pixels" and "affected pixels averaging 0" are different claims.
+    affected_mean_index = (
+        round(float(np.nanmean(index[affected_mask])), 4)
+        if affected_count
+        else None
     )
 
     # Per-class pixel counts (skip class 0 / nodata) for reporting.
@@ -1900,6 +2171,27 @@ def calculate_indices(
         "classification_array": classification,
         "water_percent": water_percent,
         "mean_value": mean_value,
+        "affected_mean_index": affected_mean_index,
+        # Phase 1a: % of in-AOI otherwise-valid pixels excluded by the SCL
+        # cloud/shadow/cirrus mask (None on S1 / no-SCL runs). Auditability:
+        # any run's index support can be re-derived from this.
+        "scl_masked_percent": scl_masked_percent,
+        # Phase 1c: permanent-water audit trail — threshold + source make any
+        # run's mask re-derivable; applied=False means the run proceeded
+        # unmasked (JRC unreachable / non-flood), never silently.
+        "permanent_water_mask_applied": permanent_water_mask_applied,
+        "permanent_water_percent": permanent_water_percent,
+        "permanent_water_occurrence_threshold": permanent_water_threshold,
+        "permanent_water_source": permanent_water_source,
+        # Phase 2: adaptive-threshold audit trail — the applied affected/not
+        # cut, how it was derived, and the KI diagnostics, so any run's
+        # classification is re-derivable. None on paths KI doesn't cover
+        # (SAR, NDVI).
+        "threshold_method": threshold_method,
+        "derived_threshold": derived_threshold,
+        "affected_cut": affected_cut,
+        "ki_diagnostics": ki_diagnostics,
+        "ki_fallback_reason": ki_fallback_reason,
         "threshold_used": threshold,
         "class_counts": class_counts,
         # BUG 5 calibration contract (see the branch above).
@@ -2502,6 +2794,9 @@ def _render_clip(
     satellite_type: str,
     disaster_type: str,
     out_id: str,
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
+    orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
     """Render the cheap tail for one clipped cube.
 
@@ -2510,8 +2805,20 @@ def _render_clip(
     result and `<event_id>/cities/<slug>` for a per-city one. Returns the
     per-clip result dict (without `valid_percent`, which the caller sets) or
     None if indices/PNG export fails.
+
+    Phase 3: `pre_event_vv`/`dem`/`orbit_direction` carry the same-relative-
+    orbit reference stack into the SAR path so `calculate_indices` can run
+    change detection instead of the (structurally unusable) absolute
+    threshold. Absent them the behaviour is exactly as before.
     """
-    indices = calculate_indices(clipped, satellite_type, disaster_type)
+    indices = calculate_indices(
+        clipped,
+        satellite_type,
+        disaster_type,
+        pre_event_vv=pre_event_vv,
+        dem=dem,
+        orbit_direction=orbit_direction,
+    )
     if indices is None:
         logger.error("Index calculation failed for %s", out_id)
         return None
@@ -2536,6 +2843,23 @@ def _render_clip(
         "index_type": indices["index_type"],
         "water_percent": indices["water_percent"],
         "mean_index": indices["mean_value"],
+        # Phase 0b: mean index over classified-affected pixels only (the
+        # within-water mean on the flood path); None when nothing classified.
+        "affected_mean_index": indices.get("affected_mean_index"),
+        # Phase 1a: % of in-AOI pixels the SCL cloud/shadow mask excluded
+        # from the index support (None on S1 / no-SCL runs).
+        "scl_masked_percent": indices.get("scl_masked_percent"),
+        # Phase 1c: permanent-water audit trail.
+        "permanent_water_mask_applied": indices.get("permanent_water_mask_applied"),
+        "permanent_water_percent": indices.get("permanent_water_percent"),
+        "permanent_water_occurrence_threshold": indices.get("permanent_water_occurrence_threshold"),
+        "permanent_water_source": indices.get("permanent_water_source"),
+        # Phase 2: adaptive-threshold audit trail.
+        "threshold_method": indices.get("threshold_method"),
+        "derived_threshold": indices.get("derived_threshold"),
+        "affected_cut": indices.get("affected_cut"),
+        "ki_diagnostics": indices.get("ki_diagnostics"),
+        "ki_fallback_reason": indices.get("ki_fallback_reason"),
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         # BUG 5 — calibration contract rides through to the result dict.
@@ -2927,11 +3251,19 @@ def process_satellite_imagery(
                 min_cov, tier, cov["interior_coverage_percent"],
                 len(accepted), spread, orbit_dir,
             )
+            pre_stack = _fetch_pre_event_stack(
+                accepted, bbox, merged_polygon, event_id, token, satellite_type,
+                post_shape=(clipped.get("bands") or {}).get("VV").shape
+                if (clipped.get("bands") or {}).get("VV") is not None else None,
+                post_transform=clipped.get("transform"),
+                post_crs=clipped.get("crs"),
+            )
             return _finish_success(
                 clipped, cov, accepted, tier, orbit_dir, spread,
                 satellite_type, disaster_type, event_id, city_boundaries,
                 tracker, bytes_before, min_cov, budget_exhausted=None,
                 marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
+                pre_event_vv=pre_stack,
             )
 
         if budget_exhausted or marginal_stop or gap_limited_by:
@@ -2960,11 +3292,19 @@ def process_satellite_imagery(
             budget_exhausted or ("marginal_return" if marginal_stop else "exhausted_tiers"),
             best_interior, min_cov, COVERAGE_FLOOR,
         )
+        pre_stack = _fetch_pre_event_stack(
+            best_accepted, bbox, merged_polygon, event_id, token, satellite_type,
+            post_shape=(best_clipped.get("bands") or {}).get("VV").shape
+            if (best_clipped.get("bands") or {}).get("VV") is not None else None,
+            post_transform=best_clipped.get("transform"),
+            post_crs=best_clipped.get("crs"),
+        )
         return _finish_success(
             best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
             spread, satellite_type, disaster_type, event_id, city_boundaries,
             tracker, bytes_before, min_cov, budget_exhausted=budget_exhausted,
             marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
+            pre_event_vv=pre_stack,
         )
 
     # Below COVERAGE_FLOOR — fail honestly with gap geometry. NEVER analyse a
@@ -3089,6 +3429,125 @@ def _scene_cloud_for_gap_check(scene: Optional[dict]) -> Optional[float]:
     return None
 
 
+
+def _fetch_pre_event_stack(
+    accepted: list,
+    bbox,
+    merged_polygon: dict,
+    event_id: str,
+    token,
+    satellite_type: str,
+    post_shape=None,
+    post_transform=None,
+    post_crs=None,
+) -> list:
+    """Phase 3: same-relative-orbit pre-event VV scenes, clipped to the AOI.
+
+    The same-relative-orbit constraint is enforced STRICTLY here because it
+    is the entire basis of the change-detection method's validity (matching
+    incidence angle, look direction and terrain geometry are what make the
+    calibration factor cancel in the ratio — verified against live CDSE
+    LUTs, see sar_change_detection.py). A scene from a different relative
+    orbit is never substituted; an empty list is returned instead, and the
+    caller reports insufficient_reference rather than silently falling back
+    to absolute thresholding.
+
+    Returns a list of clipped VV arrays on the SAME grid as the post-event
+    clip, oldest-first. Best-effort: any failure returns [] and the SAR path
+    degrades to the (labelled, untrusted) absolute index.
+    """
+    if satellite_type != "sentinel-1" or not accepted:
+        return []
+    try:
+        from sentinel import (
+            BASELINE_SEARCH_DAYS,
+            search_pre_event_same_orbit,
+        )
+    except ImportError:
+        return []
+    try:
+        post_scene = accepted[0]
+        pre_scenes = search_pre_event_same_orbit(
+            post_scene, bbox, merged_polygon=merged_polygon
+        )
+        if not pre_scenes:
+            logger.warning(
+                "No same-relative-orbit pre-event scene found — SAR change "
+                "detection unavailable (absolute thresholding is NOT "
+                "substituted; see sar_change_detection.py)"
+            )
+            return []
+        stack = []
+        dst_crs = _dst_crs_from_polygon(merged_polygon)
+        for idx, scene in enumerate(pre_scenes):
+            try:
+                dl = download_imagery(
+                    {"satellite_type": satellite_type}, scene,
+                    f"{event_id}/pre_{idx}", token, "flood",
+                )
+                if not dl or not dl.get("band_paths"):
+                    continue
+                stacked = stack_bands(dl["band_paths"], satellite_type, dst_crs)
+                if stacked is None:
+                    continue
+                clipped_pre = clip_to_polygon(stacked, merged_polygon)
+                if clipped_pre is None:
+                    continue
+                vv = (clipped_pre.get("bands") or {}).get("VV")
+                if vv is None:
+                    continue
+                # GRID ALIGNMENT (found by the first live forced-S1 run,
+                # which failed with "all input arrays must have the same
+                # shape"): each scene clips to its OWN footprint-derived
+                # grid, so a pre-event clip is generally a different shape
+                # from the post-event clip even for the same AOI polygon.
+                # The log-ratio is elementwise, so the reference MUST be
+                # resampled onto the post-event grid. Reproject rather than
+                # crop/pad: the two grids can differ in origin and extent,
+                # not merely size, and a naive slice would silently
+                # mis-register the ratio (worse than failing).
+                if post_shape is not None and vv.shape != post_shape:
+                    try:
+                        from rasterio.warp import reproject
+
+                        dest = np.full(post_shape, np.nan, dtype="float32")
+                        reproject(
+                            source=vv.astype("float32"),
+                            destination=dest,
+                            src_transform=clipped_pre["transform"],
+                            src_crs=clipped_pre["crs"],
+                            dst_transform=post_transform,
+                            dst_crs=post_crs,
+                            resampling=Resampling.bilinear,
+                            src_nodata=np.nan,
+                            dst_nodata=np.nan,
+                        )
+                        vv = dest
+                        logger.info(
+                            "Pre-event scene %d resampled %s -> %s onto the "
+                            "post-event grid", idx, clipped_pre["bands"]["VV"].shape,
+                            post_shape,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Pre-event scene %d could not be aligned to the "
+                            "post-event grid (%s) — excluded from the baseline",
+                            idx, exc,
+                        )
+                        continue
+                stack.append(vv)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Pre-event scene %d unusable: %s", idx, exc)
+        logger.info(
+            "Pre-event baseline: %d same-orbit scene(s) usable of %d found",
+            len(stack), len(pre_scenes),
+        )
+        return stack
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pre-event stack unavailable: %s", exc)
+        return []
+
+
 def _finish_success(
     clipped: dict,
     cov: dict,
@@ -3106,6 +3565,8 @@ def _finish_success(
     budget_exhausted: Optional[str],
     marginal_stop: bool,
     gap_limited_by: Optional[str],
+    pre_event_vv: Optional[list] = None,
+    dem: Optional[np.ndarray] = None,
 ) -> Optional[dict]:
     """Render + finalize a successful (target-met or best-effort) coverage result.
 
@@ -3122,7 +3583,8 @@ def _finish_success(
         gc.collect()
 
     merged_result = _render_clip(
-        clipped, satellite_type, disaster_type, event_id
+        clipped, satellite_type, disaster_type, event_id,
+        pre_event_vv=pre_event_vv, dem=dem, orbit_direction=orbit_dir,
     )
     if merged_result is None:
         logger.error("Aborting pipeline: merged render failed")
