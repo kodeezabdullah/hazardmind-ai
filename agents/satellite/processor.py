@@ -359,6 +359,15 @@ MIN_ZONE_AREA_KM2 = 0.5
 #   255 = nodata / outside the polygon
 NODATA_CLASS = 255
 
+# Phase 3a (science/detection-pass): permanent water is a CLASS, not a
+# subtraction. Phase 1c reclassified normally-wet pixels to 0 ("safe land"),
+# which is honest about the flood claim but wrong on the map: a responder
+# looking at the Ravi or Lake Karla saw a blank where the river belongs.
+# Class 10 sits deliberately OUTSIDE the 1..3 severity range so no existing
+# consumer (vectorizer, PNG renderer, hazard agent) can mistake it for a
+# risk level — it is rendered and reported, and never counted as flood.
+PERMANENT_WATER_CLASS = 10
+
 # Per-index class definitions, ordered low->high severity. Each entry is
 # (class_value, label, RGB colour, alpha). Pixels not matching any band stay 0.
 # Thresholds are applied as: NDWI/SAR ascending bands, NDVI descending bands
@@ -2119,7 +2128,13 @@ def calculate_indices(
         if pw_mask is not None:
             affected_now = (classification >= 1) & (classification != NODATA_CLASS)
             reclassified = affected_now & pw_mask
-            classification[reclassified] = 0
+            # Phase 3a: assign the dedicated permanent-water class rather
+            # than 0. Functionally identical for the flood claim (class 10
+            # is outside the 1..3 severity range, so every affected-mask
+            # test below still excludes it), but the pixels remain
+            # DISTINGUISHABLE from dry land for rendering and reporting —
+            # the classification distinguishes, it does not delete.
+            classification[reclassified] = PERMANENT_WATER_CLASS
             valid_now = int(valid.sum())
             permanent_water_percent = (
                 round(100.0 * int(reclassified.sum()) / valid_now, 2)
@@ -2345,6 +2360,14 @@ def export_png(
         for _bound, value, _label, rgb, alpha in scheme["bands"]:
             sel = cls == value
             rgba[sel] = (*rgb, alpha)
+        # Phase 3a: permanent water rendered as its own layer — a desaturated
+        # slate grey-blue, deliberately OUTSIDE the hazard palette's blue ramp
+        # so a reader can tell "the river that is always here" from "flood"
+        # at a glance instead of the river being a hole in the map. Painted
+        # after the hazard bands, but the two sets are disjoint by
+        # construction (class 10 is not a hazard class), so ordering is not
+        # load-bearing.
+        rgba[cls == PERMANENT_WATER_CLASS] = (100, 116, 139, 160)
         # class 0 (safe) and 255 (nodata) remain (0,0,0,0) -> transparent.
         cls_path = os.path.join(out_dir, "classification.png")
         Image.fromarray(rgba, mode="RGBA").save(
@@ -2412,32 +2435,40 @@ def vectorize_classification(
     arr = classification_array
 
     features = []
+    permanent_water_features = []
     total_area = 0.0
+    permanent_water_area = 0.0
+
+    def _polys_for(value):
+        """Yield (polygon, area_km2) for every zone of one class value."""
+        sel = (arr == value).astype("uint8")
+        for geom, gval in shapes(sel, mask=sel.astype(bool), transform=transform):
+            if gval != 1:
+                continue
+            poly = shape(geom)
+            if crs is not None and crs.to_epsg() != 4326:
+                poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
+            poly = poly.simplify(0.001, preserve_topology=True)
+            if poly.is_empty:
+                continue
+            area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
+            if area_km2 < MIN_ZONE_AREA_KM2:
+                continue
+            yield poly, area_km2
+
     try:
-        # Vectorize each hazard class (skip 0 safe and 255 nodata).
+        # Vectorize each HAZARD class (skip 0 safe, 255 nodata, and the
+        # permanent-water class — the latter is emitted as its own separate
+        # collection below and must never contribute to `total_area`, which
+        # becomes `affected_area_km2`, i.e. the flood claim.
         hazard_values = sorted(
             v for v in np.unique(arr)
-            if v != 0 and v != NODATA_CLASS
+            if v != 0 and v != NODATA_CLASS and v != PERMANENT_WATER_CLASS
         )
         for value in hazard_values:
-            sel = (arr == value).astype("uint8")
             label = labels.get(int(value), f"class_{int(value)}")
             severity = _SEVERITY_BY_CLASS.get(int(value), "low")
-            for geom, gval in shapes(sel, mask=sel.astype(bool),
-                                     transform=transform):
-                if gval != 1:
-                    continue
-                poly = shape(geom)
-                if crs is not None and crs.to_epsg() != 4326:
-                    poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
-                poly = poly.simplify(0.001, preserve_topology=True)
-                if poly.is_empty:
-                    continue
-
-                area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
-                if area_km2 < MIN_ZONE_AREA_KM2:
-                    continue
-
+            for poly, area_km2 in _polys_for(value):
                 total_area += area_km2
                 features.append(
                     {
@@ -2452,16 +2483,51 @@ def vectorize_classification(
                         },
                     }
                 )
+
+        # Phase 3a: permanent water as its own feature collection, so the
+        # frontend can style the river/lake as context and a reader sees the
+        # flood AND the baseline water body at once. `severity: null` and
+        # `is_risk_zone: false` state explicitly that this is never a risk
+        # zone, rather than leaving a consumer to infer it from the label.
+        for poly, area_km2 in _polys_for(PERMANENT_WATER_CLASS):
+            permanent_water_area += area_km2
+            permanent_water_features.append(
+                {
+                    "type": "Feature",
+                    "geometry": mapping(poly),
+                    "properties": {
+                        "risk_type": "permanent_water",
+                        "hazard_class": "permanent_water",
+                        "class_level": PERMANENT_WATER_CLASS,
+                        "area_km2": area_km2,
+                        "severity": None,
+                        "is_risk_zone": False,
+                    },
+                }
+            )
     except (ValueError, rasterio.errors.RasterioError) as exc:
         logger.error("Vectorization failed: %s", exc)
 
     logger.info(
-        "Vectorized %d zone(s), total %.2f km^2", len(features), total_area
+        "Vectorized %d hazard zone(s), total %.2f km^2; %d permanent-water "
+        "feature(s), %.2f km^2 (reported separately, never counted as flood)",
+        len(features), total_area, len(permanent_water_features),
+        permanent_water_area,
     )
     return {
         "type": "FeatureCollection",
         "features": features,
+        # The flood claim. Unchanged meaning: hazard classes only.
         "total_area": round(total_area, 3),
+        # Phase 3a: the old `affected_area_km2` conflated these two. Reported
+        # separately so "how much flood" and "how much river" are never the
+        # same number again.
+        "permanent_water": {
+            "type": "FeatureCollection",
+            "features": permanent_water_features,
+        },
+        "permanent_water_area_km2": round(permanent_water_area, 3),
+        "total_water_area_km2": round(total_area + permanent_water_area, 3),
     }
 
 
@@ -2872,7 +2938,16 @@ def _render_clip(
         "ki_diagnostics": indices.get("ki_diagnostics"),
         "ki_fallback_reason": indices.get("ki_fallback_reason"),
         "class_counts": indices["class_counts"],
+        # THE flood number. Hazard classes only — permanent water is excluded
+        # by construction in vectorize_classification (Phase 3a).
         "affected_area_km2": geojson["total_area"],
+        # Phase 3a: the three areas reported separately, because the single
+        # old figure conflated "how much flood" with "how much river".
+        # flood_area_km2 is an explicit alias of affected_area_km2 so a
+        # consumer reading either name gets the same, correct flood claim.
+        "flood_area_km2": geojson["total_area"],
+        "permanent_water_area_km2": geojson.get("permanent_water_area_km2"),
+        "total_water_area_km2": geojson.get("total_water_area_km2"),
         # BUG 5 — calibration contract rides through to the result dict.
         "index_calibrated": indices.get("index_calibrated"),
         "index_units": indices.get("index_units"),
