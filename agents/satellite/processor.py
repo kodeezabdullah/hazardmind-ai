@@ -309,7 +309,24 @@ _SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
 # per-band Nodes path (once wired below) fetches one ~100-300 MB GeoTIFF
 # per scene instead of two, and the whole-archive fallback path extracts
 # only the VV member instead of both.
+# Sentinel-1 polarisations, PER DISASTER. Flood change detection reads VV
+# only, so fetching VH there is pure waste (~40% of S1 bandwidth — the
+# measured saving that made VV-only the default). Earthquake DAMAGE detection
+# needs BOTH: the collapse signature is the shift from double-bounce
+# (VV-dominant, standing walls) toward volume scattering (VH rises, rubble),
+# which is only visible in the VH/VV ratio. Without VH the damage detector
+# still runs but loses its most specific evidence and says so
+# (`polarimetric_evidence_available: False`).
 _S1_POLARIZATIONS = ["VV"]
+_S1_POLARIZATIONS_BY_DISASTER = {
+    "earthquake": ["VV", "VH"],
+}
+
+
+def _s1_polarizations_for(disaster_type: Optional[str]) -> list:
+    return _S1_POLARIZATIONS_BY_DISASTER.get(
+        (disaster_type or "").strip().lower(), _S1_POLARIZATIONS
+    )
 
 # CDSE serves the product bytes from a different host
 # (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
@@ -1294,7 +1311,9 @@ def download_imagery(
     disaster = (disaster_type or "").strip().lower()
 
     if satellite_type == "sentinel-1":
-        band_tokens = _S1_POLARIZATIONS
+        # Earthquake damage needs VH as well as VV (the depolarisation
+        # signature); flood needs VV only. See _s1_polarizations_for.
+        band_tokens = _s1_polarizations_for(disaster)
     else:
         band_tokens = _S2_BANDS.get(disaster, _S2_DEFAULT_BANDS)
 
@@ -1662,6 +1681,16 @@ def clip_to_polygon(
         stacked = dict(stacked)
         h, w = stacked["shape"]
         stacked["mask"] = np.ones((h, w), dtype=bool)
+        # The flood path's contract is a FLAT LIST OF VV ARRAYS and must not
+        # change (sar_change_detection iterates it directly). The pre-event VH
+        # stack rides as an attribute on that list instead, so the earthquake
+        # path can reach it without any flood-path reader noticing.
+        if vh_stack:
+            try:
+                stack = _PreEventStack(stack)
+                stack.vh = vh_stack
+            except Exception:  # noqa: BLE001
+                pass
         return stacked
 
     crs = stacked["crs"]
@@ -1880,6 +1909,116 @@ def calculate_indices(
         # SAR_WATER_THRESHOLD_DB is -15 dB in calibrated-sigma0 space, so it
         # can never fire) — see sar_change_detection.py for the verified
         # calibration-cancellation argument.
+        # EARTHQUAKE: building-damage detection from SAR. Distinct from the
+        # flood path below — it looks for a change in SCATTERING MECHANISM
+        # (double-bounce -> volume scattering as walls become rubble), not
+        # for water. Requires a built-up exposure mask; without one it
+        # refuses rather than scoring farmland, where intensity change means
+        # irrigation, not damage. See earthquake_damage.py.
+        if disaster == "earthquake" and pre_event_vv:
+            try:
+                from earthquake_damage import detect_earthquake_damage
+
+                built = None
+                try:
+                    from built_up import compute_ibi
+                    ibi = compute_ibi(bands, mask)
+                    built = ibi["built_up_mask"] if ibi else None
+                except Exception:  # noqa: BLE001
+                    built = None
+
+                # Pre-event VH rides on the stack as an attribute (see
+                # _PreEventStack) so the flood path's flat-list contract is
+                # untouched. Absent -> the detector runs without the
+                # depolarisation term and SAYS so in its result.
+                _pre_vh_stack = getattr(pre_event_vv, "vh", None) or []
+                eqd = detect_earthquake_damage(
+                    vv, pre_event_vv[0],
+                    post_vh=bands.get("VH"),
+                    pre_vh=_pre_vh_stack[0] if _pre_vh_stack else None,
+                    built_up_mask=built,
+                    valid_mask=mask,
+                    pixel_size_m=float(
+                        abs(clipped.get("transform").a)
+                        if clipped.get("transform") is not None else 10.0
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Earthquake damage detection failed (%s)", exc)
+                eqd = None
+            if eqd and eqd.get("status") == "complete":
+                dmg = eqd["damage_mask"]
+                classification = np.full(vv.shape, NODATA_CLASS, dtype="uint8")
+                valid_eq = np.isfinite(vv)
+                if mask is not None:
+                    valid_eq = valid_eq & mask
+                classification[valid_eq] = 0
+                classification[dmg] = 3  # "damage" — highest severity band
+                n_valid = int(valid_eq.sum())
+                n_dmg = int(dmg.sum())
+                logger.info(
+                    "Earthquake damage: %.4f km2 (%.2f%% of built-up), "
+                    "evidence=%s",
+                    eqd["damaged_area_km2"],
+                    eqd["damaged_percent_of_built_up"],
+                    eqd["evidence_used"],
+                )
+                return {
+                    "index_type": "SAR_DAMAGE",
+                    "scheme_key": "NDVI_QUAKE",  # reuse the red severity ramp
+                    "array": eqd["intensity_change_db"],
+                    "classification_array": classification,
+                    "water_percent": (
+                        round(100.0 * n_dmg / n_valid, 2) if n_valid else 0.0
+                    ),
+                    "mean_value": eqd.get("mean_intensity_change_db") or 0.0,
+                    "affected_mean_index": eqd.get("mean_intensity_change_db"),
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": eqd["method"],
+                    "derived_threshold": None,
+                    "affected_cut": None,
+                    "ki_diagnostics": None,
+                    "ki_fallback_reason": None,
+                    "threshold_used": None,
+                    "class_counts": (
+                        {"damage": round(100.0 * n_dmg / n_valid, 2)}
+                        if n_valid else {}
+                    ),
+                    "index_calibrated": True,
+                    "index_units": "dB_change_ratio",
+                    "earthquake_damage": {
+                        k: eqd.get(k) for k in (
+                            "method", "evidence_used",
+                            "polarimetric_evidence_available",
+                            "combination_rule", "damaged_area_km2",
+                            "damaged_percent_of_built_up",
+                            "built_up_pixels_assessed",
+                            "mean_vh_vv_change_db",
+                            "mean_correlation_in_damage",
+                            "thresholds", "thresholds_basis",
+                            "resolution_limit", "upgrade_path",
+                        )
+                    },
+                    "built_up_available": built is not None,
+                    "built_up_percent": None,
+                    "built_up_area_km2": None,
+                    "built_up_threshold": None,
+                    "built_up_formula": None,
+                    "flood_over_built_up_km2": None,
+                    "flood_over_built_up_percent": None,
+                    "signal_detectable": None,
+                    "deep_tail_fraction": None,
+                }
+            if eqd and eqd.get("status") in ("no_exposure_mask", "no_built_up_in_aoi"):
+                logger.warning(
+                    "Earthquake damage detection unavailable: %s",
+                    eqd.get("reason"),
+                )
+
         if pre_event_vv:
             try:
                 from sar_change_detection import detect_flood_change
@@ -3824,6 +3963,17 @@ def _fetch_pre_event_ndvi(
         return None
 
 
+class _PreEventStack(list):
+    """A list of pre-event VV arrays that can also carry a parallel VH stack.
+
+    Subclassing `list` keeps the flood path byte-identical — it iterates the
+    VV arrays exactly as before and cannot observe the extra attribute —
+    while giving the earthquake path access to pre-event VH for the
+    depolarisation (VH/VV) evidence.
+    """
+    vh: list = []
+
+
 def _fetch_pre_event_stack(
     accepted: list,
     bbox,
@@ -3872,6 +4022,7 @@ def _fetch_pre_event_stack(
             )
             return []
         stack = []
+        vh_stack = []  # earthquake only; empty on the flood path
         dst_crs = _dst_crs_from_polygon(merged_polygon)
         for idx, scene in enumerate(pre_scenes):
             try:
@@ -3890,6 +4041,11 @@ def _fetch_pre_event_stack(
                 vv = (clipped_pre.get("bands") or {}).get("VV")
                 if vv is None:
                     continue
+                # Earthquake damage needs the pre-event VH as well, to form
+                # the VH/VV ratio on BOTH dates (the depolarisation
+                # signature). Collected in a parallel list so the flood
+                # path's contract — a flat list of VV arrays — is unchanged.
+                vh = (clipped_pre.get("bands") or {}).get("VH")
                 # GRID ALIGNMENT (found by the first live forced-S1 run,
                 # which failed with "all input arrays must have the same
                 # shape"): each scene clips to its OWN footprint-derived
@@ -3930,6 +4086,22 @@ def _fetch_pre_event_stack(
                         )
                         continue
                 stack.append(vv)
+                if vh is not None:
+                    if post_shape is not None and vh.shape != post_shape:
+                        try:
+                            from rasterio.warp import reproject as _rp
+                            _d = np.full(post_shape, np.nan, dtype="float32")
+                            _rp(source=vh.astype("float32"), destination=_d,
+                                src_transform=clipped_pre["transform"],
+                                src_crs=clipped_pre["crs"],
+                                dst_transform=post_transform, dst_crs=post_crs,
+                                resampling=Resampling.bilinear,
+                                src_nodata=np.nan, dst_nodata=np.nan)
+                            vh = _d
+                        except Exception:  # noqa: BLE001
+                            vh = None
+                    if vh is not None:
+                        vh_stack.append(vh)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Pre-event scene %d unusable: %s", idx, exc)
         logger.info(
