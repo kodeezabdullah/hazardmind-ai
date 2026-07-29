@@ -157,6 +157,98 @@ MIN_DEEP_TAIL_FRACTION = 0.02      # >=2% of valid px beyond the deep cut
 DEEP_TAIL_DB = 3.0                 # |change| >= 3 dB — the conventional bar
 
 
+# --- Acquisition timing -----------------------------------------------------
+# Flood water recedes. Measured on the Kanalia forced-S1 run (2026-07-29):
+# the only available post-peak same-orbit pass was 8 days after the peak, and
+# the change image inside the CONFIRMED flood extent was statistically
+# indistinguishable from dry ground (ROC AUC 0.4870 — below chance; Cohen's d
+# 0.031). Every threshold scored a precision LIFT BELOW 1.0x, i.e. worse than
+# labelling the whole AOI flooded. The basin had drained; no algorithm
+# recovers a signal the pixels do not contain.
+#
+# The pipeline spent ~2.4 GB and ~45 minutes discovering that AFTER the fact.
+# These bands let a caller know BEFORE downloading.
+#
+# 3 days: riverine flood peaks are typically imaged usefully within ~72h.
+# 7 days: past this, on a fast-draining basin, expect little to no signal —
+# 8 days is where the measured failure sits. Round numbers, engineering
+# judgement anchored to one measured failure, and labelled as such rather
+# than presented as a validated curve.
+ACQUISITION_IDEAL_DAYS = 3.0
+ACQUISITION_MARGINAL_DAYS = 7.0
+
+
+def assess_acquisition_timing(
+    days_after_peak: Optional[float],
+    revisit_days: float = 12.0,
+) -> dict:
+    """Can a scene acquired this long after the peak carry a flood signal?
+
+    Returns a band plus an explicit `proceed` recommendation. This does NOT
+    veto — the caller decides, because a marginal scene is still the only
+    scene on many real events and a late answer with a stated caveat beats no
+    answer. What it prevents is spending the download budget in ignorance and
+    then reporting a confident zero.
+    """
+    if days_after_peak is None:
+        return {
+            "band": "unknown",
+            "proceed": True,
+            "days_after_peak": None,
+            "detail": "Event peak date unknown — timing cannot be assessed.",
+        }
+    d = float(days_after_peak)
+    if d < 0:
+        return {
+            "band": "pre_event",
+            "proceed": False,
+            "days_after_peak": d,
+            "detail": (
+                f"This scene predates the event peak by {abs(d):.1f} days. It "
+                "cannot show the flood; comparing it against a pre-flood "
+                "baseline measures nothing."
+            ),
+        }
+    if d <= ACQUISITION_IDEAL_DAYS:
+        band, proceed = "ideal", True
+        detail = f"{d:.1f} days after peak — within the useful imaging window."
+    elif d <= ACQUISITION_MARGINAL_DAYS:
+        band, proceed = "marginal", True
+        detail = (
+            f"{d:.1f} days after peak — water may have partially receded; "
+            "extent will likely UNDER-report the maximum."
+        )
+    else:
+        band, proceed = "likely_receded", True
+        detail = (
+            f"{d:.1f} days after peak — beyond the {ACQUISITION_MARGINAL_DAYS:.0f}"
+            "-day window where a flood signal was still measurable. A "
+            "measured case at 8 days showed NO recoverable signal (ROC AUC "
+            "0.4870, below chance). Proceeding is allowed, but a null or weak "
+            "result here says more about acquisition timing than about the "
+            "flood."
+        )
+    if d > revisit_days:
+        detail += (
+            f" Note the {revisit_days:.0f}-day same-orbit revisit: no earlier "
+            "post-peak pass existed, so this is an operational limit of the "
+            "constellation, not a selection error."
+        )
+    return {
+        "band": band,
+        "proceed": proceed,
+        "days_after_peak": round(d, 2),
+        "ideal_within_days": ACQUISITION_IDEAL_DAYS,
+        "marginal_within_days": ACQUISITION_MARGINAL_DAYS,
+        "detail": detail,
+        "basis": (
+            "Engineering judgement anchored to ONE measured failure (Kanalia, "
+            "8 days post-peak, ROC AUC 0.4870). NOT a validated recession "
+            "curve — recession rate depends on basin, soil and rainfall."
+        ),
+    }
+
+
 def refined_lee(img: np.ndarray, window: int = REFINED_LEE_WINDOW) -> np.ndarray:
     """Refined Lee speckle filter (edge-aware local-statistics MMSE).
 
