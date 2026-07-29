@@ -300,6 +300,65 @@ here, the absence of measurement is stated rather than glossed.
 
 ---
 
+## Phase 3i — the first live forced-S1 run, and what it caught
+
+**Run 1** (`d90c250`): died on `InternalServerError: Couldn't connect to
+compute node` — CDSE infrastructure, no pipeline code reached.
+
+**Run 2** (`9c14a47-dirty`, 2,242 MB, 1,901s, tier 1, 100% coverage): the
+forced-S1 override worked, the run reached the real SAR path and completed
+— but produced **zero zones**, and the persisted row said
+`index_calibrated: False`, `index_units: dB_uncalibrated`.
+
+That pair of fields is the whole finding. They mean **change detection did
+not run**: the pipeline fell through to the absolute-threshold path, which
+is precisely the path that classifies zero water on every S1 run and always
+has. Reporting this as "S1 detected no flood" would have been wrong in the
+most misleading possible way — it is the old known defect, wearing the new
+code's clothes.
+
+The log named the cause exactly:
+
+    SAR change detection failed (all input arrays must have the same shape)
+
+**Root cause:** every scene clips to its OWN footprint-derived grid, so a
+pre-event clip is generally a different shape from the post-event clip even
+for the identical AOI polygon. The log-ratio is elementwise, so it could
+never broadcast. The same-orbit SEARCH was verified correct in isolation —
+queried directly, it returns 3 same-orbit (102 / ASCENDING) pre-event
+scenes for this AOI, exactly as designed. The failure was one layer
+further down, in grid geometry.
+
+**Fixed in two layers** (commit on this branch):
+1. `_fetch_pre_event_stack` reprojects each pre-event clip onto the
+   post-event grid (transform + CRS) — deliberately NOT crop/pad, because
+   the grids can differ in origin and extent, not merely size, and a naive
+   slice would silently MIS-REGISTER the ratio. A mis-registered flood map
+   is worse than no flood map.
+2. `detect_flood_change` now enforces the shape contract itself, dropping
+   misaligned references with a named reason and recording
+   `baseline_scenes_dropped_misaligned`, instead of letting a bare numpy
+   broadcast error be swallowed by the caller into the unusable absolute
+   path. If every reference is misaligned it returns
+   `insufficient_reference` — still never absolute thresholding.
+
+**Two lessons worth keeping:**
+
+- **The audit trail is what made this diagnosable.** `index_calibrated` and
+  `index_units` are the fields that distinguished "S1 ran change detection
+  and found nothing" from "S1 silently used the broken path". Without them
+  this run would have been recorded as the project's first scored S1
+  result — a zero — and the number would have been meaningless. Phase 0b's
+  and Phase 3's insistence on recording *which method actually ran* paid
+  for itself here, exactly as it did at Insh in Phase 2.
+- **Offline verification genuinely does not substitute for a live run.**
+  Phase 3 passed 14/14 offline, including the calibration-cancellation
+  property the entire method rests on — and still could not run in
+  production, because every synthetic test fixture naturally used matching
+  array shapes. The integration geometry was the untested surface.
+
+---
+
 # FINAL REPORT — science/full-pass
 
 ## 1. Did precision rise without collapsing recall?
