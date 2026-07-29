@@ -1836,6 +1836,7 @@ def calculate_indices(
     satellite_type: str,
     disaster_type: str,
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
     orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
@@ -2039,6 +2040,108 @@ def calculate_indices(
         threshold = NDVI_DAMAGE_THRESHOLD
         index_calibrated = True
         index_units = "NDVI_ratio"
+
+        # LANDSLIDE: bi-temporal, shape-filtered scar detection.
+        #
+        # This wiring is the whole point. `landslide_detection.py` existed and
+        # passed 8/8 offline tests but had ZERO callers — dead code, because
+        # no pre-event optical scene was ever fetched. The landslide path
+        # therefore ran the ABSOLUTE NDVI threshold below, which cannot tell a
+        # fresh scar from terrain that was always bare (desert, rock, quarry,
+        # harvested field). Bi-temporal difference plus scar GEOMETRY
+        # (elongation, downslope alignment, minimum slope, tapering) is what
+        # separates them — a circular NDVI drop on flat ground is not a
+        # landslide however deep the drop.
+        if disaster == "landslide" and pre_event_ndvi is not None:
+            try:
+                from landslide_detection import detect_landslide_scars
+
+                ls = detect_landslide_scars(
+                    index, pre_event_ndvi, dem=dem,
+                    pixel_size_m=float(
+                        abs(clipped.get("transform").a)
+                        if clipped.get("transform") is not None else 10.0
+                    ),
+                    valid_mask=mask,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Landslide scar detection failed (%s)", exc)
+                ls = None
+            if ls and ls.get("status") == "complete" and ls.get("scar_mask") is not None:
+                scar = ls["scar_mask"]
+                classification = np.full(index.shape, NODATA_CLASS, dtype="uint8")
+                valid_ls = np.isfinite(index)
+                if mask is not None:
+                    valid_ls = valid_ls & mask
+                classification[valid_ls] = 0
+                classification[scar] = 3  # "scar" — the highest severity band
+                n_valid = int(valid_ls.sum())
+                n_scar = int(scar.sum())
+                logger.info(
+                    "Landslide scars: %d object(s) survived shape filtering, "
+                    "%.2f%% of valid pixels",
+                    len(ls.get("scars") or []),
+                    100.0 * n_scar / n_valid if n_valid else 0.0,
+                )
+                return {
+                    "index_type": "NDVI_CHANGE",
+                    "scheme_key": "NDVI_LANDSLIDE",
+                    "array": ls.get("ndvi_difference", index),
+                    "classification_array": classification,
+                    "water_percent": (
+                        round(100.0 * n_scar / n_valid, 2) if n_valid else 0.0
+                    ),
+                    "mean_value": (
+                        round(float(np.nanmean(index[valid_ls])), 4) if n_valid else 0.0
+                    ),
+                    "affected_mean_index": (
+                        round(float(np.nanmean(ls["ndvi_difference"][scar])), 4)
+                        if n_scar else None
+                    ),
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": "bitemporal_ndvi_shape_filtered",
+                    "derived_threshold": ls.get("ndvi_drop_threshold"),
+                    "affected_cut": ls.get("ndvi_drop_threshold"),
+                    "ki_diagnostics": None,
+                    "ki_fallback_reason": None,
+                    "threshold_used": ls.get("ndvi_drop_threshold"),
+                    "class_counts": (
+                        {"scar": round(100.0 * n_scar / n_valid, 2)}
+                        if n_valid else {}
+                    ),
+                    # A DIFFERENCE is self-referenced, so — like the SAR
+                    # log-ratio — it is defensible without absolute calibration.
+                    "index_calibrated": True,
+                    "index_units": "NDVI_difference",
+                    "landslide_detection": {
+                        k: ls.get(k) for k in (
+                            "method", "scar_count", "affected_percent",
+                            "candidates_before_shape_filter", "rejected_by",
+                            "ndvi_drop_threshold", "min_elongation",
+                            "orientation_tolerance_deg", "min_slope_deg",
+                            "min_scar_area_px", "min_taper_ratio",
+                            "thresholds_basis",
+                        )
+                    },
+                    "scars": ls.get("scars"),
+                    "built_up_available": False,
+                    "built_up_percent": None,
+                    "built_up_area_km2": None,
+                    "built_up_threshold": None,
+                    "built_up_formula": None,
+                    "flood_over_built_up_km2": None,
+                    "flood_over_built_up_percent": None,
+                    "signal_detectable": None,
+                    "deep_tail_fraction": None,
+                }
+            if ls and ls.get("status") == "insufficient_reference":
+                logger.warning(
+                    "Landslide scar detection unavailable: %s", ls.get("reason")
+                )
 
     # Graded classification: 0 safe, 1..N severity, 255 nodata/outside polygon.
     valid = np.isfinite(index)
@@ -2943,6 +3046,7 @@ def _render_clip(
     disaster_type: str,
     out_id: str,
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
     orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
@@ -2964,6 +3068,7 @@ def _render_clip(
         satellite_type,
         disaster_type,
         pre_event_vv=pre_event_vv,
+        pre_event_ndvi=pre_event_ndvi,
         dem=dem,
         orbit_direction=orbit_direction,
     )
@@ -3430,12 +3535,24 @@ def process_satellite_imagery(
                 post_transform=clipped.get("transform"),
                 post_crs=clipped.get("crs"),
             )
+            # Bi-temporal OPTICAL reference (landslide / earthquake damage).
+            # Without this the scar detector is unreachable — see
+            # _fetch_pre_event_ndvi's docstring.
+            _post_b08 = (clipped.get("bands") or {}).get("B08")
+            pre_ndvi = _fetch_pre_event_ndvi(
+                bbox, merged_polygon, event_id, token, disaster_type,
+                as_of=max([d for d in (scene_acq_date(s) for s in accepted) if d],
+                          default=None),
+                post_shape=_post_b08.shape if _post_b08 is not None else None,
+                post_transform=clipped.get("transform"),
+                post_crs=clipped.get("crs"),
+            )
             return _finish_success(
                 clipped, cov, accepted, tier, orbit_dir, spread,
                 satellite_type, disaster_type, event_id, city_boundaries,
                 tracker, bytes_before, min_cov, budget_exhausted=None,
                 marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
-                pre_event_vv=pre_stack,
+                pre_event_vv=pre_stack, pre_event_ndvi=pre_ndvi,
             )
 
         if budget_exhausted or marginal_stop or gap_limited_by:
@@ -3471,12 +3588,21 @@ def process_satellite_imagery(
             post_transform=best_clipped.get("transform"),
             post_crs=best_clipped.get("crs"),
         )
+        _post_b08 = (best_clipped.get("bands") or {}).get("B08")
+        pre_ndvi = _fetch_pre_event_ndvi(
+            bbox, merged_polygon, event_id, token, disaster_type,
+            as_of=max([d for d in (scene_acq_date(s) for s in best_accepted) if d],
+                      default=None),
+            post_shape=_post_b08.shape if _post_b08 is not None else None,
+            post_transform=best_clipped.get("transform"),
+            post_crs=best_clipped.get("crs"),
+        )
         return _finish_success(
             best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
             spread, satellite_type, disaster_type, event_id, city_boundaries,
             tracker, bytes_before, min_cov, budget_exhausted=budget_exhausted,
             marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
-            pre_event_vv=pre_stack,
+            pre_event_vv=pre_stack, pre_event_ndvi=pre_ndvi,
         )
 
     # Below COVERAGE_FLOOR — fail honestly with gap geometry. NEVER analyse a
@@ -3600,6 +3726,102 @@ def _scene_cloud_for_gap_check(scene: Optional[dict]) -> Optional[float]:
         pass
     return None
 
+
+
+def _fetch_pre_event_ndvi(
+    bbox,
+    merged_polygon: dict,
+    event_id: str,
+    token,
+    disaster_type: str,
+    as_of=None,
+    post_shape=None,
+    post_transform=None,
+    post_crs=None,
+) -> Optional[np.ndarray]:
+    """Pre-event NDVI for BI-TEMPORAL optical change (landslide / damage).
+
+    **Why this had to exist.** `landslide_detection.detect_landslide_scars`
+    was DEAD CODE — it passed 8/8 offline tests while being unreachable in
+    production, because the pipeline only ever fetched pre-event scenes for
+    Sentinel-1 (`_fetch_pre_event_stack`). With no pre-event NDVI the
+    landslide path fell back to a single-scene absolute threshold, which
+    cannot distinguish a fresh scar from terrain that was always bare
+    (desert, rock, quarry, harvested field) — i.e. it had no defensible
+    method at all.
+
+    Returns the pre-event NDVI resampled onto the POST-event grid, or None.
+    Best-effort: any failure returns None and the caller reports
+    `insufficient_reference` rather than silently substituting the absolute
+    threshold.
+    """
+    if (disaster_type or "").strip().lower() not in ("landslide", "earthquake"):
+        return None
+    try:
+        from sentinel import search_pre_event_optical
+    except ImportError:
+        return None
+    try:
+        pre_scenes = search_pre_event_optical(
+            bbox, as_of=as_of, merged_polygon=merged_polygon, max_scenes=1
+        )
+        if not pre_scenes:
+            logger.warning(
+                "No clear pre-event S2 scene found — bi-temporal optical "
+                "change unavailable; the absolute-threshold fallback is NOT "
+                "substituted (it cannot separate a scar from always-bare "
+                "terrain)."
+            )
+            return None
+        dl = download_imagery(
+            {"satellite_type": "sentinel-2"}, pre_scenes[0],
+            f"{event_id}/pre_optical", token, disaster_type,
+        )
+        if not dl or not dl.get("band_paths"):
+            return None
+        dst_crs = _dst_crs_from_polygon(merged_polygon)
+        stacked = stack_bands(dl["band_paths"], "sentinel-2", dst_crs)
+        if stacked is None:
+            return None
+        pre_clip = clip_to_polygon(stacked, merged_polygon)
+        if pre_clip is None:
+            return None
+        b = pre_clip.get("bands") or {}
+        b04, b08 = b.get("B04"), b.get("B08")
+        if b04 is None or b08 is None:
+            logger.warning(
+                "Pre-event scene lacks B04/B08 — cannot compute reference NDVI"
+            )
+            return None
+        ndvi = _safe_ratio(
+            b08.astype("float32") - b04.astype("float32"),
+            b08.astype("float32") + b04.astype("float32"),
+        )
+        # Same grid-alignment contract as the S1 baseline: each scene clips to
+        # its OWN footprint-derived grid, so the reference must be resampled
+        # onto the post-event grid. Reproject rather than crop/pad — the grids
+        # can differ in origin as well as size, and a naive slice would
+        # silently MIS-REGISTER the difference.
+        if post_shape is not None and ndvi.shape != post_shape:
+            from rasterio.warp import reproject
+
+            dest = np.full(post_shape, np.nan, dtype="float32")
+            reproject(
+                source=ndvi, destination=dest,
+                src_transform=pre_clip["transform"], src_crs=pre_clip["crs"],
+                dst_transform=post_transform, dst_crs=post_crs,
+                resampling=Resampling.bilinear,
+                src_nodata=np.nan, dst_nodata=np.nan,
+            )
+            logger.info(
+                "Pre-event NDVI resampled %s -> %s onto the post-event grid",
+                ndvi.shape, post_shape,
+            )
+            ndvi = dest
+        return ndvi
+    except Exception as exc:  # noqa: BLE001 — reference is optional, run is not
+        logger.warning("Pre-event NDVI unavailable (%s)", exc)
+        return None
 
 
 def _fetch_pre_event_stack(
@@ -3738,6 +3960,7 @@ def _finish_success(
     marginal_stop: bool,
     gap_limited_by: Optional[str],
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
 ) -> Optional[dict]:
     """Render + finalize a successful (target-met or best-effort) coverage result.
@@ -3756,7 +3979,8 @@ def _finish_success(
 
     merged_result = _render_clip(
         clipped, satellite_type, disaster_type, event_id,
-        pre_event_vv=pre_event_vv, dem=dem, orbit_direction=orbit_dir,
+        pre_event_vv=pre_event_vv, pre_event_ndvi=pre_event_ndvi,
+        dem=dem, orbit_direction=orbit_dir,
     )
     if merged_result is None:
         logger.error("Aborting pipeline: merged render failed")

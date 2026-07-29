@@ -1214,6 +1214,125 @@ BASELINE_SEARCH_DAYS = 60
 BASELINE_TARGET_SCENES = 3
 
 
+def search_pre_event_optical(
+    bbox: tuple,
+    as_of: Optional[datetime] = None,
+    merged_polygon: Optional[dict] = None,
+    days_back: int = 365,
+    min_days_before: int = 5,
+    max_cloud: float = CLOUD_COVER_THRESHOLD,
+    max_scenes: int = 1,
+    timeout: int = 60,
+):
+    """Pre-event Sentinel-2 L2A scene(s) for BI-TEMPORAL optical change.
+
+    **Why this exists.** `landslide_detection.detect_landslide_scars` and the
+    earthquake damage path both need a PRE-event NDVI, and the pipeline had
+    no way to obtain one — `_fetch_pre_event_stack` is Sentinel-1 only. The
+    scar detector was therefore unreachable in production despite passing its
+    own unit tests: a single-scene absolute NDVI threshold cannot separate a
+    landslide scar from terrain that was always bare (desert, rock, quarry,
+    harvested field), so without this the landslide path had no defensible
+    method at all.
+
+    **Why the constraints differ from the S1 baseline.** Optical change does
+    not need the same relative orbit — there is no incidence-angle-dependent
+    calibration factor to cancel, and S2's swath is wide enough that the AOI
+    is imaged near-nadir from either orbit. What optical DOES need is:
+
+    * a CLEAR scene (`max_cloud`) — a cloudy pre-event scene poisons the
+      difference far worse than a slightly older clear one, so recency is
+      traded away for clarity deliberately;
+    * enough separation from the event (`min_days_before`) that the "pre"
+      scene genuinely predates it — a scene from the day before a monsoon
+      landslide may already show the failure;
+    * a SEASONALLY comparable date. This is the real trap: NDVI has a large
+      annual cycle, so a July-vs-January pair shows a vegetation difference
+      that dwarfs any scar. Candidates are therefore ranked by
+      |day-of-year difference| FIRST (seasonal match), and only then by
+      recency — a scene from the same month a year earlier is a far better
+      reference than a clear one from the opposite season three months back.
+
+    Returns a list of scene dicts (best first), or [] — never raises.
+    """
+    now = as_of or datetime.now(timezone.utc)
+    end = (now - timedelta(days=min_days_before)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    start = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    minx, miny, maxx, maxy = bbox
+    aoi_wkt = (
+        f"POLYGON(({minx} {miny},{maxx} {miny},{maxx} {maxy},"
+        f"{minx} {maxy},{minx} {miny}))"
+    )
+
+    filters = [
+        "Collection/Name eq 'SENTINEL-2'",
+        f"OData.CSC.Intersects(area=geography'SRID=4326;{aoi_wkt}')",
+        f"ContentDate/Start ge {start}",
+        f"ContentDate/Start lt {end}",
+        "contains(Name,'MSIL2A')",
+    ]
+    params = {
+        "$filter": " and ".join(filters),
+        "$orderby": "ContentDate/Start desc",
+        "$top": "100",
+        "$expand": "Attributes",
+    }
+    try:
+        response = requests.get(CATALOGUE_URL, params=params, timeout=timeout)
+        response.raise_for_status()
+        results = response.json().get("value", []) or []
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Pre-event optical catalogue search failed: %s", exc)
+        return []
+
+    target_doy = now.timetuple().tm_yday
+
+    def _seasonal_delta(scene) -> int:
+        d = scene_datetime(scene)
+        if d is None:
+            return 999
+        diff = abs(d.timetuple().tm_yday - target_doy)
+        return min(diff, 365 - diff)  # wrap around the year
+
+    clear = []
+    for scene in results:
+        cloud = _scene_attr(scene, "cloudCover")
+        try:
+            cloud = float(cloud) if cloud is not None else None
+        except (TypeError, ValueError):
+            cloud = None
+        if cloud is not None and cloud > max_cloud:
+            continue
+        scene["_cloud"] = cloud
+        scene["_seasonal_delta_days"] = _seasonal_delta(scene)
+        clear.append(scene)
+
+    if not clear:
+        logger.warning(
+            "No pre-event S2 L2A scene under %.0f%% cloud in the %d days "
+            "before the event — bi-temporal optical change unavailable",
+            max_cloud, days_back,
+        )
+        return []
+
+    clear = dedupe_by_acquisition(clear)
+    # Seasonal match first (NDVI's annual cycle dwarfs a scar), then clarity,
+    # then recency.
+    clear.sort(key=lambda s: (
+        s.get("_seasonal_delta_days", 999),
+        s.get("_cloud") if s.get("_cloud") is not None else 100.0,
+    ))
+    picked = clear[:max_scenes]
+    for s in picked:
+        logger.info(
+            "Pre-event optical reference: %s (cloud %.1f%%, seasonal delta "
+            "%d days)", s.get("Name", "?")[:60],
+            s.get("_cloud") if s.get("_cloud") is not None else -1.0,
+            s.get("_seasonal_delta_days", -1),
+        )
+    return picked
+
+
 def search_pre_event_same_orbit(
     post_scene: dict,
     bbox: tuple,
