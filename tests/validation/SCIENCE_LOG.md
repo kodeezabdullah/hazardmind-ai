@@ -1032,3 +1032,96 @@ Project running total: **~22.5 GB**.
 7. **`observed_event_a` vs `maximumWaterExtentA` semantics** — Keramidi uses
    a snapshot layer, Kanalia a cumulative maximum. Must be stated whenever
    the two are compared.
+
+---
+
+# SESSION 5 — research-readiness pass (`science/detection-pass`, 2026-07-29)
+
+**Goal:** make flood, landslide and earthquake all perform REAL detection
+from imagery — not consume a third party's modelled conclusion.
+
+## 1. The headline: S1 flood is repaired AND proven
+
+| Event | Timing | drop-only F1 | **both-direction F1** |
+|---|---|---|---|
+| Kanalia | 8 days post-peak | 0.0064 | 0.0064 (no signal either way) |
+| **Keramidi** | **~4 days post-peak** | **0.0064** | **0.2882** |
+
+**F1 x45 on the peak-timed event**, on identical AOI/reference/scenes with
+only `direction` varying. Mechanism measured: **rise_px 43,048 vs drop_px
+2,500 — 94% of the signal is a backscatter RISE**, the double-bounce return
+from water among emergent vegetation.
+
+Two events were required. One would have given the wrong answer in either
+direction: Kanalia alone said "refuted", Keramidi alone would have said
+"solved" without revealing the acquisition-timing dependency that is the
+real operational constraint.
+
+**Not claimed:** that S1 is good. F1 0.2882 is far below S2's 0.98, and
+recall 0.19 means most of the reference is still missed — consistent with a
+4-day-post-peak scene under-reporting a maximum, and with this event's layer
+being `observed_event_a` (a snapshot) rather than a cumulative maximum.
+
+## 2. All three hazards now DETECT
+
+| Hazard | Method | Third-party conclusion consumed? |
+|---|---|---|
+| **Flood** | Bidirectional SAR change detection; S2 MNDWI + KI | **None** |
+| **Landslide** | Bi-temporal NDVI + shape filtering; susceptibility from DEM | **None** — LHASA deliberately NOT imported |
+| **Earthquake** | SAR polarimetric damage (VH/VV depolarisation) | **USGS as TRIGGER only**; ShakeMap/PAGER NOT used |
+
+Earthquake is the one that needed the framing corrected: ground shaking is
+not observable from satellite, so we do not measure it. What IS observable —
+**building damage** — is detected, from a change in scattering MECHANISM
+(double-bounce -> volume scattering as walls become rubble), constrained to
+where buildings actually exist (Phase 4's IBI mask).
+
+## 3. Six real bugs found by running it, not by reading it
+
+1. **The landslide detector was DEAD CODE** — 8/8 passing tests, zero
+   callers. No pre-event optical fetch existed, so it ran a single-scene
+   absolute NDVI threshold that cannot separate a scar from always-bare
+   ground.
+2. **Inverted plan-curvature sign** — susceptibility was rewarding diverging
+   spurs and penalising converging hollows, the opposite of the physics.
+   Caught by measuring both on synthetic terrain (+2.98e-04 vs -2.98e-04).
+3. **Production city-query duplication** — `"Keramidi, Keramidi, Trikala,
+   Greece"` killed runs at 22s. Kanalia only ever resolved by luck.
+4. **Unbounded R2 upload** — hung the entire pipeline twice, discarding a
+   completed multi-GB analysis with no error.
+5. **Test pollution** — `agents/hazard` on `sys.path` rebound the bare name
+   `agent`, breaking 7 unrelated tests.
+6. **IBI ratio instability** — vegetation scored +1.156 (built-up) from two
+   negatives; guarded on physics (NDBI > 0), not by clamping.
+
+## 4. Changes discarded on measurement
+
+| Discarded | Why |
+|---|---|
+| Fixed −1.0 dB S1 threshold | Precision lift **0.78x — worse than chance** |
+| Signal guard v1 (Cohen's d) | **Circular** — returned d=4.18 on a no-signal scene and passed it |
+| Signal guard v2 (KI bimodality) | No-signal scene scored **0.75 vs a real flood's 0.25** |
+| EMSR342 Townsville event | Post-event sources are **COSMO-SkyMed 5 m / RADARSAT-2 6 m** — scoring Sentinel against commercial VHR measures sensor difference as pipeline error |
+
+## 5. Test position
+
+| Suite | Result |
+|---|---|
+| Satellite (pytest) | **122 passed** |
+| Hazard (rainfall + susceptibility + terrain) | **76 passed** |
+| New this session | landslide-wired 25, earthquake 21+26, susceptibility 22, terrain 23, IBI 25, signal-guard 14+13 |
+
+## 6. What remains, ranked
+
+1. **Landslide and earthquake have no scoreable reference.** COOLR's polygon
+   service is down (48 records, mostly ~40 px); xBD is sub-metre commercial
+   optical over one earthquake. Both detectors are built, wired and tested,
+   with `thresholds_basis` stating uncalibrated in every result. **They are
+   defensible, not validated.**
+2. **Urban flood validation still open** — Townsville rejected on sensor
+   grounds, Verona (2.66%) and Sciacca (0.62%) too sparse. Every metric
+   still describes open-terrain flood.
+3. **n=2 for S1, n=1 for confidence calibration.** Correlation still not
+   claimable.
+4. **GPM IMERG live fetch** not implemented (bounded-influence layer is).
+5. **SoilGrids/Overpass not exercised live** — stubbed tests only.
