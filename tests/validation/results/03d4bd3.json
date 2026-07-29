@@ -1,0 +1,34 @@
+{
+  "commit": "03d4bd3",
+  "commit_full": "03d4bd3b6d915fef18228e28025f53018f873e37",
+  "run_timestamp_utc": "2026-07-29T11:02:04.487078+00:00",
+  "events": [
+    {
+      "event_id": "655a8d4b-79da-4f80-9d8a-0e5c18c6fc3a",
+      "location": "Keramidi, Trikala, Greece",
+      "satellite_type": null,
+      "satellite_type_reason": null,
+      "coverage_tier": null,
+      "temporal_spread_days": null,
+      "reported_confidence": null,
+      "confidence_basis": null,
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "error",
+      "pipeline_error": "Could not resolve any risk-city boundaries",
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 at 10 m \u2014 VERIFIED by reading the product's own source.dbf, not inferred from the activation page (which does not state it).",
+        "Layer of record is `observed_event_a`, NOT `maximumWaterExtentA` (this activation does not publish one). observed_event_a is the extent delineated at the acquisition instant rather than a cumulative maximum, so it is a SNAPSHOT: a prediction from imagery at a different date will disagree partly for TIMING reasons, not only accuracy reasons. This is a different reference semantics from Kanalia/Insh and must be stated whenever the numbers are compared.",
+        "Keramidi resolves as a zero-area OSM Point; boundary.py's _ensure_areal buffers it to a ~6 km disk \u2014 the SAME fallback the production pipeline already uses for point-only cities (Kanalia, Davao), not a harness-specific approximation.",
+        "Reference clipped to the buffered AOI is 15.069 km2 = 20.14% flooded fraction \u2014 a healthy partial-flood regime, not degenerate.",
+        "RURAL event (Pinios river tributaries, farmland). It does NOT close the urban-validation gap \u2014 see SCIENCE_LOG's 'Phase 7 \u2014 EMS reference ceiling'. The urban candidates found this session (Townsville, Verona, Sciacca) were all rejected: Townsville on sensor grounds (commercial VHR post-event), Verona and Sciacca on flooded fraction (2.66% and 0.62% of their densest AOI \u2014 Paiporta territory, where a perfect detector still scores near zero).",
+        "2018-02/03 predates Sentinel-2 L2A global availability in places; this event is scored on the S1 path, so that does not apply here.",
+        "DISAMBIGUATION (same class of bug as Kanalia's, caught before it could score): bare 'Keramidi, Greece' resolves to a DIFFERENT village \u2014 in the Municipal Unit of KANALIA, Rigas Feraios \u2014 which clips the reference to exactly 0.000 km2 and would have reported a misleading IoU of 0.0 as if it were a detector failure. 'Keramidi, Trikala, Greece' disambiguates to the intended village (Farkadona Municipality, Trikala) with 15.069 km2 of reference inside the AOI. Verified by direct Nominatim query 2026-07-29.",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 21.922000000000025,
+      "bytes_downloaded": null
+    }
+  ]
+}

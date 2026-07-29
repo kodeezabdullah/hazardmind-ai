@@ -624,7 +624,29 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         if not cities:
             return _error(event_id, f"No risk cities detected for {location!r}")
 
-        city_polys = get_risk_city_boundaries(location, cities)
+        # boundary._resolve_city_geometry builds its Nominatim query as
+        # f"{city}, {region_name}". When detect_risk_cities fell back to the
+        # HEADLINE token of `location` (the no-curated-map path — most real
+        # requests), passing the full `location` as region_name duplicated
+        # that token:
+        #   "Keramidi" + "Keramidi, Trikala, Greece"
+        #     -> "Keramidi, Keramidi, Trikala, Greece"        (Nominatim MISS)
+        # which fails the whole run with "Could not resolve any risk-city
+        # boundaries". Measured live 2026-07-29 on Keramidi; "Kanalia,
+        # Kanalia, Magnesia, Greece" only ever worked by luck.
+        #
+        # Strip the leading region token ONLY when it is exactly the city we
+        # are about to prepend, so curated multi-city AOIs (Mindanao ->
+        # Davao/Cotabato/Cagayan de Oro) keep the full region for
+        # disambiguation and are unaffected.
+        region_for_query = location
+        _head = location.split(",")[0].strip()
+        if len(cities) == 1 and cities[0].strip().casefold() == _head.casefold():
+            _rest = ", ".join(p.strip() for p in location.split(",")[1:]).strip()
+            if _rest:
+                region_for_query = _rest
+
+        city_polys = get_risk_city_boundaries(region_for_query, cities)
         if not city_polys:
             return _error(event_id, "Could not resolve any risk-city boundaries")
 
