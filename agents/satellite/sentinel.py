@@ -78,9 +78,22 @@ def _peek_cloud_cover(
     except (TypeError, ValueError):
         return None
 
-    start = (datetime.now(timezone.utc) - timedelta(days=date_range)).strftime(
+    # The window is [now - date_range, now]. The UPPER bound matters and was
+    # missing: with only `gt start`, a search returns everything from the
+    # window start to the present, so ranking can select an acquisition from
+    # AFTER the moment the pipeline is notionally analysing. In production
+    # that is merely odd (there is no future imagery); under a frozen clock
+    # it is a correctness bug — the historical validation harness pinned the
+    # search to a 2023 event and still received (and selected) 2026 scenes,
+    # which silently made the S1 change-detection baseline compare a recent
+    # scene against its own recent reference instead of flood-peak imagery.
+    # `now` is read from the module-level `datetime`, so a frozen clock
+    # bounds both ends consistently.
+    _now = datetime.now(timezone.utc)
+    start = (_now - timedelta(days=date_range)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
+    end = _now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     polygon = (
         f"POLYGON(({minx} {miny},{maxx} {miny},{maxx} {maxy},"
         f"{minx} {maxy},{minx} {miny}))"
@@ -91,6 +104,7 @@ def _peek_cloud_cover(
                 "Collection/Name eq 'SENTINEL-2'",
                 f"OData.CSC.Intersects(area=geography'SRID=4326;{polygon}')",
                 f"ContentDate/Start gt {start}",
+                f"ContentDate/Start le {end}",
             ]
         ),
         "$orderby": "ContentDate/Start desc",
@@ -994,9 +1008,22 @@ def search_imagery(
         logger.error("Invalid bbox %r: %s", bbox, exc)
         return None
 
-    start = (datetime.now(timezone.utc) - timedelta(days=date_range)).strftime(
+    # The window is [now - date_range, now]. The UPPER bound matters and was
+    # missing: with only `gt start`, a search returns everything from the
+    # window start to the present, so ranking can select an acquisition from
+    # AFTER the moment the pipeline is notionally analysing. In production
+    # that is merely odd (there is no future imagery); under a frozen clock
+    # it is a correctness bug — the historical validation harness pinned the
+    # search to a 2023 event and still received (and selected) 2026 scenes,
+    # which silently made the S1 change-detection baseline compare a recent
+    # scene against its own recent reference instead of flood-peak imagery.
+    # `now` is read from the module-level `datetime`, so a frozen clock
+    # bounds both ends consistently.
+    _now = datetime.now(timezone.utc)
+    start = (_now - timedelta(days=date_range)).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
+    end = _now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     # OData polygon: counter-clockwise ring closing on the first vertex.
     polygon = (
@@ -1008,6 +1035,7 @@ def search_imagery(
         f"Collection/Name eq '{collection}'",
         f"OData.CSC.Intersects(area=geography'SRID=4326;{polygon}')",
         f"ContentDate/Start gt {start}",
+        f"ContentDate/Start le {end}",
     ]
 
     if satellite_type == SENTINEL_2:
