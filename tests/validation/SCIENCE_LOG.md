@@ -158,6 +158,11 @@ confirms **Sentinel-1, 10 m GSD, post-event 2018-02-28 / 03-01**.
 **124 flood activations below EMSR500 carry downloadable vector packages**
 (63 with MONIT products, 39 of those post-2018).
 
+| 10 | **Signal-detectability guard** (S1 no-signal scenes) | 3b43e73 | — | — | — | — | — | not metric-bearing | **KEPT** | the pipeline shipped a worse-than-chance map with no indication; it now flags the extent INDETERMINATE. Two earlier versions of this guard were measured and DISCARDED (below) |
+| 11 | Phase 1a EMSR271 Keramidi (4th scoreable event) | f8a1335 | Keramidi S1 | — | — | — | — | 20.14% flooded fraction; not yet run live | **KEPT** | corrects the prior session's "no references below EMSR500" conclusion; 2 real bugs fixed en route |
+| 12 | Phase 4 IBI built-up (Xu 2008) | 9ca1a2b | — | — | — | — | — | not metric-bearing | **KEPT** | NDBI would call bare soil built-up (+0.1351); IBI rejects it (−12.65). A ratio instability was found by measurement and guarded on physics |
+| 13 | Phase 5 rainfall as bounded context | 172b60f | — | — | — | — | — | not metric-bearing | **KEPT** | rainfall can never veto a detection; caps enforced and asserted |
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
@@ -844,3 +849,144 @@ per-run table above.
 7. **Shape/threshold constants uncalibrated** — landslide geometry filters
    and the magnitude bands encode documented qualitative properties but no
    inventory calibration (NASA COOLR is the path).
+
+---
+
+# FINAL REPORT — `science/detection-pass` (2026-07-29)
+
+## 1. The complete change table
+
+Recorded in the session-4 table above. Summary: **9 changes kept, 3
+discarded on measurement, 2 phases deliberately not built.**
+
+| Discarded | Why |
+|---|---|
+| Fixed **−1.0 dB** S1 threshold | Looked like a **2.5× IoU win**. Precision lift **0.78× — worse than chance.** Noise-fitting one event's reference |
+| Signal guard v1 (**detected-vs-undetected Cohen's d**) | **Circular** — the detector defines both groups by thresholding the compared values. Returned d=4.18 on a no-signal scene and *passed* it |
+| Signal guard v2 (**KI bimodal-tile fraction**) | The no-signal scene scored **0.75, HIGHER than a real flood's 0.25**. KI always splits a tile somewhere |
+
+## 2. Did S1 improve? **No — and that is the finding.**
+
+Every avenue was measured, not argued:
+
+| Variant | IoU | Precision | Recall | F1 | Precision lift |
+|---|---|---|---|---|---|
+| **zero-skill** (label whole AOI flood) | — | 0.2206 | 1.0000 | **0.3615** | 1.00× |
+| KI-tiled (production) | 0.0228 | 0.1384 | 0.0265 | 0.0445 | **0.72×** |
+| bidirectional (Phase 0) | **0.0228** | **0.1384** | **0.0265** | **0.0445** | 0.72× |
+| fixed −1.0 dB | 0.0566 | 0.1691 | 0.0784 | 0.1071 | **0.78×** |
+| no morphology | 0.0279 | 0.1586 | 0.0328 | 0.0543 | — |
+| no speckle filter | 0.0205 | 0.1447 | 0.0233 | 0.0402 | — |
+
+**The trivial "everything is flooded" baseline beats every tuned variant.**
+
+Why, measured inside the confirmed EMS flood extent (167,011 px):
+**ROC AUC = 0.4870** (below chance), **Cohen's d = 0.031**, **0 pixels**
+above +3 dB, **1.06%** below −3 dB. Flood and dry are statistically
+indistinguishable — the acquisition (8 days post-peak, 12-day revisit gave no
+earlier option) does not contain the flood.
+
+This **eliminated by measurement**: threshold choice, speckle filtering,
+morphology, baseline depth, and detection direction. **Phase 2 was therefore
+not built** — a 3-scene same-orbit baseline was already in use, and deepening
+a baseline cannot create an absent signal.
+
+## 3. Scoreable events reached: **4** (target was 8)
+
+| Event | Fraction | Source | Status |
+|---|---|---|---|
+| Kanalia (EMSR692) | ~14% | S1 maxWaterExtent | scored |
+| Insh (EMSR698) | ~76% | S1 maxWaterExtent | degenerate (stale scene) |
+| Paiporta (EMSR773) | 1.3% | — | unscoreable (EMS urban ceiling) |
+| **Keramidi (EMSR271)** | **20.14%** | **S1, verified** | **NEW — not yet run live** |
+
+**Why short of 8, plainly:** the binding constraint is not the number of
+activations (124 were found below EMSR500) but **post-event sensor
+provenance**. Most modern and many older activations delineate from
+commercial VHR (COSMO-SkyMed, RADARSAT-2, Pleiades, ICEYE, SPOT). Scoring a
+10 m Sentinel prediction against a 5 m commercial-SAR reference measures
+sensor difference as pipeline error.
+
+## 4. Urban validation: **NOT achieved.** The limitation stands.
+
+This was actively pursued and honestly failed:
+
+- **Townsville (EMSR342)** — 452 polygons, 45.5 km² inside a city of 180,000.
+  Config was written, then **deleted**: its `source.dbf` shows post-event
+  sources are **COSMO-SkyMed (5 m) and RADARSAT-2 (6 m)**. Its Sentinel-2
+  entry is the *pre-event* source — an easy and costly misreading.
+- **Verona (EMSR332)** — S1-backed but **2.66%** flooded at its densest AOI.
+- **Sciacca (EMSR333)** — S1-backed but **0.62%**.
+
+Both Italian events sit in Paiporta territory, where a perfect detector still
+scores near zero.
+
+**Therefore every metric this project reports still describes OPEN-TERRAIN
+flood detection only.** "F1 0.98" is defensible only with "on open-terrain
+flood extents scored against Copernicus EMS references" attached.
+
+## 5. Landslide and earthquake: **references do not support measurement.**
+### Detectors were NOT built.
+
+- **COOLR (1d):** polygon service **down (HTTP 500)**. The one reachable
+  polygon layer has **48 records**, 18 post-2018, of which **15 are under
+  0.04 km² (~40 pixels at 10 m)** — at or below where Phase 6a's shape
+  filtering can measure a shape. Only 2 exceed 1 km², one a glacier
+  rock/ice avalanche with no vegetation signal. **n ≤ 2.**
+- **xBD (1e):** exactly **one** earthquake event (Mexico 2017), on sub-metre
+  Maxar commercial optical. Cannot score a 10 m Sentinel SAR detector.
+
+Per Phase 1f, both phases were skipped rather than built unmeasurably.
+
+## 6. Confidence vs accuracy: **still cannot be claimed. n = 1.**
+
+Keramidi is configured but not yet run live, so the scoreable-accuracy count
+is unchanged at one point. No correlation is reported, because none is
+supportable.
+
+## 7. What made things worse, and what it taught
+
+1. **The −1.0 dB threshold** — a 2.5× headline that was worse than chance.
+   Lesson: always compare against the zero-skill baseline, not against the
+   previous number.
+2. **Signal guard v1 (circular)** — measured the threshold, not the signal.
+   Lesson: a self-check that partitions data by the thing being checked
+   proves nothing.
+3. **Signal guard v2 (bimodality)** — ranked noise as *more* bimodal than
+   real flood. Lesson: KI always splits something.
+4. **IBI ratio instability** — vegetation scored **+1.156** (built-up) from
+   two negatives. Fixed on physics (built-up requires NDBI > 0), not by
+   clamping the symptom.
+5. **A survival bug in my own guard** — `_render_clip` maps fields by name,
+   so `signal_detectable` was silently dropped and the concern could never
+   have fired. Exactly the CHANGE 6 failure mode.
+6. **Test pollution I introduced** — putting `agents/hazard` on `sys.path`
+   rebound the bare name `agent` and broke 7 unrelated tests.
+7. **A latent harness bug** — the city token was doubled into the Nominatim
+   query; Kanalia worked only by luck.
+
+## 8. Total download cost
+
+**~2.4 GB this session** (one forced-S1 Kanalia run at ~2.4 GB; every A/B,
+ablation and detectability analysis reused those cached scenes, which is why
+the ablation was affordable at all). Reference vectors ~15 MB.
+Project running total: **~22.5 GB**.
+
+## 9. What remains unaddressed, ranked
+
+1. **S1 has no scoreable flood-peak acquisition.** Not a tuning problem — an
+   acquisition-timing one. Needs an event where a same-orbit pass exists
+   within ~2 days of peak. Keramidi is the next candidate.
+2. **Urban validation still open** (§4). The highest-value remaining gap,
+   since exposure concentrates in cities.
+3. **Keramidi not yet run live** — configured, dry-run verified, unscored.
+4. **GPM IMERG fetch not implemented** — Phase 5 ships the assessment and
+   bounded-influence layer with constraints enforced and tested; the live
+   fetch is a bounded follow-on.
+5. **IBI unvalidated against a built-up reference** — correct on synthetic
+   spectra, no ground truth.
+6. **Landslide/earthquake detection unbuildable** until an inventory with
+   ≥10 m-scale polygons exists.
+7. **`observed_event_a` vs `maximumWaterExtentA` semantics** — Keramidi uses
+   a snapshot layer, Kanalia a cumulative maximum. Must be stated whenever
+   the two are compared.
