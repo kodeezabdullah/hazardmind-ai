@@ -167,6 +167,103 @@ def test_rubric_enforced_in_code():
         bad(f"garbage handling wrong: {r5}")
 
 
+def test_gridded_exposure_reaches_population_affected():
+    """Survival assertion (repo rule): proving the exposure math is correct
+    is NOT the same as proving it reaches production. This calls the REAL
+    task entry point and asserts the gridded figure — not the LLM's number —
+    becomes population_affected."""
+    import asyncio
+    import types
+
+    import tasks.population as population
+
+    # Stub the LLM so the test is offline and the LLM's number is distinct.
+    async def _fake_llm(prompt, criticality, task_name=None):
+        return {"population_affected": 777_777, "vulnerable_population": 1000}, "stub-model", "stub"
+
+    # Stub GeoNames (network) and the exposure fetch (network) — the latter
+    # returns a known gridded figure the real code must prefer.
+    async def _fake_geonames(city):
+        return 50_000
+
+    async def _fake_exposure(hazard_data):
+        return {
+            "population": 123_456,
+            "method": "worldpop_polygon_intersection",
+            "source": "WorldPop_test",
+            "pixels": 42,
+            "polygon_area_km2": 12.5,
+            "notes": "test",
+            "geometry_source": "hazard_polygon",
+        }
+
+    orig = (population.smart_llm_call, population._fetch_geonames_population,
+            population._gridded_exposure)
+    population.smart_llm_call = _fake_llm
+    population._fetch_geonames_population = _fake_geonames
+    population._gridded_exposure = _fake_exposure
+    try:
+        res = asyncio.run(population.run_population_task(
+            {"bbox": [73.0, 33.0, 73.1, 33.1], "location": "Rawalpindi, Pakistan",
+             "severity": "HIGH", "flood_risk": "HIGH", "disaster_type": "flood"},
+            "test-event"))
+    finally:
+        (population.smart_llm_call, population._fetch_geonames_population,
+         population._gridded_exposure) = orig
+
+    if res.get("population_affected") == 123_456:
+        ok("gridded exposure survives into population_affected (not the LLM's 777,777)")
+    else:
+        bad(f"population_affected={res.get('population_affected')} — gridded "
+            "figure did not reach production")
+    if res.get("population_llm_estimate") == 777_777:
+        ok("the LLM estimate is kept alongside for comparison, not discarded")
+    else:
+        bad(f"llm estimate not recorded: {res.get('population_llm_estimate')}")
+    if res.get("population_basis") == "worldpop_polygon_intersection":
+        ok("population_basis records which method produced the number")
+    else:
+        bad(f"basis not recorded: {res.get('population_basis')}")
+
+
+def test_llm_estimate_used_when_exposure_unavailable():
+    """When the raster is unreachable the pipeline must keep working on the
+    LLM estimate — degraded, but explicitly labelled as such."""
+    import asyncio
+
+    import tasks.population as population
+
+    async def _fake_llm(prompt, criticality, task_name=None):
+        return {"population_affected": 55_000}, "stub-model", "stub"
+
+    async def _fake_geonames(city):
+        return 50_000
+
+    async def _fake_exposure(hazard_data):
+        return {"population": None, "method": "unavailable", "source": None,
+                "pixels": 0, "polygon_area_km2": 0.0, "notes": "unreachable"}
+
+    orig = (population.smart_llm_call, population._fetch_geonames_population,
+            population._gridded_exposure)
+    population.smart_llm_call = _fake_llm
+    population._fetch_geonames_population = _fake_geonames
+    population._gridded_exposure = _fake_exposure
+    try:
+        res = asyncio.run(population.run_population_task(
+            {"bbox": [73.0, 33.0, 73.1, 33.1], "location": "Rawalpindi, Pakistan",
+             "severity": "HIGH", "flood_risk": "HIGH", "disaster_type": "flood"},
+            "test-event"))
+    finally:
+        (population.smart_llm_call, population._fetch_geonames_population,
+         population._gridded_exposure) = orig
+
+    if res.get("population_affected") == 55_000 and res.get("population_basis") == "unavailable":
+        ok("exposure unavailable -> LLM estimate used AND labelled unavailable")
+    else:
+        bad(f"degraded path wrong: pop={res.get('population_affected')} "
+            f"basis={res.get('population_basis')}")
+
+
 if __name__ == "__main__":
     print("=" * 64)
     print("PHASE 6 — IMPACT SCIENCE (exposure, subsetting, rubric)")
@@ -177,6 +274,8 @@ if __name__ == "__main__":
     test_facilities_constrained_geometrically()
     test_llm_at_risk_is_clamped()
     test_rubric_enforced_in_code()
+    test_gridded_exposure_reaches_population_affected()
+    test_llm_estimate_used_when_exposure_unavailable()
     print("=" * 64)
     print(f"RESULT: PASS={len(PASS)} FAIL={len(FAIL)}")
     print("=" * 64)
