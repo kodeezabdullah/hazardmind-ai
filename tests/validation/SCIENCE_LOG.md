@@ -34,6 +34,177 @@ recall 0.9878 · F1 0.6520 (confidence 0.4479, basis `evidence_contradicts`).
 | 6 | **Phase 3i FIRST SCORED S1** (change detection, post-peak scene) | 95aa554 | Kanalia **S1** excl-PW | **0.0083** | **0.0567** | **0.0096** | **0.0165** | 0.0 (weak) | vs S2 same event (0.9624/0.9808): worse by ~2 orders of magnitude | **RECORDED, not kept as an improvement** | first trustworthy S1 measurement (change detection ran, post-peak 2023-09-13 imagery, 100% coverage); the detector performs POORLY here — 3.22 km2 predicted vs 18.97 km2 reference, ~94% of detections outside it |
 
 
+---
+
+# Session 4 — `science/detection-pass` (2026-07-29)
+
+| # | Change | Commit | Event | IoU | Precision | Recall | F1 | Δ vs prev | Kept? | Why |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 7 | **Phase 0 bidirectional S1** (detect double-bounce RISE as well as open-water DROP) | cfcd301 | Kanalia S1 | 0.0228 | 0.1384 | 0.0265 | 0.0445 | **bit-identical to drop-only**; `rise_px = 0` | **KEPT as a no-op correctness change, NOT an improvement** | the physics is real and offline-proven (6 dB rise block: 17.38% both vs 0.00% drop-only) but this scene contains no rise signal at all |
+| — | (discarded) fixed **−1.0 dB** threshold | not shipped | Kanalia S1 | 0.0566 | 0.1691 | 0.0784 | 0.1071 | looks like **2.5× IoU** over production | **DISCARDED** | precision lift **0.78× — worse than chance**. Noise-fitting one event's reference, not skill |
+| 8 | Phase 3a permanent water as a CLASS (overlay, not subtraction) | df21d51 | — | — | — | — | — | no metric change expected (same pixels excluded from the flood claim) | **KEPT** | the river is now rendered + separately quantified instead of merged into "safe land"; caught a real trap (class 10 would have vectorized AS a hazard zone and inflated `affected_area_km2`) |
+| 9 | Phase 3b named water features + contract/prompt wiring | a217f28, c18cc05 | — | — | — | — | — | not metric-bearing | **KEPT** | hazard's flood prompt now states the flood-only figure and directs assessment at it; survival-tested 12/12 through the REAL adapter + REAL prompt builder |
+
+**Note on the 0.0228 vs the previous session's 0.0083.** Both are Kanalia S1
+against the same pinned AOI and reference. They differ because this session
+measures the detector **directly on the cached scenes** (a strict A/B where
+only `direction` varies) while 0.0083 came through the full pipeline (which
+adds permanent-water masking and zone-area filtering). The 0.0228/0.0083
+difference is measurement-frame, **not** an improvement — every conclusion
+below is drawn from within-frame comparisons only.
+
+## Phase 0 — the bidirectional fix, and why it changed nothing
+
+**Hypothesis (from the task):** Kanalia is flooded farmland; in flooded
+vegetation the water surface and plant stems form a corner reflector, so
+double-bounce RAISES backscatter. A drop-only detector looks for a decrease
+where an increase is occurring.
+
+**The physics is correct and the implementation works** — offline, a 6 dB
+rise block scores 17.38% with both-direction detection and **0.00%**
+drop-only. But note the fix required was **not** the proposed
+`abs(ratio) > 3.0`: `tiled_threshold` separately discarded any tile whose
+Kittler-Illingworth cut came out positive (`ki["threshold"] < 0`), so the
+*estimator itself* never saw the rise mode. Taking `abs()` of the final
+comparison would have applied a drop-derived cut to a rise population. The
+two modes are pooled and thresholded separately by sign (measured on a mixed
+synthetic scene: drop −5.223 dB, rise +2.686 dB — not mirror images).
+
+**Measured on the real event: bit-identical, `rise_px = 0`.** There is no
+double-bounce signature in this scene.
+
+## The real finding — this scene has no recoverable flood signal
+
+Change-image statistics **inside the EMS flood reference** (167,011 pixels of
+confirmed flood) versus dry ground:
+
+| | mean | median | std |
+|---|---|---|---|
+| flood (167,011 px) | **−0.3940 dB** | −0.2908 | 0.6230 |
+| dry (590,034 px) | **−0.4152 dB** | −0.3415 | 0.7483 |
+
+- **Cohen's d = 0.0308** — essentially zero separation.
+- **ROC AUC = 0.4870** — *below* 0.5. Flooded pixels are, if anything,
+  marginally **brighter** than dry ones.
+- **≥ +3 dB inside confirmed flood: 0 pixels.** No double-bounce anywhere.
+- **≤ −3 dB inside confirmed flood: 1.06%** — which is exactly why recall
+  was ~0.01.
+
+**Skill test — every threshold is worse than chance:**
+
+| | precision | lift vs chance | F1 |
+|---|---|---|---|
+| zero-skill (label whole AOI flood) | 0.2206 | 1.00× | **0.3615** |
+| cut −1.000 dB | 0.1729 | **0.78×** | 0.1288 |
+| cut −1.782 dB (production KI) | 0.1588 | **0.72×** | 0.0544 |
+| cut −3.000 dB | 0.1881 | **0.85×** | 0.0200 |
+
+The trivial "everything is flooded" baseline beats every tuned variant. The
+best F1 obtainable by **any** global cut is 0.3740 (at +0.35 dB, precision
+0.2323) — barely above the 22.1% base rate.
+
+**What this eliminates, by measurement rather than argument:** threshold
+choice, speckle filtering, morphology, baseline depth (a 3-scene same-orbit
+median baseline was *already* in use — so **Phase 2 was not built**, since
+deepening a baseline reduces reference noise and cannot create a target
+signal), and detection direction. By elimination the remaining explanation is
+**acquisition timing**: 2023-09-13 is 8 days past the 09-05/06 peak, and
+orbit 7's 12-day revisit offered no earlier post-peak pass. The basin had
+drained.
+
+**This is an operational limit of S1 at this revisit cadence, not a tunable
+defect** — and it is more useful than a tuned number would have been.
+
+## Phase 1d/1e — the reference gate: BOTH FAIL, Phases 6 and 7 SKIPPED
+
+**1d, NASA COOLR (landslide).** The polygon service (`COOLR_Events_Polygons`)
+is **down** — HTTP 500, "service not started". Points are plentiful (40,310
+events + 14,753 reports) but support no IoU. The one reachable polygon layer
+holds **48 records total**, of which **18 are post-2018** (the S2 L2A era):
+
+- **15 of 18 are under 0.04 km².** At 10 m that is ~40 pixels — at or below
+  the floor where Phase 6a's shape filtering (elongation, orientation,
+  downslope tapering) can measure a shape at all.
+- Only 2 exceed 1 km²: Ultar Glacier (Pakistan) — a rock-and-ice avalanche on
+  a glacier, where the NDVI-loss signal Phase 6a keys on does not exist — and
+  Fagraskógarfjall (Iceland).
+
+**n ≤ 2 usable. Not a validation set.** Landslide detection was therefore
+**not built**.
+
+**1e, xBD/xView2 (earthquake).** Exactly **one** earthquake event (Mexico
+2017; Palu is labelled tsunami), on **sub-metre Maxar commercial optical**.
+It cannot score a 10 m Sentinel SAR detector. Earthquake damage detection was
+therefore **not built**.
+
+Per the task's Phase 1f instruction — building unmeasurable detectors is the
+trap the flood work escaped — both phases are skipped rather than built
+anyway.
+
+## Phase 1a — the prior "no references below EMSR500" conclusion was WRONG
+
+The previous session concluded no further Sentinel-backed EMS references
+exist. That conclusion came from probing
+`rapidmapping.emergency.copernicus.eu`, which returns **403 "Authentication
+credentials were not provided"** for older activations (verified
+deterministic, not rate-limiting: EMSR692/698 return 200 while EMSR373/450
+return 403 on the same session, repeatedly).
+
+The older archive lives on a **different portal** with open S3 links.
+Verified end-to-end on **EMSR271** (Thessaly, Feb 2018): **1,729
+riverine-flood polygons, 183.9 km²**, and the product's own `source.dbf`
+confirms **Sentinel-1, 10 m GSD, post-event 2018-02-28 / 03-01**.
+
+**124 flood activations below EMSR500 carry downloadable vector packages**
+(63 with MONIT products, 39 of those post-2018).
+
+| 10 | **Signal-detectability guard** (S1 no-signal scenes) | 3b43e73 | — | — | — | — | — | not metric-bearing | **KEPT** | the pipeline shipped a worse-than-chance map with no indication; it now flags the extent INDETERMINATE. Two earlier versions of this guard were measured and DISCARDED (below) |
+| 11 | Phase 1a EMSR271 Keramidi (4th scoreable event) | f8a1335 | Keramidi S1 | — | — | — | — | 20.14% flooded fraction; not yet run live | **KEPT** | corrects the prior session's "no references below EMSR500" conclusion; 2 real bugs fixed en route |
+| 12 | Phase 4 IBI built-up (Xu 2008) | 9ca1a2b | — | — | — | — | — | not metric-bearing | **KEPT** | NDBI would call bare soil built-up (+0.1351); IBI rejects it (−12.65). A ratio instability was found by measurement and guarded on physics |
+| 13 | Phase 5 rainfall as bounded context | 172b60f | — | — | — | — | — | not metric-bearing | **KEPT** | rainfall can never veto a detection; caps enforced and asserted |
+
+| 14 | **Phase 0 RE-MEASURED on a peak-timed event** | 098955f | **Keramidi S1 (NEW)** | **0.1684** | **0.5858** | **0.1911** | **0.2882** | vs drop-only on the SAME scenes: **F1 x45** (0.0064 -> 0.2882) | **KEPT — the refutation is overturned** | 94% of the signal is a RISE (43,048 rise px vs 2,500 drop px). Kanalia showed rise_px=0 only because it was 8 days post-peak and drained |
+| 15 | S1 pre-flight acquisition-timing check | 098955f | — | — | — | — | — | not metric-bearing | **KEPT** | knows before spending 2.4 GB whether a scene can carry signal |
+| 16 | Landslide scar detector WIRED (was dead code) | 5033584 | — | — | — | — | — | 25/25 offline | **KEPT** | passed 8/8 with zero callers; no pre-event optical fetch existed |
+| 17 | Landslide susceptibility from DEM (not LHASA) | d392971 | — | — | — | — | — | 22/22 offline | **KEPT** | caught an INVERTED plan-curvature sign convention |
+| 18 | Earthquake SAR damage detection + wiring | c1d6dff, b0125fe | — | — | — | — | — | 21/21 + 26/26 | **KEPT** | uniform +3.4 dB brightening flags 6.4%, not ~100% |
+| 19 | R2 upload bounded (hung the whole pipeline) | 1a144d3 | — | — | — | — | — | — | **KEPT** | observed live twice: completed analysis discarded by a stalled upload |
+
+## THE HEADLINE CORRECTION — Phase 0 was NOT refuted
+
+Earlier in this session I recorded the bidirectional S1 fix as a measured
+no-op ("bit-identical, rise_px = 0") on Kanalia. **That measurement was
+correct for that scene and the general conclusion drawn from it was wrong.**
+
+Keramidi (EMSR271, Thessaly 2018, ~4 days post-peak), identical AOI and
+reference, scored from cached scenes:
+
+| Direction | IoU | Precision | Recall | F1 | Predicted |
+|---|---|---|---|---|---|
+| drop-only | 0.0032 | 0.1821 | 0.0033 | 0.0064 | 0.27 km2 |
+| **both** | **0.1684** | **0.5858** | **0.1911** | **0.2882** | 4.92 km2 |
+
+**F1 improves 45x.** The mechanism is measured, not inferred:
+**rise_px = 43,048 vs drop_px = 2,500 — 94% of the recoverable signal is a
+backscatter RISE**, the double-bounce return from water among emergent
+vegetation. Kanalia had `rise_px = 0` because at 8 days post-peak the basin
+had drained; there was no signal in EITHER direction there (ROC AUC 0.4870).
+
+**This also settles the `abs()` design call.** The two cuts are not mirror
+images — drop **-4.200 dB**, rise **+2.816 dB**. A single `abs(ratio) > 3.0`
+would have applied the drop-derived threshold to the rise population, i.e. to
+the majority of the signal. Pooling and thresholding separately by sign is
+what produced the 45x.
+
+**What is NOT claimed:** that S1 is good. F1 0.2882 is far below S2's 0.98,
+and recall 0.19 means most of the reference is still missed — consistent with
+a 4-day-post-peak scene under-reporting a maximum, and with this event's
+layer being `observed_event_a` (a SNAPSHOT) rather than a cumulative maximum.
+
+**The Kanalia row stands as recorded.** It was a true measurement of a scene
+with no signal. What changed is the conclusion drawn from it — corrected by a
+second event rather than by editing the first.
+
 ## Cumulative download cost (this session)
 
 | Run | MB |
@@ -720,3 +891,593 @@ per-run table above.
 7. **Shape/threshold constants uncalibrated** — landslide geometry filters
    and the magnitude bands encode documented qualitative properties but no
    inventory calibration (NASA COOLR is the path).
+
+---
+
+# FINAL REPORT — `science/detection-pass` (2026-07-29)
+
+## 1. The complete change table
+
+Recorded in the session-4 table above. Summary: **9 changes kept, 3
+discarded on measurement, 2 phases deliberately not built.**
+
+| Discarded | Why |
+|---|---|
+| Fixed **−1.0 dB** S1 threshold | Looked like a **2.5× IoU win**. Precision lift **0.78× — worse than chance.** Noise-fitting one event's reference |
+| Signal guard v1 (**detected-vs-undetected Cohen's d**) | **Circular** — the detector defines both groups by thresholding the compared values. Returned d=4.18 on a no-signal scene and *passed* it |
+| Signal guard v2 (**KI bimodal-tile fraction**) | The no-signal scene scored **0.75, HIGHER than a real flood's 0.25**. KI always splits a tile somewhere |
+
+## 2. Did S1 improve? **No — and that is the finding.**
+
+Every avenue was measured, not argued:
+
+| Variant | IoU | Precision | Recall | F1 | Precision lift |
+|---|---|---|---|---|---|
+| **zero-skill** (label whole AOI flood) | — | 0.2206 | 1.0000 | **0.3615** | 1.00× |
+| KI-tiled (production) | 0.0228 | 0.1384 | 0.0265 | 0.0445 | **0.72×** |
+| bidirectional (Phase 0) | **0.0228** | **0.1384** | **0.0265** | **0.0445** | 0.72× |
+| fixed −1.0 dB | 0.0566 | 0.1691 | 0.0784 | 0.1071 | **0.78×** |
+| no morphology | 0.0279 | 0.1586 | 0.0328 | 0.0543 | — |
+| no speckle filter | 0.0205 | 0.1447 | 0.0233 | 0.0402 | — |
+
+**The trivial "everything is flooded" baseline beats every tuned variant.**
+
+Why, measured inside the confirmed EMS flood extent (167,011 px):
+**ROC AUC = 0.4870** (below chance), **Cohen's d = 0.031**, **0 pixels**
+above +3 dB, **1.06%** below −3 dB. Flood and dry are statistically
+indistinguishable — the acquisition (8 days post-peak, 12-day revisit gave no
+earlier option) does not contain the flood.
+
+This **eliminated by measurement**: threshold choice, speckle filtering,
+morphology, baseline depth, and detection direction. **Phase 2 was therefore
+not built** — a 3-scene same-orbit baseline was already in use, and deepening
+a baseline cannot create an absent signal.
+
+## 3. Scoreable events reached: **4** (target was 8)
+
+| Event | Fraction | Source | Status |
+|---|---|---|---|
+| Kanalia (EMSR692) | ~14% | S1 maxWaterExtent | scored |
+| Insh (EMSR698) | ~76% | S1 maxWaterExtent | degenerate (stale scene) |
+| Paiporta (EMSR773) | 1.3% | — | unscoreable (EMS urban ceiling) |
+| **Keramidi (EMSR271)** | **20.14%** | **S1, verified** | **NEW — not yet run live** |
+
+**Why short of 8, plainly:** the binding constraint is not the number of
+activations (124 were found below EMSR500) but **post-event sensor
+provenance**. Most modern and many older activations delineate from
+commercial VHR (COSMO-SkyMed, RADARSAT-2, Pleiades, ICEYE, SPOT). Scoring a
+10 m Sentinel prediction against a 5 m commercial-SAR reference measures
+sensor difference as pipeline error.
+
+## 4. Urban validation: **NOT achieved.** The limitation stands.
+
+This was actively pursued and honestly failed:
+
+- **Townsville (EMSR342)** — 452 polygons, 45.5 km² inside a city of 180,000.
+  Config was written, then **deleted**: its `source.dbf` shows post-event
+  sources are **COSMO-SkyMed (5 m) and RADARSAT-2 (6 m)**. Its Sentinel-2
+  entry is the *pre-event* source — an easy and costly misreading.
+- **Verona (EMSR332)** — S1-backed but **2.66%** flooded at its densest AOI.
+- **Sciacca (EMSR333)** — S1-backed but **0.62%**.
+
+Both Italian events sit in Paiporta territory, where a perfect detector still
+scores near zero.
+
+**Therefore every metric this project reports still describes OPEN-TERRAIN
+flood detection only.** "F1 0.98" is defensible only with "on open-terrain
+flood extents scored against Copernicus EMS references" attached.
+
+## 5. Landslide and earthquake: **references do not support measurement.**
+### Detectors were NOT built.
+
+- **COOLR (1d):** polygon service **down (HTTP 500)**. The one reachable
+  polygon layer has **48 records**, 18 post-2018, of which **15 are under
+  0.04 km² (~40 pixels at 10 m)** — at or below where Phase 6a's shape
+  filtering can measure a shape. Only 2 exceed 1 km², one a glacier
+  rock/ice avalanche with no vegetation signal. **n ≤ 2.**
+- **xBD (1e):** exactly **one** earthquake event (Mexico 2017), on sub-metre
+  Maxar commercial optical. Cannot score a 10 m Sentinel SAR detector.
+
+Per Phase 1f, both phases were skipped rather than built unmeasurably.
+
+## 6. Confidence vs accuracy: **still cannot be claimed. n = 1.**
+
+Keramidi is configured but not yet run live, so the scoreable-accuracy count
+is unchanged at one point. No correlation is reported, because none is
+supportable.
+
+## 7. What made things worse, and what it taught
+
+1. **The −1.0 dB threshold** — a 2.5× headline that was worse than chance.
+   Lesson: always compare against the zero-skill baseline, not against the
+   previous number.
+2. **Signal guard v1 (circular)** — measured the threshold, not the signal.
+   Lesson: a self-check that partitions data by the thing being checked
+   proves nothing.
+3. **Signal guard v2 (bimodality)** — ranked noise as *more* bimodal than
+   real flood. Lesson: KI always splits something.
+4. **IBI ratio instability** — vegetation scored **+1.156** (built-up) from
+   two negatives. Fixed on physics (built-up requires NDBI > 0), not by
+   clamping the symptom.
+5. **A survival bug in my own guard** — `_render_clip` maps fields by name,
+   so `signal_detectable` was silently dropped and the concern could never
+   have fired. Exactly the CHANGE 6 failure mode.
+6. **Test pollution I introduced** — putting `agents/hazard` on `sys.path`
+   rebound the bare name `agent` and broke 7 unrelated tests.
+7. **A latent harness bug** — the city token was doubled into the Nominatim
+   query; Kanalia worked only by luck.
+
+## 8. Total download cost
+
+**~2.4 GB this session** (one forced-S1 Kanalia run at ~2.4 GB; every A/B,
+ablation and detectability analysis reused those cached scenes, which is why
+the ablation was affordable at all). Reference vectors ~15 MB.
+Project running total: **~22.5 GB**.
+
+## 9. What remains unaddressed, ranked
+
+1. **S1 has no scoreable flood-peak acquisition.** Not a tuning problem — an
+   acquisition-timing one. Needs an event where a same-orbit pass exists
+   within ~2 days of peak. Keramidi is the next candidate.
+2. **Urban validation still open** (§4). The highest-value remaining gap,
+   since exposure concentrates in cities.
+3. **Keramidi not yet run live** — configured, dry-run verified, unscored.
+4. **GPM IMERG fetch not implemented** — Phase 5 ships the assessment and
+   bounded-influence layer with constraints enforced and tested; the live
+   fetch is a bounded follow-on.
+5. **IBI unvalidated against a built-up reference** — correct on synthetic
+   spectra, no ground truth.
+6. **Landslide/earthquake detection unbuildable** until an inventory with
+   ≥10 m-scale polygons exists.
+7. **`observed_event_a` vs `maximumWaterExtentA` semantics** — Keramidi uses
+   a snapshot layer, Kanalia a cumulative maximum. Must be stated whenever
+   the two are compared.
+
+---
+
+# SESSION 5 — research-readiness pass (`science/detection-pass`, 2026-07-29)
+
+**Goal:** make flood, landslide and earthquake all perform REAL detection
+from imagery — not consume a third party's modelled conclusion.
+
+## 1. The headline: S1 flood is repaired AND proven
+
+| Event | Timing | drop-only F1 | **both-direction F1** |
+|---|---|---|---|
+| Kanalia | 8 days post-peak | 0.0064 | 0.0064 (no signal either way) |
+| **Keramidi** | **~4 days post-peak** | **0.0064** | **0.2882** |
+
+**F1 x45 on the peak-timed event**, on identical AOI/reference/scenes with
+only `direction` varying. Mechanism measured: **rise_px 43,048 vs drop_px
+2,500 — 94% of the signal is a backscatter RISE**, the double-bounce return
+from water among emergent vegetation.
+
+Two events were required. One would have given the wrong answer in either
+direction: Kanalia alone said "refuted", Keramidi alone would have said
+"solved" without revealing the acquisition-timing dependency that is the
+real operational constraint.
+
+**Not claimed:** that S1 is good. F1 0.2882 is far below S2's 0.98, and
+recall 0.19 means most of the reference is still missed — consistent with a
+4-day-post-peak scene under-reporting a maximum, and with this event's layer
+being `observed_event_a` (a snapshot) rather than a cumulative maximum.
+
+## 2. All three hazards now DETECT
+
+| Hazard | Method | Third-party conclusion consumed? |
+|---|---|---|
+| **Flood** | Bidirectional SAR change detection; S2 MNDWI + KI | **None** |
+| **Landslide** | Bi-temporal NDVI + shape filtering; susceptibility from DEM | **None** — LHASA deliberately NOT imported |
+| **Earthquake** | SAR polarimetric damage (VH/VV depolarisation) | **USGS as TRIGGER only**; ShakeMap/PAGER NOT used |
+
+Earthquake is the one that needed the framing corrected: ground shaking is
+not observable from satellite, so we do not measure it. What IS observable —
+**building damage** — is detected, from a change in scattering MECHANISM
+(double-bounce -> volume scattering as walls become rubble), constrained to
+where buildings actually exist (Phase 4's IBI mask).
+
+## 3. Six real bugs found by running it, not by reading it
+
+1. **The landslide detector was DEAD CODE** — 8/8 passing tests, zero
+   callers. No pre-event optical fetch existed, so it ran a single-scene
+   absolute NDVI threshold that cannot separate a scar from always-bare
+   ground.
+2. **Inverted plan-curvature sign** — susceptibility was rewarding diverging
+   spurs and penalising converging hollows, the opposite of the physics.
+   Caught by measuring both on synthetic terrain (+2.98e-04 vs -2.98e-04).
+3. **Production city-query duplication** — `"Keramidi, Keramidi, Trikala,
+   Greece"` killed runs at 22s. Kanalia only ever resolved by luck.
+4. **Unbounded R2 upload** — hung the entire pipeline twice, discarding a
+   completed multi-GB analysis with no error.
+5. **Test pollution** — `agents/hazard` on `sys.path` rebound the bare name
+   `agent`, breaking 7 unrelated tests.
+6. **IBI ratio instability** — vegetation scored +1.156 (built-up) from two
+   negatives; guarded on physics (NDBI > 0), not by clamping.
+
+## 4. Changes discarded on measurement
+
+| Discarded | Why |
+|---|---|
+| Fixed −1.0 dB S1 threshold | Precision lift **0.78x — worse than chance** |
+| Signal guard v1 (Cohen's d) | **Circular** — returned d=4.18 on a no-signal scene and passed it |
+| Signal guard v2 (KI bimodality) | No-signal scene scored **0.75 vs a real flood's 0.25** |
+| EMSR342 Townsville event | Post-event sources are **COSMO-SkyMed 5 m / RADARSAT-2 6 m** — scoring Sentinel against commercial VHR measures sensor difference as pipeline error |
+
+## 5. Test position
+
+| Suite | Result |
+|---|---|
+| Satellite (pytest) | **122 passed** |
+| Hazard (rainfall + susceptibility + terrain) | **76 passed** |
+| New this session | landslide-wired 25, earthquake 21+26, susceptibility 22, terrain 23, IBI 25, signal-guard 14+13 |
+
+## 6. What remains, ranked
+
+1. **Landslide and earthquake have no scoreable reference.** COOLR's polygon
+   service is down (48 records, mostly ~40 px); xBD is sub-metre commercial
+   optical over one earthquake. Both detectors are built, wired and tested,
+   with `thresholds_basis` stating uncalibrated in every result. **They are
+   defensible, not validated.**
+2. **Urban flood validation still open** — Townsville rejected on sensor
+   grounds, Verona (2.66%) and Sciacca (0.62%) too sparse. Every metric
+   still describes open-terrain flood.
+3. **n=2 for S1, n=1 for confidence calibration.** Correlation still not
+   claimable.
+4. **GPM IMERG live fetch** not implemented (bounded-influence layer is).
+5. **SoilGrids/Overpass not exercised live** — stubbed tests only.
+
+---
+
+# SESSION 5b — reference hunt for landslide and earthquake
+
+**Question:** can we score the landslide and earthquake detectors at all?
+
+## Earthquake: a REAL reference exists — EMSR317 Palu
+
+Swept EMS activations 150-720 for earthquake events publishing GRADING
+(damage) products. Found several; Palu (Indonesia, M7.5, Sept 2018) is by far
+the strongest:
+
+| | Palu AOI07 (EMSR317) |
+|---|---|
+| Graded building points | **9,457** |
+| Destroyed | **1,995** |
+| Damaged | 4,149 |
+| Possibly damaged | 3,313 |
+| Spatial extent of destroyed | **20.8 km²** (convex hull) |
+| Post-event sensor | **Pleiades-1A/1B, 0.5 m** |
+
+**The sensor is VHR, so an extent-vs-extent IoU is INVALID** — the same
+disqualifier that rejected Townsville (scoring a 10 m prediction against a
+0.5 m delineation measures sensor difference as pipeline error).
+
+**But the reference is graded POINTS, not a competing extent map**, which
+makes a different and legitimate question available: do our detected damage
+pixels COINCIDE with where buildings were actually destroyed? That is a
+spatial-agreement / hit-rate test, and it is exactly what the Phase 1e brief
+anticipated ("report what it CAN validate — aggregate damage extent,
+relative severity ordering").
+
+**Verdict: SCOREABLE, but not by IoU.** 1,995 destroyed buildings over
+20.8 km² is ample for a 10 m detector to be tested against.
+
+## Landslide: still NO usable reference. The hunt failed honestly.
+
+Swept the same range for landslide activations. 22 activations mention
+landslides and publish vector products. Three had **Sentinel-1 10 m
+post-event sources** — which looked like the breakthrough:
+
+| Activation | Post-event sensor |
+|---|---|
+| EMSR251 Kragerø, Norway | Sentinel-1, 10 m |
+| EMSR292 Chrisoupoli, Greece | Sentinel-1, 10 m |
+| EMSR273 Barbullush, Albania | Sentinel-1, 10 m |
+
+**They are not landslide references.** Reading each product's
+`observed_event_a.event_type` — rather than trusting the activation
+description — shows:
+
+    EMSR251: {'5-Flood': 16}
+    EMSR273: {'5-Flood': 83}
+    EMSR292: {'5-Flood': 1}
+    EMSR335: {'998-Other': 4}
+    EMSR325: {'6-Mass Movement': 2}   <- the ONLY real landslide
+
+These are FLOOD activations whose narrative text merely mentions landslides;
+a keyword sweep matched the wrong thing. Checking `event_type` in the data
+caught it before any of them became a "landslide" harness event.
+
+**EMSR325 is a genuine mass-movement product but fails both bars:** only
+**2 polygons**, and its post-event source is **Pleiades 0.5 m**.
+
+**Verdict: landslide remains UNSCOREABLE.** Combined with the earlier COOLR
+finding (polygon service down; 15 of 18 post-2018 records under 0.04 km²,
+~40 px), there is still no landslide inventory with (a) polygons large
+enough for a 10 m detector and (b) Sentinel post-event provenance.
+
+## Flood regression run — inconclusive, and the reason is my error
+
+A Kanalia re-run was launched to confirm this session's changes did not
+regress the working S2 path. It was launched WITHOUT the historical date pin
+(`sentinel_clock_patch`), so it searched present-day Kanalia (Oct 2026,
+64.7% cloud) instead of the September 2023 flood. It refused correctly at
+35.291% coverage against the 80% floor — the guard behaving properly — but
+that says nothing about regression. 1,593 MB spent, no signal obtained.
+The scored comparison must use the date-pinned harness path.
+
+## Net position on validation
+
+| Hazard | Reference | Scoreable? |
+|---|---|---|
+| Flood S1 | EMS, Sentinel-backed | **YES — n=2 scored** |
+| Flood S2 | EMS, Sentinel-backed | **YES — n=1 scored** |
+| **Earthquake** | **EMSR317 Palu, 9,457 graded points** | **YES — by spatial agreement, NOT IoU** |
+| Landslide | none found | **NO** |
+
+---
+
+# EARTHQUAKE — FIRST SCORED RESULT, and it is WORSE THAN CHANCE
+
+**Event:** EMSR317 Palu, Indonesia (M7.5, 2018-09-28). Same-relative-orbit
+S1 pair, orbit 134 DESCENDING: pre 2018-06-07, post 2018-10-05 (+7.5 d).
+Both scenes dual-pol (VV+VH), 3.0 GB. Scored against 9,457 EMS graded
+building points by SPATIAL AGREEMENT, not IoU (the reference is 0.5 m
+Pleiades-derived points; an extent IoU would measure sensor difference).
+
+| EMS grade | n | hit | detection rate |
+|---|---|---|---|
+| Destroyed | 1,995 | 119 | **0.0596** |
+| Damaged | 4,149 | 196 | 0.0472 |
+| Possibly damaged | 3,313 | 167 | 0.0504 |
+| **NULL BASELINE** (mask fraction over built-up) | — | — | **0.1126** |
+
+**LIFT OVER CHANCE = 0.53x. The detector is WORSE THAN RANDOM.** It flags
+11.26% of the built-up area but reaches only 5.96% of genuinely destroyed
+buildings — randomly flagging that much area would hit roughly twice as many.
+
+The severity ordering nominally passes (Destroyed 0.0596 > Possibly-damaged
+0.0504) but the margin is trivial AND the middle grade is out of order
+(Damaged 0.0472 < Possibly damaged 0.0504). That is noise, not a severity
+signal, and it must not be reported as "ordering correct" without this
+sentence attached.
+
+**Two diagnostics say the mechanism did not fire:**
+
+* `mean_vh_vv_change_db = -0.69`. The collapse signature is a POSITIVE
+  VH/VV shift (double-bounce -> volume scattering). It came out NEGATIVE
+  over the detected pixels — the opposite of the physics the detector is
+  built on.
+* `mean_correlation_in_damage = -0.061`, i.e. essentially zero, where
+  Matsuoka-Yamazaki predicts a clear correlation LOSS relative to intact
+  built-up.
+
+**The leading explanation, stated as a limitation and not an excuse: the
+112-day pre-event lead.** S1 acquisition over Palu was sparse in mid-2018 —
+a +-45-day window around the quake contains 28 scenes and ALL of them are
+post-event; orbit 134 stops after June and resumes only afterwards. So a
+112-day baseline is the pair that EXISTS, not the pair the method needs.
+Over 112 days in equatorial Indonesia, seasonal vegetation and
+soil-moisture change produce backscatter differences the detector cannot
+separate from structural change. This was recorded BEFORE the run, not
+retro-fitted after seeing the number.
+
+**A second, independent confound:** the built-up mask here is a SAR-intensity
+proxy (`VV >= p60`), not the IBI optical mask the detector was designed
+around — no optical pre/post pair was fetched for this run. Bright SAR
+returns include vegetation edges and terrain, so the "built-up" denominator
+is inflated, which depresses the lift figure by construction.
+
+**What this DOES establish:**
+* The earthquake path runs end to end on real dual-pol CDSE data —
+  same-orbit pair, VH+VV both fetched, damage detection executing, audit
+  fields intact.
+* The scoring methodology works and is honest: it produced a *negative*
+  result rather than a flattering one, because the null baseline was
+  computed alongside the headline rate.
+
+**What it does NOT establish:** any earthquake damage-detection accuracy.
+**Do NOT claim earthquake accuracy in the paper on this evidence.** The
+defensible statement is: "implemented, verified end-to-end on real dual-pol
+Sentinel-1, and scored against 9,457 graded buildings — the result did not
+exceed a random baseline under a 112-day pre-event lead and a proxy exposure
+mask, both of which are stated limitations rather than established detector
+failure."
+
+**What would make it a fair test** (not attempted here): an event with a
+same-orbit pre-event scene within ~2 weeks of the quake, and the real IBI
+built-up mask from an optical pair. Turkey-Syria 2023 (M7.8) has dense S1
+coverage and is the obvious candidate.
+
+---
+
+# EARTHQUAKE, SECOND ATTEMPT — Amatrice, and the REAL limit
+
+Palu's failure was confounded by a 112-day pre-event lead. The retest fixed
+exactly that: **EMSR177 Amatrice (Italy, M6.2, 2016-08-24), orbit 44
+ASCENDING, pre 2016-08-22 (-1.4 d), post 2016-09-03 (+10.6 d)**, both scenes
+dual-pol VV+VH. At a 1.4-day lead essentially nothing changed between the two
+acquisitions except the earthquake — no seasonal confound.
+
+The reference is also better than Palu's: **472 graded settlement POLYGONS**
+across five damage grades, including **145 "Not Affected"** as a genuine
+control class rather than only an area-fraction baseline.
+
+**The result: ZERO hits in EVERY grade.**
+
+| grade | n (px) | hit | rate |
+|---|---|---|---|
+| Completely Destroyed | 161 | 0 | 0.0000 |
+| Highly Damaged | 156 | 0 | 0.0000 |
+| Moderately Damaged | 250 | 0 | 0.0000 |
+| Negligible to slight | 73 | 0 | 0.0000 |
+| Not Affected | 368 | 0 | 0.0000 |
+| NULL BASELINE | — | — | 0.0916 |
+
+Zero across ALL grades — including the control — is not a weak detector. A
+detector flagging 9.16% of built-up area would hit *something* by chance.
+That pattern says the two datasets barely intersect, so the cause was
+diagnosed rather than reported as an accuracy figure.
+
+**THE CAUSE — a hard physical limit, not a bug:**
+
+    reference polygons                     472
+    TOTAL reference area                   0.1014 km2
+    median polygon area                    143.2 m2
+    polygons smaller than ONE 10 m pixel   172 / 472
+    polygons smaller than FOUR pixels      413 / 472
+
+**The Amatrice reference maps INDIVIDUAL BUILDINGS.** A 10 m Sentinel-1 pixel
+is 100 m2; the median reference polygon is 143 m2 — about one and a half
+pixels — and 87% of them are under four pixels. The whole town's graded
+extent totals 0.10 km2, against a detected 2.468 km2 at the sensor's own
+resolution.
+
+This is precisely what `earthquake_damage.py`'s `resolution_limit` field has
+stated in every result since it was written: *"Sentinel-1 at 10 m cannot
+resolve individual buildings. This detects LARGE-SCALE destruction, NOT
+per-structure damage."* Amatrice is a per-structure reference. The detector
+and the reference address different spatial scales, and no scoring scheme
+reconciles that.
+
+## Net verdict on earthquake validation
+
+Two attempts, two DIFFERENT and independently disqualifying obstacles:
+
+| Attempt | Reference | Obstacle |
+|---|---|---|
+| Palu (EMSR317) | 9,457 graded points, 20.8 km2 | 112-day pre-event lead (seasonal confound); no tight same-orbit pair exists |
+| Amatrice (EMSR177) | 472 graded polygons, 0.10 km2 | reference is PER-BUILDING (median 143 m2 vs a 100 m2 pixel) |
+
+**Earthquake damage detection remains UNVALIDATED, and the reason is now
+precise rather than vague.** EMS grading products are produced from
+sub-metre VHR imagery for per-structure assessment. That is the wrong
+granularity for a 10 m SAR detector by roughly two orders of magnitude in
+area — the same mismatch that disqualified Townsville as a flood reference,
+appearing here as a scale problem rather than a sensor-provenance one.
+
+**What a fair test would need** (not available in EMS): a reference mapping
+damage as CONTIGUOUS DISTRICT-SCALE extent — collapsed blocks, levelled
+neighbourhoods — at >= ~0.01 km2 per feature, over an event with a
+same-orbit S1 pair inside one revisit cycle. Turkey-Syria 2023 has the
+imagery (1.4 d and 2.9 d leads confirmed by catalogue query) but its EMS
+products are per-building too.
+
+**Do NOT claim earthquake accuracy.** The defensible statement is:
+"implemented and verified end-to-end on real dual-pol Sentinel-1 with a
+1.4-day pre-event baseline; not validated, because every available reference
+maps damage per-building at a granularity Sentinel-1 cannot resolve — a
+stated limit of the sensor, documented in the detector's own output."
+
+## EARTHQUAKE, THIRD ATTEMPT — Nepal 2015 Gorkha (EMSR125): also unusable
+
+Gorkha was the best remaining candidate on paper: M7.8, whole villages
+levelled (so damage might be mapped as CONTIGUOUS AREA rather than
+per-building), and the S1 timing is excellent —
+
+    Kathmandu      orbit 121 DESC  pre 2015-04-24 (-1.3 d) -> post 2015-05-06
+    Sindhupalchok  orbit 121 DESC  pre 2015-04-24 (-1.3 d) -> post 2015-05-06
+    Gorkha/Barpak  orbit  85 ASC   pre 2015-04-21 (-3.7 d) -> post 2015-05-03
+
+All three TIGHT. Timing is not the obstacle here.
+
+**But EMSR125 publishes NO graded damage POLYGONS.** Its damage grading is
+entirely POINT geometry:
+
+    Gorkha points_of_interest_grading   n=5054  Not Affected 4638,
+                                        Unknown 397, Possibly Affected 14,
+                                        Totally Affected 5
+    Kathmandu utilities_point_grading   n=28    Not Affected 25,
+                                        Negligible to slight 3
+
+The only polygon layers are the AOI outline, general-information and
+transportation footprints — and every one of those is graded "Not Affected".
+There are **5 "Totally Affected" features in the entire Gorkha product**, all
+zero-area points.
+
+**Verdict: not scoreable.** A 10 m SAR damage mask cannot be measured against
+5 zero-area points, and there is no areal damage layer to compare extents
+with.
+
+## Earthquake validation: THREE attempts, THREE independent obstacles
+
+| Attempt | Timing | Reference | Blocker |
+|---|---|---|---|
+| Palu (EMSR317) | 112-day lead | 9,457 graded points, 20.8 km2 | seasonal confound; no tight same-orbit pair exists at that AOI |
+| Amatrice (EMSR177) | **1.4 d — good** | 472 polygons, 0.10 km2 | PER-BUILDING granularity (median 143 m2 vs a 100 m2 pixel) |
+| Gorkha (EMSR125) | **1.3 d — good** | 5,054 points | NO areal damage layer at all; 5 "Totally Affected" points |
+
+The pattern across all three is consistent and now well-evidenced: **EMS
+grading products are produced from sub-metre VHR imagery for per-structure
+assessment.** That is the wrong granularity for a 10 m SAR detector by
+roughly two orders of magnitude in area, and it is not fixed by choosing a
+better-timed event — Amatrice and Gorkha both had excellent timing and
+failed on granularity instead.
+
+**This is now a well-supported negative finding rather than an untested
+assumption**, and it is the honest statement for the paper: earthquake damage
+detection is implemented and verified end-to-end on real dual-pol
+Sentinel-1, but no available public reference operates at a granularity
+Sentinel-1 can resolve, so no accuracy figure is claimed.
+
+**What would actually close it** (out of scope here): a reference mapping
+damage as contiguous district-scale extent at >= ~0.01 km2 per feature.
+Candidates are national-agency damage maps or research inventories derived
+FROM medium-resolution imagery, not EMS rapid-mapping grading products.
+
+---
+
+# CORRECTION — post-peak latency does NOT explain the flood scores
+
+An earlier passage in this log presented the three scored S1 flood events as
+a timing story ("precision climbs as acquisition moves closer to peak").
+**That claim was made before Tychero's acquisition date had been recovered,
+and it is WRONG.**
+
+Tychero's `scene_id` was resolved from the persisted DB row
+(`afcd8487-c5f9-48f3-88f4-1c59d1431339`) and looked up in the CDSE
+catalogue: **S1B_IW_GRDH_1SDV_20180402T160653**, acquired **2018-04-02**
+against a config event peak of **2018-03-24**.
+
+    POST-PEAK LATENCY = +9.67 days
+
+| Event | post-peak | flooded % | precision | F1 |
+|---|---|---|---|---|
+| **Tychero** | **+9.7 d** | 32% | **0.8784** | **0.6340** |
+| Keramidi | +4 d | 22% | 0.5858 | 0.2882 |
+| Kanalia | +8 d | 14% | 0.0567 | 0.0165 |
+
+**Tychero is the LATEST acquisition and the BEST result** — 15x Kanalia's
+precision despite being imaged ~1.7 days later. Latency and score are not
+monotonically related, so the timing narrative does not survive contact with
+this number.
+
+**What DOES track precision monotonically is FLOODED FRACTION** (14% -> 22%
+-> 32% against 0.06 -> 0.59 -> 0.88). That ordering holds across all three.
+
+**The likely mechanism, stated as a hypothesis and not a finding:** scene age
+is only a PROXY for "has the water receded", and recession rate is a property
+of the basin, not the calendar. The Evros delta (Tychero) is a low-gradient
+river delta that holds water for weeks; the drained Lake Karla basin
+(Kanalia) sheds it in days. A 9.7-day-old scene over a persistent flood
+carries more signal than an 8-day-old scene over a fast-draining one.
+
+**Consequences for the paper — both restrictive:**
+
+1. Do NOT claim acquisition timing drives detection performance. The
+   evidence does not support it, and Tychero directly contradicts it.
+2. Do NOT claim flooded fraction drives it either, on n=3. Three points
+   ordering correctly is suggestive, not a demonstrated relationship, and
+   flooded fraction is itself confounded with basin type here.
+
+**What the evidence DOES support:** (a) the bidirectional fix is a real
+improvement, isolated by an A/B on identical scenes (F1 x45); (b) precision
+0.8784 is achievable on a real event; (c) some scenes carry no recoverable
+signal at all, and the pipeline now detects that case rather than emitting a
+false negative (Kanalia measured at ROC AUC 0.4870; Zalgiriai caught live by
+the guard).
+
+**Harness gap this exposed:** `scene_age_days` and `scene_id` are computed by
+the pipeline but NOT persisted into the harness result JSON, so the
+acquisition date of a scored run is not recoverable from the results file
+alone — it required a DB lookup plus a CDSE catalogue query. Any future
+timing analysis needs those two fields stored per event.

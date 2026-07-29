@@ -624,7 +624,29 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         if not cities:
             return _error(event_id, f"No risk cities detected for {location!r}")
 
-        city_polys = get_risk_city_boundaries(location, cities)
+        # boundary._resolve_city_geometry builds its Nominatim query as
+        # f"{city}, {region_name}". When detect_risk_cities fell back to the
+        # HEADLINE token of `location` (the no-curated-map path — most real
+        # requests), passing the full `location` as region_name duplicated
+        # that token:
+        #   "Keramidi" + "Keramidi, Trikala, Greece"
+        #     -> "Keramidi, Keramidi, Trikala, Greece"        (Nominatim MISS)
+        # which fails the whole run with "Could not resolve any risk-city
+        # boundaries". Measured live 2026-07-29 on Keramidi; "Kanalia,
+        # Kanalia, Magnesia, Greece" only ever worked by luck.
+        #
+        # Strip the leading region token ONLY when it is exactly the city we
+        # are about to prepend, so curated multi-city AOIs (Mindanao ->
+        # Davao/Cotabato/Cagayan de Oro) keep the full region for
+        # disambiguation and are unaffected.
+        region_for_query = location
+        _head = location.split(",")[0].strip()
+        if len(cities) == 1 and cities[0].strip().casefold() == _head.casefold():
+            _rest = ", ".join(p.strip() for p in location.split(",")[1:]).strip()
+            if _rest:
+                region_for_query = _rest
+
+        city_polys = get_risk_city_boundaries(region_for_query, cities)
         if not city_polys:
             return _error(event_id, "Could not resolve any risk-city boundaries")
 
@@ -946,6 +968,32 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # from this sync pipeline via asyncio.run; failures are non-fatal.
         asyncio.run(cleanup_event_temp(event_id))
 
+        # Phase 3b (science/detection-pass) — name the permanent water bodies
+        # in the AOI, so downstream agents/prompts know the baseline water is
+        # (e.g.) the Ravi River rather than an anonymous water figure they
+        # read as flood. Best-effort by construction: any Overpass failure
+        # yields [] / None and the run continues unchanged.
+        permanent_water_features = []
+        permanent_water_context = None
+        try:
+            from named_water import (
+                describe_for_prompt,
+                fetch_named_water_features,
+            )
+
+            if result.get("permanent_water_area_km2"):
+                permanent_water_features = fetch_named_water_features(
+                    list(bbox) if bbox else [],
+                    result.get("permanent_water_area_km2"),
+                )
+            permanent_water_context = describe_for_prompt(
+                permanent_water_features,
+                result.get("permanent_water_area_km2"),
+                result.get("flood_area_km2"),
+            )
+        except Exception as exc:  # noqa: BLE001 — naming is context, not a gate
+            logger.warning("Permanent-water naming unavailable (%s)", exc)
+
         # CROSS-VALIDATION — check the satellite result against every reachable
         # external source (GDACS / USGS / cloud / index physics / coverage /
         # Featherless expert), feeding evidence + concerns into the confidence
@@ -1094,6 +1142,33 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "permanent_water_percent": result.get("permanent_water_percent"),
             "permanent_water_occurrence_threshold": result.get("permanent_water_occurrence_threshold"),
             "permanent_water_source": result.get("permanent_water_source"),
+            # Phase 3a — the three areas, separated. `affected_area_km2`
+            # below keeps its name and its (hazard-only) meaning; these make
+            # the flood-vs-river split explicit for every downstream reader.
+            "flood_area_km2": result.get("flood_area_km2"),
+            "permanent_water_area_km2": result.get("permanent_water_area_km2"),
+            "total_water_area_km2": result.get("total_water_area_km2"),
+            # Phase 3b — what the permanent water actually IS, plus the
+            # ready-made prompt sentence the hazard flood analysis uses.
+            "permanent_water_features": permanent_water_features,
+            "permanent_water_context": permanent_water_context,
+            # Signal detectability (2026-07-29). False = the S1 change image
+            # carried no flood signal, so the extent is INDETERMINATE, not a
+            # low flood reading. Persisted so a stored result can never be
+            # re-read as "S1 found little flooding" when the truth is "this
+            # scene could not answer the question".
+            "signal_detectable": result.get("signal_detectable"),
+            "deep_tail_fraction": result.get("deep_tail_fraction"),
+            # Phase 4 — built-up exposure. `flood_over_built_up_*` is the
+            # figure that distinguishes flooded streets from flooded farmland,
+            # which the pipeline previously could not express at all.
+            "built_up_available": result.get("built_up_available"),
+            "built_up_percent": result.get("built_up_percent"),
+            "built_up_area_km2": result.get("built_up_area_km2"),
+            "built_up_threshold": result.get("built_up_threshold"),
+            "built_up_formula": result.get("built_up_formula"),
+            "flood_over_built_up_km2": result.get("flood_over_built_up_km2"),
+            "flood_over_built_up_percent": result.get("flood_over_built_up_percent"),
             # Phase 2 — adaptive-threshold audit trail (KI cut / method /
             # diagnostics; any run's classification is re-derivable).
             "threshold_method": result.get("threshold_method"),

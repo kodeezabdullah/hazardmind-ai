@@ -1,0 +1,50 @@
+{
+  "commit": "49cf867",
+  "commit_full": "49cf867e4ea856346335aa6b05a6055cc4622473",
+  "run_timestamp_utc": "2026-07-29T17:43:30.402023+00:00",
+  "events": [
+    {
+      "event_id": "aeb381ca-9673-4261-83a1-5665fb294a50",
+      "location": "\u017dalgiriai, Klaip\u0117da County, Lithuania",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "no_s2_candidates",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": {
+        "iou": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "predicted_area_km2": 0.682,
+        "reference_area_km2": 11.977,
+        "intersection_area_km2": 0.0,
+        "union_area_km2": 12.658
+      },
+      "metrics_excluding_permanent_water": {
+        "iou": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "predicted_area_km2": 0.072,
+        "reference_area_km2": 11.977,
+        "intersection_area_km2": 0.0,
+        "union_area_km2": 12.049
+      },
+      "permanent_water_note": "excluding_permanent_water subtracts the supplied permanent-water polygon (JRC_GSW_occurrence_v1_4_2021 (occurrence >= 75%)) from both predicted and reference geometries before scoring.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 at 10 m \u2014 VERIFIED by reading the product's own source.dbf, not inferred from the activation page.",
+        "Reference clipped to the AOI is 11.977 km2 = 21.61% of 55.43 km2 \u2014 comfortably above the ~5% Paiporta floor where a perfect detector still scores near zero.",
+        "Layer of record is `observed_event_a` \u2014 the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumWaterExtentA`, which Kanalia/Insh use). A prediction from a different date will disagree partly for TIMING reasons, not only accuracy. State this whenever these numbers are compared against Kanalia's.",
+        "Nemunas delta polder landscape. Note the layer is DEL (first delineation), not a MONIT vintage \u2014 a single snapshot.",
+        "RURAL/open-terrain event. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section).",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 3303.0779999999977,
+      "bytes_downloaded": 2509433400
+    }
+  ]
+}

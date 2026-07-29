@@ -278,7 +278,13 @@ def memory_report() -> dict:
 # TOA and L2A surface reflectance, so the 0.3/0.5 NDWI and 0.2 NDVI thresholds
 # were observed against L1C and REQUIRE REVALIDATION against L2A.
 _S2_BANDS = {
-    "flood": ["B03", "B08", "B11", "TCI", "SCL"],
+    # B04 (red) added 2026-07-29 for Phase 4's IBI built-up layer: SAVI needs
+    # red, and IBI needs SAVI to avoid NDBI's bare-soil-as-built-up error —
+    # the error class that matters most in semi-arid Pakistan. B04 is a native
+    # 10 m band (~130 MB), so this is one extra band on the flood path, not a
+    # new download strategy. Without it `compute_ibi` returns None rather than
+    # substituting NDBI (see built_up.py's module docstring).
+    "flood": ["B03", "B04", "B08", "B11", "TCI", "SCL"],
     "earthquake": ["B02", "B04", "B08", "TCI", "SCL"],
     "landslide": ["B03", "B04", "B08", "TCI", "SCL"],
 }
@@ -303,7 +309,24 @@ _SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
 # per-band Nodes path (once wired below) fetches one ~100-300 MB GeoTIFF
 # per scene instead of two, and the whole-archive fallback path extracts
 # only the VV member instead of both.
+# Sentinel-1 polarisations, PER DISASTER. Flood change detection reads VV
+# only, so fetching VH there is pure waste (~40% of S1 bandwidth — the
+# measured saving that made VV-only the default). Earthquake DAMAGE detection
+# needs BOTH: the collapse signature is the shift from double-bounce
+# (VV-dominant, standing walls) toward volume scattering (VH rises, rubble),
+# which is only visible in the VH/VV ratio. Without VH the damage detector
+# still runs but loses its most specific evidence and says so
+# (`polarimetric_evidence_available: False`).
 _S1_POLARIZATIONS = ["VV"]
+_S1_POLARIZATIONS_BY_DISASTER = {
+    "earthquake": ["VV", "VH"],
+}
+
+
+def _s1_polarizations_for(disaster_type: Optional[str]) -> list:
+    return _S1_POLARIZATIONS_BY_DISASTER.get(
+        (disaster_type or "").strip().lower(), _S1_POLARIZATIONS
+    )
 
 # CDSE serves the product bytes from a different host
 # (download.dataspace.copernicus.eu) than the catalogue, via a 301 redirect.
@@ -358,6 +381,15 @@ MIN_ZONE_AREA_KM2 = 0.5
 #   1.. = increasing hazard severity-> drawn, deeper colour = worse
 #   255 = nodata / outside the polygon
 NODATA_CLASS = 255
+
+# Phase 3a (science/detection-pass): permanent water is a CLASS, not a
+# subtraction. Phase 1c reclassified normally-wet pixels to 0 ("safe land"),
+# which is honest about the flood claim but wrong on the map: a responder
+# looking at the Ravi or Lake Karla saw a blank where the river belongs.
+# Class 10 sits deliberately OUTSIDE the 1..3 severity range so no existing
+# consumer (vectorizer, PNG renderer, hazard agent) can mistake it for a
+# risk level — it is rendered and reported, and never counted as flood.
+PERMANENT_WATER_CLASS = 10
 
 # Per-index class definitions, ordered low->high severity. Each entry is
 # (class_value, label, RGB colour, alpha). Pixels not matching any band stay 0.
@@ -1279,7 +1311,9 @@ def download_imagery(
     disaster = (disaster_type or "").strip().lower()
 
     if satellite_type == "sentinel-1":
-        band_tokens = _S1_POLARIZATIONS
+        # Earthquake damage needs VH as well as VV (the depolarisation
+        # signature); flood needs VV only. See _s1_polarizations_for.
+        band_tokens = _s1_polarizations_for(disaster)
     else:
         band_tokens = _S2_BANDS.get(disaster, _S2_DEFAULT_BANDS)
 
@@ -1647,6 +1681,16 @@ def clip_to_polygon(
         stacked = dict(stacked)
         h, w = stacked["shape"]
         stacked["mask"] = np.ones((h, w), dtype=bool)
+        # The flood path's contract is a FLAT LIST OF VV ARRAYS and must not
+        # change (sar_change_detection iterates it directly). The pre-event VH
+        # stack rides as an attribute on that list instead, so the earthquake
+        # path can reach it without any flood-path reader noticing.
+        if vh_stack:
+            try:
+                stack = _PreEventStack(stack)
+                stack.vh = vh_stack
+            except Exception:  # noqa: BLE001
+                pass
         return stacked
 
     crs = stacked["crs"]
@@ -1776,6 +1820,20 @@ def clip_to_polygon(
 # --------------------------------------------------------------------------- #
 # Step 7E: spectral / backscatter indices + classification
 # --------------------------------------------------------------------------- #
+def _pixel_area_km2(clipped: dict) -> float:
+    """Ground area of one pixel, in km2, from the clip's own transform.
+
+    Derived rather than assumed: the clip is in a projected (UTM) CRS whose
+    units are metres, so |a*e| is the pixel area — but the resolution differs
+    between S1 (10 m) and a resampled S2 stack, and hardcoding 10 m would
+    silently mis-scale every derived area on any other grid.
+    """
+    t = clipped.get("transform")
+    if t is None:
+        return 0.0001  # 10 m x 10 m fallback, in km2
+    return abs(t.a * t.e) / 1e6
+
+
 def _safe_ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     """Element-wise num/den, with 0 where the denominator is ~0."""
     out = np.full_like(num, np.nan, dtype="float32")
@@ -1807,6 +1865,7 @@ def calculate_indices(
     satellite_type: str,
     disaster_type: str,
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
     orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
@@ -1850,6 +1909,116 @@ def calculate_indices(
         # SAR_WATER_THRESHOLD_DB is -15 dB in calibrated-sigma0 space, so it
         # can never fire) — see sar_change_detection.py for the verified
         # calibration-cancellation argument.
+        # EARTHQUAKE: building-damage detection from SAR. Distinct from the
+        # flood path below — it looks for a change in SCATTERING MECHANISM
+        # (double-bounce -> volume scattering as walls become rubble), not
+        # for water. Requires a built-up exposure mask; without one it
+        # refuses rather than scoring farmland, where intensity change means
+        # irrigation, not damage. See earthquake_damage.py.
+        if disaster == "earthquake" and pre_event_vv:
+            try:
+                from earthquake_damage import detect_earthquake_damage
+
+                built = None
+                try:
+                    from built_up import compute_ibi
+                    ibi = compute_ibi(bands, mask)
+                    built = ibi["built_up_mask"] if ibi else None
+                except Exception:  # noqa: BLE001
+                    built = None
+
+                # Pre-event VH rides on the stack as an attribute (see
+                # _PreEventStack) so the flood path's flat-list contract is
+                # untouched. Absent -> the detector runs without the
+                # depolarisation term and SAYS so in its result.
+                _pre_vh_stack = getattr(pre_event_vv, "vh", None) or []
+                eqd = detect_earthquake_damage(
+                    vv, pre_event_vv[0],
+                    post_vh=bands.get("VH"),
+                    pre_vh=_pre_vh_stack[0] if _pre_vh_stack else None,
+                    built_up_mask=built,
+                    valid_mask=mask,
+                    pixel_size_m=float(
+                        abs(clipped.get("transform").a)
+                        if clipped.get("transform") is not None else 10.0
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Earthquake damage detection failed (%s)", exc)
+                eqd = None
+            if eqd and eqd.get("status") == "complete":
+                dmg = eqd["damage_mask"]
+                classification = np.full(vv.shape, NODATA_CLASS, dtype="uint8")
+                valid_eq = np.isfinite(vv)
+                if mask is not None:
+                    valid_eq = valid_eq & mask
+                classification[valid_eq] = 0
+                classification[dmg] = 3  # "damage" — highest severity band
+                n_valid = int(valid_eq.sum())
+                n_dmg = int(dmg.sum())
+                logger.info(
+                    "Earthquake damage: %.4f km2 (%.2f%% of built-up), "
+                    "evidence=%s",
+                    eqd["damaged_area_km2"],
+                    eqd["damaged_percent_of_built_up"],
+                    eqd["evidence_used"],
+                )
+                return {
+                    "index_type": "SAR_DAMAGE",
+                    "scheme_key": "NDVI_QUAKE",  # reuse the red severity ramp
+                    "array": eqd["intensity_change_db"],
+                    "classification_array": classification,
+                    "water_percent": (
+                        round(100.0 * n_dmg / n_valid, 2) if n_valid else 0.0
+                    ),
+                    "mean_value": eqd.get("mean_intensity_change_db") or 0.0,
+                    "affected_mean_index": eqd.get("mean_intensity_change_db"),
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": eqd["method"],
+                    "derived_threshold": None,
+                    "affected_cut": None,
+                    "ki_diagnostics": None,
+                    "ki_fallback_reason": None,
+                    "threshold_used": None,
+                    "class_counts": (
+                        {"damage": round(100.0 * n_dmg / n_valid, 2)}
+                        if n_valid else {}
+                    ),
+                    "index_calibrated": True,
+                    "index_units": "dB_change_ratio",
+                    "earthquake_damage": {
+                        k: eqd.get(k) for k in (
+                            "method", "evidence_used",
+                            "polarimetric_evidence_available",
+                            "combination_rule", "damaged_area_km2",
+                            "damaged_percent_of_built_up",
+                            "built_up_pixels_assessed",
+                            "mean_vh_vv_change_db",
+                            "mean_correlation_in_damage",
+                            "thresholds", "thresholds_basis",
+                            "resolution_limit", "upgrade_path",
+                        )
+                    },
+                    "built_up_available": built is not None,
+                    "built_up_percent": None,
+                    "built_up_area_km2": None,
+                    "built_up_threshold": None,
+                    "built_up_formula": None,
+                    "flood_over_built_up_km2": None,
+                    "flood_over_built_up_percent": None,
+                    "signal_detectable": None,
+                    "deep_tail_fraction": None,
+                }
+            if eqd and eqd.get("status") in ("no_exposure_mask", "no_built_up_in_aoi"):
+                logger.warning(
+                    "Earthquake damage detection unavailable: %s",
+                    eqd.get("reason"),
+                )
+
         if pre_event_vv:
             try:
                 from sar_change_detection import detect_flood_change
@@ -1908,12 +2077,35 @@ def calculate_indices(
                     # defensible measurement.
                     "index_calibrated": True,
                     "index_units": "dB_change_ratio",
+                    # Signal-detectability verdict (2026-07-29). False means:
+                    # a mask exists, but the change image is a single narrow
+                    # mode, so the threshold cut noise rather than water and
+                    # the extent is INDETERMINATE — NOT evidence of low
+                    # flood. Surfaced at this level (not just inside
+                    # sar_change_detection) so `_finish_success` and the
+                    # confidence tracker can act on it without reaching into
+                    # the nested audit blob.
+                    "signal_detectable": cd.get("signal_detectable"),
+                    "deep_tail_fraction": cd.get("deep_tail_fraction"),
                     "sar_change_detection": {
                         k: cd[k] for k in (
                             "method", "speckle_filter", "speckle_window", "enl",
                             "baseline_scene_count", "baseline_confidence_penalty",
                             "threshold_db", "threshold_method", "hand_max_m",
                             "masks_applied", "min_flood_patch_px",
+                            # Bidirectional detection (2026-07-29): which
+                            # signature — open-water drop vs flooded-vegetation
+                            # double-bounce rise — actually produced the
+                            # detections. Carried so a stored result can be
+                            # attributed to a mechanism after the fact.
+                            "detection_direction", "rise_threshold_db",
+                            "rise_threshold_method", "rise_bimodal_tiles",
+                            "open_water_drop_pixels",
+                            "flooded_vegetation_rise_pixels",
+                            "open_water_drop_percent",
+                            "flooded_vegetation_rise_percent",
+                            "signal_detectable", "deep_tail_fraction",
+                            "signal_criteria",
                         )
                     },
                 }
@@ -1987,6 +2179,108 @@ def calculate_indices(
         threshold = NDVI_DAMAGE_THRESHOLD
         index_calibrated = True
         index_units = "NDVI_ratio"
+
+        # LANDSLIDE: bi-temporal, shape-filtered scar detection.
+        #
+        # This wiring is the whole point. `landslide_detection.py` existed and
+        # passed 8/8 offline tests but had ZERO callers — dead code, because
+        # no pre-event optical scene was ever fetched. The landslide path
+        # therefore ran the ABSOLUTE NDVI threshold below, which cannot tell a
+        # fresh scar from terrain that was always bare (desert, rock, quarry,
+        # harvested field). Bi-temporal difference plus scar GEOMETRY
+        # (elongation, downslope alignment, minimum slope, tapering) is what
+        # separates them — a circular NDVI drop on flat ground is not a
+        # landslide however deep the drop.
+        if disaster == "landslide" and pre_event_ndvi is not None:
+            try:
+                from landslide_detection import detect_landslide_scars
+
+                ls = detect_landslide_scars(
+                    index, pre_event_ndvi, dem=dem,
+                    pixel_size_m=float(
+                        abs(clipped.get("transform").a)
+                        if clipped.get("transform") is not None else 10.0
+                    ),
+                    valid_mask=mask,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Landslide scar detection failed (%s)", exc)
+                ls = None
+            if ls and ls.get("status") == "complete" and ls.get("scar_mask") is not None:
+                scar = ls["scar_mask"]
+                classification = np.full(index.shape, NODATA_CLASS, dtype="uint8")
+                valid_ls = np.isfinite(index)
+                if mask is not None:
+                    valid_ls = valid_ls & mask
+                classification[valid_ls] = 0
+                classification[scar] = 3  # "scar" — the highest severity band
+                n_valid = int(valid_ls.sum())
+                n_scar = int(scar.sum())
+                logger.info(
+                    "Landslide scars: %d object(s) survived shape filtering, "
+                    "%.2f%% of valid pixels",
+                    len(ls.get("scars") or []),
+                    100.0 * n_scar / n_valid if n_valid else 0.0,
+                )
+                return {
+                    "index_type": "NDVI_CHANGE",
+                    "scheme_key": "NDVI_LANDSLIDE",
+                    "array": ls.get("ndvi_difference", index),
+                    "classification_array": classification,
+                    "water_percent": (
+                        round(100.0 * n_scar / n_valid, 2) if n_valid else 0.0
+                    ),
+                    "mean_value": (
+                        round(float(np.nanmean(index[valid_ls])), 4) if n_valid else 0.0
+                    ),
+                    "affected_mean_index": (
+                        round(float(np.nanmean(ls["ndvi_difference"][scar])), 4)
+                        if n_scar else None
+                    ),
+                    "scl_masked_percent": None,
+                    "permanent_water_mask_applied": False,
+                    "permanent_water_percent": None,
+                    "permanent_water_occurrence_threshold": None,
+                    "permanent_water_source": None,
+                    "threshold_method": "bitemporal_ndvi_shape_filtered",
+                    "derived_threshold": ls.get("ndvi_drop_threshold"),
+                    "affected_cut": ls.get("ndvi_drop_threshold"),
+                    "ki_diagnostics": None,
+                    "ki_fallback_reason": None,
+                    "threshold_used": ls.get("ndvi_drop_threshold"),
+                    "class_counts": (
+                        {"scar": round(100.0 * n_scar / n_valid, 2)}
+                        if n_valid else {}
+                    ),
+                    # A DIFFERENCE is self-referenced, so — like the SAR
+                    # log-ratio — it is defensible without absolute calibration.
+                    "index_calibrated": True,
+                    "index_units": "NDVI_difference",
+                    "landslide_detection": {
+                        k: ls.get(k) for k in (
+                            "method", "scar_count", "affected_percent",
+                            "candidates_before_shape_filter", "rejected_by",
+                            "ndvi_drop_threshold", "min_elongation",
+                            "orientation_tolerance_deg", "min_slope_deg",
+                            "min_scar_area_px", "min_taper_ratio",
+                            "thresholds_basis",
+                        )
+                    },
+                    "scars": ls.get("scars"),
+                    "built_up_available": False,
+                    "built_up_percent": None,
+                    "built_up_area_km2": None,
+                    "built_up_threshold": None,
+                    "built_up_formula": None,
+                    "flood_over_built_up_km2": None,
+                    "flood_over_built_up_percent": None,
+                    "signal_detectable": None,
+                    "deep_tail_fraction": None,
+                }
+            if ls and ls.get("status") == "insufficient_reference":
+                logger.warning(
+                    "Landslide scar detection unavailable: %s", ls.get("reason")
+                )
 
     # Graded classification: 0 safe, 1..N severity, 255 nodata/outside polygon.
     valid = np.isfinite(index)
@@ -2108,7 +2402,13 @@ def calculate_indices(
         if pw_mask is not None:
             affected_now = (classification >= 1) & (classification != NODATA_CLASS)
             reclassified = affected_now & pw_mask
-            classification[reclassified] = 0
+            # Phase 3a: assign the dedicated permanent-water class rather
+            # than 0. Functionally identical for the flood claim (class 10
+            # is outside the 1..3 severity range, so every affected-mask
+            # test below still excludes it), but the pixels remain
+            # DISTINGUISHABLE from dry land for rendering and reporting —
+            # the classification distinguishes, it does not delete.
+            classification[reclassified] = PERMANENT_WATER_CLASS
             valid_now = int(valid.sum())
             permanent_water_percent = (
                 round(100.0 * int(reclassified.sum()) / valid_now, 2)
@@ -2164,11 +2464,50 @@ def calculate_indices(
         mean_value,
         class_counts,
     )
+
+    # Phase 4 (science/detection-pass): built-up layer via IBI (Xu 2008).
+    # Two purposes the pipeline previously served for neither: it marks where
+    # the water index deserves LESS confidence (built-up is the classic
+    # water-index false positive), and it is the exposure base that
+    # distinguishes flooded streets from flooded farmland. Best-effort — a
+    # missing band returns None with a named reason, never a substituted index
+    # under the IBI name (see built_up.py).
+    built_up = None
+    flood_builtup = None
+    try:
+        from built_up import compute_ibi, flood_builtup_overlap
+
+        built_up = compute_ibi(bands, valid)
+        if built_up is not None:
+            affected_now = (classification >= 1) & (classification != NODATA_CLASS)
+            px_km2 = _pixel_area_km2(clipped)
+            flood_builtup = flood_builtup_overlap(
+                affected_now, built_up["built_up_mask"], px_km2
+            )
+            logger.info(
+                "IBI built-up: %.2f%% of valid pixels; flood over built-up "
+                "%.4f km2 (%.2f%% of detected flood)",
+                built_up["built_up_percent"],
+                flood_builtup.get("flood_over_built_up_km2") or 0.0,
+                flood_builtup.get("flood_over_built_up_percent") or 0.0,
+            )
+    except Exception as exc:  # noqa: BLE001 — exposure layer is optional
+        logger.warning("Built-up (IBI) layer unavailable (%s)", exc)
+
     return {
         "index_type": index_type,
         "scheme_key": scheme_key,
         "array": index,
         "classification_array": classification,
+        # Phase 4 — built-up/exposure. `built_up_available` is explicit so a
+        # consumer can tell "no built-up here" from "could not be computed".
+        "built_up_available": built_up is not None,
+        "built_up_percent": (built_up or {}).get("built_up_percent"),
+        "built_up_area_km2": (flood_builtup or {}).get("built_up_area_km2"),
+        "built_up_threshold": (built_up or {}).get("threshold"),
+        "built_up_formula": (built_up or {}).get("formula"),
+        "flood_over_built_up_km2": (flood_builtup or {}).get("flood_over_built_up_km2"),
+        "flood_over_built_up_percent": (flood_builtup or {}).get("flood_over_built_up_percent"),
         "water_percent": water_percent,
         "mean_value": mean_value,
         "affected_mean_index": affected_mean_index,
@@ -2334,6 +2673,14 @@ def export_png(
         for _bound, value, _label, rgb, alpha in scheme["bands"]:
             sel = cls == value
             rgba[sel] = (*rgb, alpha)
+        # Phase 3a: permanent water rendered as its own layer — a desaturated
+        # slate grey-blue, deliberately OUTSIDE the hazard palette's blue ramp
+        # so a reader can tell "the river that is always here" from "flood"
+        # at a glance instead of the river being a hole in the map. Painted
+        # after the hazard bands, but the two sets are disjoint by
+        # construction (class 10 is not a hazard class), so ordering is not
+        # load-bearing.
+        rgba[cls == PERMANENT_WATER_CLASS] = (100, 116, 139, 160)
         # class 0 (safe) and 255 (nodata) remain (0,0,0,0) -> transparent.
         cls_path = os.path.join(out_dir, "classification.png")
         Image.fromarray(rgba, mode="RGBA").save(
@@ -2401,32 +2748,40 @@ def vectorize_classification(
     arr = classification_array
 
     features = []
+    permanent_water_features = []
     total_area = 0.0
+    permanent_water_area = 0.0
+
+    def _polys_for(value):
+        """Yield (polygon, area_km2) for every zone of one class value."""
+        sel = (arr == value).astype("uint8")
+        for geom, gval in shapes(sel, mask=sel.astype(bool), transform=transform):
+            if gval != 1:
+                continue
+            poly = shape(geom)
+            if crs is not None and crs.to_epsg() != 4326:
+                poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
+            poly = poly.simplify(0.001, preserve_topology=True)
+            if poly.is_empty:
+                continue
+            area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
+            if area_km2 < MIN_ZONE_AREA_KM2:
+                continue
+            yield poly, area_km2
+
     try:
-        # Vectorize each hazard class (skip 0 safe and 255 nodata).
+        # Vectorize each HAZARD class (skip 0 safe, 255 nodata, and the
+        # permanent-water class — the latter is emitted as its own separate
+        # collection below and must never contribute to `total_area`, which
+        # becomes `affected_area_km2`, i.e. the flood claim.
         hazard_values = sorted(
             v for v in np.unique(arr)
-            if v != 0 and v != NODATA_CLASS
+            if v != 0 and v != NODATA_CLASS and v != PERMANENT_WATER_CLASS
         )
         for value in hazard_values:
-            sel = (arr == value).astype("uint8")
             label = labels.get(int(value), f"class_{int(value)}")
             severity = _SEVERITY_BY_CLASS.get(int(value), "low")
-            for geom, gval in shapes(sel, mask=sel.astype(bool),
-                                     transform=transform):
-                if gval != 1:
-                    continue
-                poly = shape(geom)
-                if crs is not None and crs.to_epsg() != 4326:
-                    poly = shape(transform_geom(crs, "EPSG:4326", mapping(poly)))
-                poly = poly.simplify(0.001, preserve_topology=True)
-                if poly.is_empty:
-                    continue
-
-                area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
-                if area_km2 < MIN_ZONE_AREA_KM2:
-                    continue
-
+            for poly, area_km2 in _polys_for(value):
                 total_area += area_km2
                 features.append(
                     {
@@ -2441,16 +2796,51 @@ def vectorize_classification(
                         },
                     }
                 )
+
+        # Phase 3a: permanent water as its own feature collection, so the
+        # frontend can style the river/lake as context and a reader sees the
+        # flood AND the baseline water body at once. `severity: null` and
+        # `is_risk_zone: false` state explicitly that this is never a risk
+        # zone, rather than leaving a consumer to infer it from the label.
+        for poly, area_km2 in _polys_for(PERMANENT_WATER_CLASS):
+            permanent_water_area += area_km2
+            permanent_water_features.append(
+                {
+                    "type": "Feature",
+                    "geometry": mapping(poly),
+                    "properties": {
+                        "risk_type": "permanent_water",
+                        "hazard_class": "permanent_water",
+                        "class_level": PERMANENT_WATER_CLASS,
+                        "area_km2": area_km2,
+                        "severity": None,
+                        "is_risk_zone": False,
+                    },
+                }
+            )
     except (ValueError, rasterio.errors.RasterioError) as exc:
         logger.error("Vectorization failed: %s", exc)
 
     logger.info(
-        "Vectorized %d zone(s), total %.2f km^2", len(features), total_area
+        "Vectorized %d hazard zone(s), total %.2f km^2; %d permanent-water "
+        "feature(s), %.2f km^2 (reported separately, never counted as flood)",
+        len(features), total_area, len(permanent_water_features),
+        permanent_water_area,
     )
     return {
         "type": "FeatureCollection",
         "features": features,
+        # The flood claim. Unchanged meaning: hazard classes only.
         "total_area": round(total_area, 3),
+        # Phase 3a: the old `affected_area_km2` conflated these two. Reported
+        # separately so "how much flood" and "how much river" are never the
+        # same number again.
+        "permanent_water": {
+            "type": "FeatureCollection",
+            "features": permanent_water_features,
+        },
+        "permanent_water_area_km2": round(permanent_water_area, 3),
+        "total_water_area_km2": round(total_area + permanent_water_area, 3),
     }
 
 
@@ -2795,6 +3185,7 @@ def _render_clip(
     disaster_type: str,
     out_id: str,
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
     orbit_direction: Optional[str] = None,
 ) -> Optional[dict]:
@@ -2816,6 +3207,7 @@ def _render_clip(
         satellite_type,
         disaster_type,
         pre_event_vv=pre_event_vv,
+        pre_event_ndvi=pre_event_ndvi,
         dem=dem,
         orbit_direction=orbit_direction,
     )
@@ -2855,13 +3247,37 @@ def _render_clip(
         "permanent_water_occurrence_threshold": indices.get("permanent_water_occurrence_threshold"),
         "permanent_water_source": indices.get("permanent_water_source"),
         # Phase 2: adaptive-threshold audit trail.
+        # Signal-detectability verdict — MUST be carried here or the
+        # HIGH-severity concern in _finish_success can never fire (this
+        # renderer maps fields explicitly; anything unlisted is dropped).
+        "signal_detectable": indices.get("signal_detectable"),
+        "deep_tail_fraction": indices.get("deep_tail_fraction"),
+        # Phase 4 — built-up/exposure. Carried explicitly for the same reason
+        # signal_detectable is: this renderer maps fields by name, so anything
+        # unlisted is silently dropped before it can reach a consumer.
+        "built_up_available": indices.get("built_up_available"),
+        "built_up_percent": indices.get("built_up_percent"),
+        "built_up_area_km2": indices.get("built_up_area_km2"),
+        "built_up_threshold": indices.get("built_up_threshold"),
+        "built_up_formula": indices.get("built_up_formula"),
+        "flood_over_built_up_km2": indices.get("flood_over_built_up_km2"),
+        "flood_over_built_up_percent": indices.get("flood_over_built_up_percent"),
         "threshold_method": indices.get("threshold_method"),
         "derived_threshold": indices.get("derived_threshold"),
         "affected_cut": indices.get("affected_cut"),
         "ki_diagnostics": indices.get("ki_diagnostics"),
         "ki_fallback_reason": indices.get("ki_fallback_reason"),
         "class_counts": indices["class_counts"],
+        # THE flood number. Hazard classes only — permanent water is excluded
+        # by construction in vectorize_classification (Phase 3a).
         "affected_area_km2": geojson["total_area"],
+        # Phase 3a: the three areas reported separately, because the single
+        # old figure conflated "how much flood" with "how much river".
+        # flood_area_km2 is an explicit alias of affected_area_km2 so a
+        # consumer reading either name gets the same, correct flood claim.
+        "flood_area_km2": geojson["total_area"],
+        "permanent_water_area_km2": geojson.get("permanent_water_area_km2"),
+        "total_water_area_km2": geojson.get("total_water_area_km2"),
         # BUG 5 — calibration contract rides through to the result dict.
         "index_calibrated": indices.get("index_calibrated"),
         "index_units": indices.get("index_units"),
@@ -3258,12 +3674,24 @@ def process_satellite_imagery(
                 post_transform=clipped.get("transform"),
                 post_crs=clipped.get("crs"),
             )
+            # Bi-temporal OPTICAL reference (landslide / earthquake damage).
+            # Without this the scar detector is unreachable — see
+            # _fetch_pre_event_ndvi's docstring.
+            _post_b08 = (clipped.get("bands") or {}).get("B08")
+            pre_ndvi = _fetch_pre_event_ndvi(
+                bbox, merged_polygon, event_id, token, disaster_type,
+                as_of=max([d for d in (scene_acq_date(s) for s in accepted) if d],
+                          default=None),
+                post_shape=_post_b08.shape if _post_b08 is not None else None,
+                post_transform=clipped.get("transform"),
+                post_crs=clipped.get("crs"),
+            )
             return _finish_success(
                 clipped, cov, accepted, tier, orbit_dir, spread,
                 satellite_type, disaster_type, event_id, city_boundaries,
                 tracker, bytes_before, min_cov, budget_exhausted=None,
                 marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
-                pre_event_vv=pre_stack,
+                pre_event_vv=pre_stack, pre_event_ndvi=pre_ndvi,
             )
 
         if budget_exhausted or marginal_stop or gap_limited_by:
@@ -3299,12 +3727,21 @@ def process_satellite_imagery(
             post_transform=best_clipped.get("transform"),
             post_crs=best_clipped.get("crs"),
         )
+        _post_b08 = (best_clipped.get("bands") or {}).get("B08")
+        pre_ndvi = _fetch_pre_event_ndvi(
+            bbox, merged_polygon, event_id, token, disaster_type,
+            as_of=max([d for d in (scene_acq_date(s) for s in best_accepted) if d],
+                      default=None),
+            post_shape=_post_b08.shape if _post_b08 is not None else None,
+            post_transform=best_clipped.get("transform"),
+            post_crs=best_clipped.get("crs"),
+        )
         return _finish_success(
             best_clipped, best_cov, best_accepted, best_tier, best_orbit_dir,
             spread, satellite_type, disaster_type, event_id, city_boundaries,
             tracker, bytes_before, min_cov, budget_exhausted=budget_exhausted,
             marginal_stop=marginal_stop, gap_limited_by=gap_limited_by,
-            pre_event_vv=pre_stack,
+            pre_event_vv=pre_stack, pre_event_ndvi=pre_ndvi,
         )
 
     # Below COVERAGE_FLOOR — fail honestly with gap geometry. NEVER analyse a
@@ -3430,6 +3867,113 @@ def _scene_cloud_for_gap_check(scene: Optional[dict]) -> Optional[float]:
 
 
 
+def _fetch_pre_event_ndvi(
+    bbox,
+    merged_polygon: dict,
+    event_id: str,
+    token,
+    disaster_type: str,
+    as_of=None,
+    post_shape=None,
+    post_transform=None,
+    post_crs=None,
+) -> Optional[np.ndarray]:
+    """Pre-event NDVI for BI-TEMPORAL optical change (landslide / damage).
+
+    **Why this had to exist.** `landslide_detection.detect_landslide_scars`
+    was DEAD CODE — it passed 8/8 offline tests while being unreachable in
+    production, because the pipeline only ever fetched pre-event scenes for
+    Sentinel-1 (`_fetch_pre_event_stack`). With no pre-event NDVI the
+    landslide path fell back to a single-scene absolute threshold, which
+    cannot distinguish a fresh scar from terrain that was always bare
+    (desert, rock, quarry, harvested field) — i.e. it had no defensible
+    method at all.
+
+    Returns the pre-event NDVI resampled onto the POST-event grid, or None.
+    Best-effort: any failure returns None and the caller reports
+    `insufficient_reference` rather than silently substituting the absolute
+    threshold.
+    """
+    if (disaster_type or "").strip().lower() not in ("landslide", "earthquake"):
+        return None
+    try:
+        from sentinel import search_pre_event_optical
+    except ImportError:
+        return None
+    try:
+        pre_scenes = search_pre_event_optical(
+            bbox, as_of=as_of, merged_polygon=merged_polygon, max_scenes=1
+        )
+        if not pre_scenes:
+            logger.warning(
+                "No clear pre-event S2 scene found — bi-temporal optical "
+                "change unavailable; the absolute-threshold fallback is NOT "
+                "substituted (it cannot separate a scar from always-bare "
+                "terrain)."
+            )
+            return None
+        dl = download_imagery(
+            {"satellite_type": "sentinel-2"}, pre_scenes[0],
+            f"{event_id}/pre_optical", token, disaster_type,
+        )
+        if not dl or not dl.get("band_paths"):
+            return None
+        dst_crs = _dst_crs_from_polygon(merged_polygon)
+        stacked = stack_bands(dl["band_paths"], "sentinel-2", dst_crs)
+        if stacked is None:
+            return None
+        pre_clip = clip_to_polygon(stacked, merged_polygon)
+        if pre_clip is None:
+            return None
+        b = pre_clip.get("bands") or {}
+        b04, b08 = b.get("B04"), b.get("B08")
+        if b04 is None or b08 is None:
+            logger.warning(
+                "Pre-event scene lacks B04/B08 — cannot compute reference NDVI"
+            )
+            return None
+        ndvi = _safe_ratio(
+            b08.astype("float32") - b04.astype("float32"),
+            b08.astype("float32") + b04.astype("float32"),
+        )
+        # Same grid-alignment contract as the S1 baseline: each scene clips to
+        # its OWN footprint-derived grid, so the reference must be resampled
+        # onto the post-event grid. Reproject rather than crop/pad — the grids
+        # can differ in origin as well as size, and a naive slice would
+        # silently MIS-REGISTER the difference.
+        if post_shape is not None and ndvi.shape != post_shape:
+            from rasterio.warp import reproject
+
+            dest = np.full(post_shape, np.nan, dtype="float32")
+            reproject(
+                source=ndvi, destination=dest,
+                src_transform=pre_clip["transform"], src_crs=pre_clip["crs"],
+                dst_transform=post_transform, dst_crs=post_crs,
+                resampling=Resampling.bilinear,
+                src_nodata=np.nan, dst_nodata=np.nan,
+            )
+            logger.info(
+                "Pre-event NDVI resampled %s -> %s onto the post-event grid",
+                ndvi.shape, post_shape,
+            )
+            ndvi = dest
+        return ndvi
+    except Exception as exc:  # noqa: BLE001 — reference is optional, run is not
+        logger.warning("Pre-event NDVI unavailable (%s)", exc)
+        return None
+
+
+class _PreEventStack(list):
+    """A list of pre-event VV arrays that can also carry a parallel VH stack.
+
+    Subclassing `list` keeps the flood path byte-identical — it iterates the
+    VV arrays exactly as before and cannot observe the extra attribute —
+    while giving the earthquake path access to pre-event VH for the
+    depolarisation (VH/VV) evidence.
+    """
+    vh: list = []
+
+
 def _fetch_pre_event_stack(
     accepted: list,
     bbox,
@@ -3478,6 +4022,7 @@ def _fetch_pre_event_stack(
             )
             return []
         stack = []
+        vh_stack = []  # earthquake only; empty on the flood path
         dst_crs = _dst_crs_from_polygon(merged_polygon)
         for idx, scene in enumerate(pre_scenes):
             try:
@@ -3496,6 +4041,11 @@ def _fetch_pre_event_stack(
                 vv = (clipped_pre.get("bands") or {}).get("VV")
                 if vv is None:
                     continue
+                # Earthquake damage needs the pre-event VH as well, to form
+                # the VH/VV ratio on BOTH dates (the depolarisation
+                # signature). Collected in a parallel list so the flood
+                # path's contract — a flat list of VV arrays — is unchanged.
+                vh = (clipped_pre.get("bands") or {}).get("VH")
                 # GRID ALIGNMENT (found by the first live forced-S1 run,
                 # which failed with "all input arrays must have the same
                 # shape"): each scene clips to its OWN footprint-derived
@@ -3536,6 +4086,22 @@ def _fetch_pre_event_stack(
                         )
                         continue
                 stack.append(vv)
+                if vh is not None:
+                    if post_shape is not None and vh.shape != post_shape:
+                        try:
+                            from rasterio.warp import reproject as _rp
+                            _d = np.full(post_shape, np.nan, dtype="float32")
+                            _rp(source=vh.astype("float32"), destination=_d,
+                                src_transform=clipped_pre["transform"],
+                                src_crs=clipped_pre["crs"],
+                                dst_transform=post_transform, dst_crs=post_crs,
+                                resampling=Resampling.bilinear,
+                                src_nodata=np.nan, dst_nodata=np.nan)
+                            vh = _d
+                        except Exception:  # noqa: BLE001
+                            vh = None
+                    if vh is not None:
+                        vh_stack.append(vh)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Pre-event scene %d unusable: %s", idx, exc)
         logger.info(
@@ -3566,6 +4132,7 @@ def _finish_success(
     marginal_stop: bool,
     gap_limited_by: Optional[str],
     pre_event_vv: Optional[list] = None,
+    pre_event_ndvi=None,
     dem: Optional[np.ndarray] = None,
 ) -> Optional[dict]:
     """Render + finalize a successful (target-met or best-effort) coverage result.
@@ -3584,7 +4151,8 @@ def _finish_success(
 
     merged_result = _render_clip(
         clipped, satellite_type, disaster_type, event_id,
-        pre_event_vv=pre_event_vv, dem=dem, orbit_direction=orbit_dir,
+        pre_event_vv=pre_event_vv, pre_event_ndvi=pre_event_ndvi,
+        dem=dem, orbit_direction=orbit_dir,
     )
     if merged_result is None:
         logger.error("Aborting pipeline: merged render failed")
@@ -3763,6 +4331,26 @@ def _finish_success(
             "sigma0 dB — it must not be threshold-compared as an "
             "absolute water/flood cutoff.",
             "MEDIUM",
+        )
+
+    # Signal detectability (2026-07-29). Distinct from the calibration
+    # concern above: change detection CAN be calibrated and still be applied
+    # to a scene that contains no flood signal at all. Measured on the
+    # Kanalia 8-days-post-peak run, that produced a flood map whose precision
+    # LIFT was BELOW 1.0x — worse than labelling the whole AOI flooded — and
+    # the pipeline shipped it with nothing to indicate the problem. HIGH
+    # severity because the failure is silent and the output looks normal.
+    if merged_result.get("signal_detectable") is False and tracker is not None:
+        tail = merged_result.get("deep_tail_fraction")
+        tracker.add_concern(
+            "SAR change detection found NO flood signal in this scene: only "
+            f"{100.0 * (tail or 0.0):.2f}% of valid pixels show a change "
+            "beyond +-3 dB, so the change image is a single narrow mode and "
+            "any threshold cuts noise rather than water. The reported extent "
+            "is INDETERMINATE and must NOT be read as evidence of little or "
+            "no flooding. The most common cause is an acquisition that "
+            "post-dates the flood peak, with the water already receded.",
+            "HIGH",
         )
 
     if city_boundaries and len(city_boundaries) > 1:

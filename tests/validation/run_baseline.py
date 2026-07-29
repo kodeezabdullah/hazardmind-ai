@@ -146,11 +146,25 @@ def _run_one_path(
             from boundary import get_risk_city_boundaries  # local import, needs agents/satellite on sys.path
             from aoi_pin import pinned_aoi  # deterministic AOI replay (see aoi_pin.py)
 
-            headline_city = event_cfg["pipeline_location"].split(",")[0].strip()
+            # boundary._resolve_city_geometry builds its Nominatim query as
+            # f"{city}, {region_name}", so passing the FULL pipeline_location
+            # as region_name duplicates the city token:
+            #   "Keramidi" + "Keramidi, Trikala, Greece"
+            #     -> "Keramidi, Keramidi, Trikala, Greece"   (MISS)
+            # Kanalia only ever worked by luck — "Kanalia, Kanalia, Magnesia,
+            # Greece" happens to resolve anyway. Strip the headline city from
+            # the region so the query is the well-formed
+            #   "Keramidi, Trikala, Greece"                  (HIT)
+            # which is also exactly what the production pipeline builds, since
+            # detect_risk_cities yields the city and the location carries the
+            # region. Verified against live Nominatim 2026-07-29.
+            _parts = [p.strip() for p in event_cfg["pipeline_location"].split(",")]
+            headline_city = _parts[0]
+            region_for_query = ", ".join(_parts[1:]) or event_cfg["pipeline_location"]
             with pinned_aoi():
                 import boundary as _boundary_mod  # patched inside the context
                 city_boundaries = _boundary_mod.get_risk_city_boundaries(
-                    event_cfg["pipeline_location"], [headline_city]
+                    region_for_query, [headline_city]
                 )
             if not city_boundaries:
                 raise RuntimeError(

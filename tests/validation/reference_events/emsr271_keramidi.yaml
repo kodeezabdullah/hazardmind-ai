@@ -1,0 +1,76 @@
+event_key: emsr271_keramidi
+activation_code: EMSR271
+aoi_number: 5
+aoi_name: "Keramidi (Farkadona, Trikala) — Pinios tributary flooding, Thessaly, Feb 2018"
+country: Greece
+disaster_type: flood
+status: confirmed
+
+# ---------------------------------------------------------------------------
+# HOW THIS EVENT WAS FOUND — it corrects a prior session's conclusion.
+#
+# BASELINE_REPORT_2 §4 concluded that no further Sentinel-backed
+# maximum-extent products exist, after scanning EMSR500-850 and finding that
+# recent activations overwhelmingly use commercial VHR (Pleiades / ICEYE /
+# COSMO-SkyMed / PAZ). That scan searched FORWARD only.
+#
+# Searching BACKWARD found the opposite. The reason the earlier scan could
+# not see these: the `rapidmapping.emergency.copernicus.eu` dashboard-api
+# returns HTTP 403 "Authentication credentials were not provided" for older
+# activations — verified deterministic, not rate-limiting (EMSR692/698 return
+# 200 while EMSR373/450 return 403 repeatedly on the same session). The older
+# archive lives on the SEPARATE `mapping.emergency.copernicus.eu` portal with
+# open S3 vector-package links, which the API probe never reached.
+#
+# 124 flood activations below EMSR500 carry downloadable vector packages
+# (63 with MONIT products, 39 of those post-2018).
+#
+# SENSOR PROVENANCE — VERIFIED, NOT ASSUMED. Every candidate's own
+# `source.dbf` was read for the POST-EVENT sensor specifically. This matters:
+# EMSR342 Townsville looked like the ideal urban event (452 polygons,
+# 45.5 km2 inside a city of 180,000) until its source table showed the
+# post-event sources are COSMO-SkyMed (5 m) and RADARSAT-2 (6 m) — commercial
+# VHR SAR. Scoring a 10 m Sentinel prediction against a 5 m commercial-SAR
+# delineation would measure SENSOR DIFFERENCE as pipeline error, so it was
+# rejected rather than scored. (Its Sentinel-2 entry is the PRE-event source
+# — an easy and costly misreading.)
+#
+# EMSR271's post-event sources ARE Sentinel-1 at 10 m:
+#   Sentinel-1  2018-02-28 T04:39:00Z  10.0 m  (Post-event)
+#   Sentinel-1  2018-03-01 T04:30:11Z  10.0 m  (Post-event)
+#   Sentinel-2  2017-09-16             10.0 m  (Pre-event, reference only)
+#
+# AOI SELECTION (same grid-search method as Kanalia, measured 2026-07-29):
+# the densest 6 km disk over the 1,729-polygon reference sits at
+# (22.0990, 39.5365) with 15.888 km2 = 21.23% flooded. Of the settlements
+# near that cluster, KERAMIDI resolves closest to it while still being a real
+# named place: 15.069 km2 = 20.14% of its AOI. Measured alternatives:
+# Zarkos 14.12%, Vlochos 13.88%, Farkadona 12.01%, Palamas 7.77%.
+#
+# Flooded fraction 20.14% sits between Kanalia (~14%) and Insh (~76%),
+# widening the spread the event set covers.
+# ---------------------------------------------------------------------------
+pipeline_location: "Keramidi, Trikala, Greece"
+
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2018-02-24"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_MONIT02"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2018-03-01T04:30:11Z"
+    download_url: "https://cems-mapping-website.s3.eu-west-1.amazonaws.com/static/activations/EMSR271/EMSR271_05THESSALYOVERVIEW_01DELINEATION_MONIT02_v2_vector.zip"
+    vector_layer_of_record: "observed_event_a"
+    search_window_center_utc: "2018-03-01T04:30:11Z"
+    search_window_days: 5
+
+caveats:
+  - "Post-event sensor is Sentinel-1 at 10 m — VERIFIED by reading the product's own source.dbf, not inferred from the activation page (which does not state it)."
+  - "Layer of record is `observed_event_a`, NOT `maximumWaterExtentA` (this activation does not publish one). observed_event_a is the extent delineated at the acquisition instant rather than a cumulative maximum, so it is a SNAPSHOT: a prediction from imagery at a different date will disagree partly for TIMING reasons, not only accuracy reasons. This is a different reference semantics from Kanalia/Insh and must be stated whenever the numbers are compared."
+  - "Keramidi resolves as a zero-area OSM Point; boundary.py's _ensure_areal buffers it to a ~6 km disk — the SAME fallback the production pipeline already uses for point-only cities (Kanalia, Davao), not a harness-specific approximation."
+  - "Reference clipped to the buffered AOI is 15.069 km2 = 20.14% flooded fraction — a healthy partial-flood regime, not degenerate."
+  - "RURAL event (Pinios river tributaries, farmland). It does NOT close the urban-validation gap — see SCIENCE_LOG's 'Phase 7 — EMS reference ceiling'. The urban candidates found this session (Townsville, Verona, Sciacca) were all rejected: Townsville on sensor grounds (commercial VHR post-event), Verona and Sciacca on flooded fraction (2.66% and 0.62% of their densest AOI — Paiporta territory, where a perfect detector still scores near zero)."
+  - "2018-02/03 predates Sentinel-2 L2A global availability in places; this event is scored on the S1 path, so that does not apply here."
+  - "DISAMBIGUATION (same class of bug as Kanalia's, caught before it could score): bare 'Keramidi, Greece' resolves to a DIFFERENT village — in the Municipal Unit of KANALIA, Rigas Feraios — which clips the reference to exactly 0.000 km2 and would have reported a misleading IoU of 0.0 as if it were a detector failure. 'Keramidi, Trikala, Greece' disambiguates to the intended village (Farkadona Municipality, Trikala) with 15.069 km2 of reference inside the AOI. Verified by direct Nominatim query 2026-07-29."

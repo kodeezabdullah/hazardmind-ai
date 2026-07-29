@@ -102,6 +102,18 @@ def _normalise_satellite_payload(payload: dict, event_id: str) -> dict:
             "confidence_basis": p.get("confidence_basis"),
             "evidence_count": p.get("evidence_count"),
             "needs_verification": p.get("needs_verification"),
+            # Phase 3a/3b (science/detection-pass): the flood claim and the
+            # permanent-water baseline are now separate numbers, and the
+            # water bodies have names. Carried so `analyze_flood` can tell
+            # the LLM "the AOI contains the Ravi River, a permanent water
+            # body covering 12.4 km2; water beyond that baseline is 3.1 km2
+            # — assess flood risk on the latter" instead of handing it a
+            # single figure that conflates river with flood.
+            "flood_area_km2": p.get("flood_area_km2"),
+            "permanent_water_area_km2": p.get("permanent_water_area_km2"),
+            "total_water_area_km2": p.get("total_water_area_km2"),
+            "permanent_water_features": p.get("permanent_water_features"),
+            "permanent_water_context": p.get("permanent_water_context"),
         },
         "artifacts": {
             "true_color_url": p.get("true_color_url"),

@@ -69,5 +69,23 @@ def frozen_sentinel_clock(as_of: datetime):
 
     frozen_cls = type("_FrozenDateTime", (_FrozenDateTime,), {"_frozen_at": as_of})
 
-    with patch("sentinel.datetime", frozen_cls):
+    # processor.datetime MUST be frozen too, not just sentinel's.
+    #
+    # `processor._finish_success` computes
+    #     scene_age_days = datetime.now(timezone.utc) - newest_acquisition
+    # and raises a HIGH-severity staleness concern past
+    # SCENE_AGE_ANOMALY_DAYS. On a historical replay the imagery is
+    # deliberately old, so against the REAL present that difference is years:
+    # the Tychero run reported a 3,040-day-old scene and drove confidence to
+    # 0.0 on a result whose measured precision was 0.8784. The pipeline was
+    # penalising the harness for doing exactly what the harness is for.
+    #
+    # Freezing processor's clock as well makes scene age relative to the
+    # replayed instant, so the staleness check measures what it was written
+    # to measure — how stale the imagery was AT THE TIME OF THE EVENT — on
+    # historical and live runs alike. No production code changes: the
+    # staleness rule itself is correct and still fires for a genuinely stale
+    # scene within the replayed window.
+    with patch("sentinel.datetime", frozen_cls), \
+            patch("processor.datetime", frozen_cls):
         yield
