@@ -266,3 +266,34 @@ insurance-claim footprints, or crowdsourced/authority-verified inundation
 reports — or scoring urban events at a peri-urban AOI centred on the
 mapped corridor rather than the municipal polygon, with the reframing
 stated explicitly rather than silently changing what is measured.
+
+---
+
+## Phases 3-6 — changes whose value this event set cannot score
+
+The three baseline events are all Sentinel-2 floods. The changes below are
+real and offline-verified, but the harness has no reference that exercises
+them, so **none of them can claim a measured IoU/F1 delta** and none is
+recorded in the results table. Stating that plainly is the point: an
+unmeasured change kept on reasoning is a different claim from a measured
+one, and conflating the two is what the discipline exists to prevent.
+
+| Change | Verified how | What is NOT claimed |
+|---|---|---|
+| **3. S1 change detection** (log-ratio, Refined Lee 7x7, 3-scene same-orbit median baseline, HAND 15 m, layover/shadow, tiled KI, morphology) | 14/14 offline, incl. a **bit-identical flood mask under an arbitrary k=7.3 calibration factor** — the property the whole method rests on. Calibration cancellation independently **verified against live CDSE LUTs**: same-orbit sigmaNought agrees to ~0.003% (0.00024 dB vs a 3 dB criterion). | No scored S1 accuracy yet — the forced-S1 Kanalia run is still outstanding (first attempt died on `InternalServerError: Couldn't connect to compute node`, an infrastructure failure, not a code defect). |
+| **4a. Bi-temporal NDVI + shape filtering** | 8/8 offline. The discriminating case: an IDENTICAL NDVI drop is detected as a scar when elongated/downslope on 35 deg terrain and rejected as a harvested field when circular on flat ground. | No landslide reference event exists in this harness; shape thresholds are uncalibrated against any inventory (stated in the result's own `thresholds_basis`). |
+| **4b/5b/5c. p90 slope, distance decay, threshold grounding** | 20/20 offline. p90 vs mean on a synthetic district with one gorge: **27.50 vs 5.50 deg** (LOW->MEDIUM flip). Distance decay: M6.0 at 240 km -> **3.93 effective** (HIGH->LOW) while the same quake near stays HIGH. | No earthquake/landslide reference event; these are correctness fixes, not measured accuracy gains. |
+| **5a. ShakeMap MMI + PAGER** | 20/20 offline. A shallow M4.2 with real MMI 7.2 reads **HIGH** where the magnitude heuristic said MEDIUM. | Not exercised live. Note this is the ONLY hazard threshold set now grounded in a named published scale (Modified Mercalli's own damage bands) — the magnitude cut points remain engineering judgement and are labelled as such. |
+| **5d. hazard_zones.geometry writer** | 15/15 offline incl. an unreachable-source case returning NULL rather than a fabricated polygon. | Flood row only; earthquake/landslide rows keep geometry NULL because no per-hazard extent is computed for them anywhere. |
+| **6a/6b/6c. Impact science** | 19/19 offline, incl. **survival assertions through the real task entry points**: gridded 123,456 beats the LLM's 777,777 into `population_affected`; an LLM's 500 at-risk hospitals clamps to the real OSM 7. | WorldPop was not exercised against a live raster in this session; the exposure figure's real-world accuracy is untested. WorldPop is a MODELLED census redistribution, not a measurement. |
+
+**Why these were done at all, given they cannot be scored here:** each
+replaces a method the audits showed was not merely imprecise but
+*structurally incapable* of a correct answer — an absolute dB threshold that
+can never fire on uncalibrated data, a single-scene NDVI threshold that
+cannot distinguish damage from permanently bare rock, a district mean that
+averages away the one steep valley, a magnitude that ignores distance, an
+LLM asserting the population figure every response threshold depends on. A
+change from "cannot be right" to "defensible, with stated limits" is worth
+making even when the available references cannot measure it — provided, as
+here, the absence of measurement is stated rather than glossed.
