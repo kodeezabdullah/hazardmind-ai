@@ -357,6 +357,7 @@ async def analyze_flood(
     satellite_type="sentinel-2",
     index_calibrated=None,
     index_type=None,
+    permanent_water_context=None,
 ) -> dict:
     if satellite_type == "sentinel-1":
         index_label = "SAR backscatter ratio (VV-VH)"
@@ -370,8 +371,16 @@ async def analyze_flood(
         index_label = f"{label} flood index"
         index_context = "Values above 0.3 indicate flooding. Above 0.5 is severe."
 
+    # Phase 3b: state what the permanent water IS, and which number to
+    # assess on. Without this the LLM receives a water figure with no way to
+    # know part of it is a river that is always there. Omitted entirely when
+    # there is no context to give — an empty string here, rather than a
+    # "none found" sentence that would read as a finding.
+    pw_line = f"{permanent_water_context} " if permanent_water_context else ""
+
     prompt = (
         f"Flood risk analysis. Area: {affected_area_km2}km2. "
+        f"{pw_line}"
         f"{index_label}: {mean_value}. {index_context} "
         f"GDACS events: {gdacs_data.get('count', 0)}. "
         f"BBox: {bbox}. Return JSON only: risk, confidence, reasoning, affected_zones"
@@ -1057,7 +1066,14 @@ async def run_parallel_analysis(satellite_data: dict) -> dict:
     )
 
     analysis_results = await asyncio.gather(
-        analyze_flood(bbox, affected_area_km2, mean_value, gdacs_data, satellite_type, index_calibrated, analysis.get("index_type")),
+        analyze_flood(
+            bbox, affected_area_km2, mean_value, gdacs_data, satellite_type,
+            index_calibrated, analysis.get("index_type"),
+            # Phase 3b: names + the flood-vs-permanent split, so the prompt
+            # can direct assessment at the flood figure rather than a total
+            # that silently includes a permanent river.
+            analysis.get("permanent_water_context"),
+        ),
         analyze_earthquake(bbox, usgs_data),
         analyze_landslide(bbox, gdacs_data, slope_data),
         return_exceptions=True,

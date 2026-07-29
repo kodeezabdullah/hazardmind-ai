@@ -946,6 +946,32 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # from this sync pipeline via asyncio.run; failures are non-fatal.
         asyncio.run(cleanup_event_temp(event_id))
 
+        # Phase 3b (science/detection-pass) — name the permanent water bodies
+        # in the AOI, so downstream agents/prompts know the baseline water is
+        # (e.g.) the Ravi River rather than an anonymous water figure they
+        # read as flood. Best-effort by construction: any Overpass failure
+        # yields [] / None and the run continues unchanged.
+        permanent_water_features = []
+        permanent_water_context = None
+        try:
+            from named_water import (
+                describe_for_prompt,
+                fetch_named_water_features,
+            )
+
+            if result.get("permanent_water_area_km2"):
+                permanent_water_features = fetch_named_water_features(
+                    list(bbox) if bbox else [],
+                    result.get("permanent_water_area_km2"),
+                )
+            permanent_water_context = describe_for_prompt(
+                permanent_water_features,
+                result.get("permanent_water_area_km2"),
+                result.get("flood_area_km2"),
+            )
+        except Exception as exc:  # noqa: BLE001 — naming is context, not a gate
+            logger.warning("Permanent-water naming unavailable (%s)", exc)
+
         # CROSS-VALIDATION — check the satellite result against every reachable
         # external source (GDACS / USGS / cloud / index physics / coverage /
         # Featherless expert), feeding evidence + concerns into the confidence
@@ -1094,6 +1120,16 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "permanent_water_percent": result.get("permanent_water_percent"),
             "permanent_water_occurrence_threshold": result.get("permanent_water_occurrence_threshold"),
             "permanent_water_source": result.get("permanent_water_source"),
+            # Phase 3a — the three areas, separated. `affected_area_km2`
+            # below keeps its name and its (hazard-only) meaning; these make
+            # the flood-vs-river split explicit for every downstream reader.
+            "flood_area_km2": result.get("flood_area_km2"),
+            "permanent_water_area_km2": result.get("permanent_water_area_km2"),
+            "total_water_area_km2": result.get("total_water_area_km2"),
+            # Phase 3b — what the permanent water actually IS, plus the
+            # ready-made prompt sentence the hazard flood analysis uses.
+            "permanent_water_features": permanent_water_features,
+            "permanent_water_context": permanent_water_context,
             # Phase 2 — adaptive-threshold audit trail (KI cut / method /
             # diagnostics; any run's classification is re-derivable).
             "threshold_method": result.get("threshold_method"),
