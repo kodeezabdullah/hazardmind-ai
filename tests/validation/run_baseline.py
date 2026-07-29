@@ -26,7 +26,7 @@ import argparse
 import os
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yaml
@@ -246,6 +246,22 @@ def _run_one_path(
     as_of = datetime.fromisoformat(
         product_cfg["acquisition_datetime_utc"].replace("Z", "+00:00")
     )
+    # The event's flood peak, when the config records one. Two uses:
+    #   1. scenes before the peak are rejected (post_peak_scene_floor), so a
+    #      backward-looking window cannot select pre-flood imagery;
+    #   2. as_of is advanced past the peak so a post-peak same-orbit pass is
+    #      inside the searchable window at all (S1 revisit here is ~12 days,
+    #      and the reference acquisition is only ~1 day post-peak).
+    peak_raw = event_cfg.get("event_peak_date")
+    event_peak_utc = None
+    if peak_raw:
+        event_peak_utc = datetime.fromisoformat(
+            str(peak_raw).replace("Z", "+00:00")
+        )
+        if event_peak_utc.tzinfo is None:
+            event_peak_utc = event_peak_utc.replace(tzinfo=timezone.utc)
+        if as_of < event_peak_utc + timedelta(days=14):
+            as_of = event_peak_utc + timedelta(days=14)
     try:
         run = run_pipeline_for_event(
             location=event_cfg["pipeline_location"],
@@ -257,6 +273,7 @@ def _run_one_path(
             max_download_gb=BUDGET_MAX_DOWNLOAD_GB,
             max_search_seconds=BUDGET_MAX_SEARCH_SECONDS,
             forced_satellite_type=forced_satellite_type,
+            event_peak_utc=event_peak_utc,
         )
     except Exception as exc:
         return EventResult(
