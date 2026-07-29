@@ -31,6 +31,7 @@ pyproj==3.7.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 requests==2.34.2
+rasterio==1.4.3  # Phase 6a: WorldPop population-raster exposure (population_exposure.py)
 shapely==2.1.2
 six==1.17.0
 sniffio==1.3.1
