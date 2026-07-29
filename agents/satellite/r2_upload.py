@@ -147,7 +147,24 @@ def get_r2_client():
             # R2 ignores the region but the SDK requires one; "auto" is the
             # value Cloudflare documents for the S3 API.
             region_name="auto",
-            config=Config(signature_version="s3v4"),
+            # BOUNDED, because an unbounded upload can hang the WHOLE
+            # pipeline. Observed live (2026-07-29, Keramidi): the run
+            # completed every download and all processing, then froze
+            # indefinitely with CPU at zero and no established external
+            # connection — no result, no DB row, no error, for as long as it
+            # was left running. boto3's defaults retry generously and, on a
+            # half-open connection, effectively never give up.
+            #
+            # A stalled artifact upload must degrade to "this artifact
+            # failed" (which upload_all_results already reports via
+            # failed_artifacts) rather than costing the entire analysis. The
+            # science is already computed by this point.
+            config=Config(
+                signature_version="s3v4",
+                connect_timeout=30,
+                read_timeout=120,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
     except (BotoCoreError, ValueError) as exc:
         logger.error("Failed to create R2 client: %s", exc)
