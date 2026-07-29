@@ -1213,3 +1213,77 @@ The scored comparison must use the date-pinned harness path.
 | Flood S2 | EMS, Sentinel-backed | **YES — n=1 scored** |
 | **Earthquake** | **EMSR317 Palu, 9,457 graded points** | **YES — by spatial agreement, NOT IoU** |
 | Landslide | none found | **NO** |
+
+---
+
+# EARTHQUAKE — FIRST SCORED RESULT, and it is WORSE THAN CHANCE
+
+**Event:** EMSR317 Palu, Indonesia (M7.5, 2018-09-28). Same-relative-orbit
+S1 pair, orbit 134 DESCENDING: pre 2018-06-07, post 2018-10-05 (+7.5 d).
+Both scenes dual-pol (VV+VH), 3.0 GB. Scored against 9,457 EMS graded
+building points by SPATIAL AGREEMENT, not IoU (the reference is 0.5 m
+Pleiades-derived points; an extent IoU would measure sensor difference).
+
+| EMS grade | n | hit | detection rate |
+|---|---|---|---|
+| Destroyed | 1,995 | 119 | **0.0596** |
+| Damaged | 4,149 | 196 | 0.0472 |
+| Possibly damaged | 3,313 | 167 | 0.0504 |
+| **NULL BASELINE** (mask fraction over built-up) | — | — | **0.1126** |
+
+**LIFT OVER CHANCE = 0.53x. The detector is WORSE THAN RANDOM.** It flags
+11.26% of the built-up area but reaches only 5.96% of genuinely destroyed
+buildings — randomly flagging that much area would hit roughly twice as many.
+
+The severity ordering nominally passes (Destroyed 0.0596 > Possibly-damaged
+0.0504) but the margin is trivial AND the middle grade is out of order
+(Damaged 0.0472 < Possibly damaged 0.0504). That is noise, not a severity
+signal, and it must not be reported as "ordering correct" without this
+sentence attached.
+
+**Two diagnostics say the mechanism did not fire:**
+
+* `mean_vh_vv_change_db = -0.69`. The collapse signature is a POSITIVE
+  VH/VV shift (double-bounce -> volume scattering). It came out NEGATIVE
+  over the detected pixels — the opposite of the physics the detector is
+  built on.
+* `mean_correlation_in_damage = -0.061`, i.e. essentially zero, where
+  Matsuoka-Yamazaki predicts a clear correlation LOSS relative to intact
+  built-up.
+
+**The leading explanation, stated as a limitation and not an excuse: the
+112-day pre-event lead.** S1 acquisition over Palu was sparse in mid-2018 —
+a +-45-day window around the quake contains 28 scenes and ALL of them are
+post-event; orbit 134 stops after June and resumes only afterwards. So a
+112-day baseline is the pair that EXISTS, not the pair the method needs.
+Over 112 days in equatorial Indonesia, seasonal vegetation and
+soil-moisture change produce backscatter differences the detector cannot
+separate from structural change. This was recorded BEFORE the run, not
+retro-fitted after seeing the number.
+
+**A second, independent confound:** the built-up mask here is a SAR-intensity
+proxy (`VV >= p60`), not the IBI optical mask the detector was designed
+around — no optical pre/post pair was fetched for this run. Bright SAR
+returns include vegetation edges and terrain, so the "built-up" denominator
+is inflated, which depresses the lift figure by construction.
+
+**What this DOES establish:**
+* The earthquake path runs end to end on real dual-pol CDSE data —
+  same-orbit pair, VH+VV both fetched, damage detection executing, audit
+  fields intact.
+* The scoring methodology works and is honest: it produced a *negative*
+  result rather than a flattering one, because the null baseline was
+  computed alongside the headline rate.
+
+**What it does NOT establish:** any earthquake damage-detection accuracy.
+**Do NOT claim earthquake accuracy in the paper on this evidence.** The
+defensible statement is: "implemented, verified end-to-end on real dual-pol
+Sentinel-1, and scored against 9,457 graded buildings — the result did not
+exceed a random baseline under a 112-day pre-event lead and a proxy exposure
+mask, both of which are stated limitations rather than established detector
+failure."
+
+**What would make it a fair test** (not attempted here): an event with a
+same-orbit pre-event scene within ~2 weeks of the quake, and the real IBI
+built-up mask from an optical pair. Turkey-Syria 2023 (M7.8) has dense S1
+coverage and is the obvious candidate.
