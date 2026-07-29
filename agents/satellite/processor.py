@@ -1924,6 +1924,66 @@ def calculate_indices(
         )
         valid = valid & ~cloud_invalid
     scheme = _CLASS_SCHEMES[scheme_key]
+
+    # Phase 2 (science/full-pass): Kittler-Illingworth adaptive thresholding
+    # for the calibrated S2 water index. Fixed cut points don't hold across
+    # seasons/regions/index formulas — Phase 1b measured MNDWI putting 22% of
+    # a flooded AOI in the fixed scheme's 0.0-0.3 "wet_soil" band with 0.01%
+    # above 0.3. KI fits the AOI's own histogram and derives the
+    # minimum-error water/land cut; the graded severity boundaries keep the
+    # fixed scheme's internal spacing (+0.3/+0.5) relative to the derived
+    # cut. Guarded by a bimodality test (Ashman's D >= 2 + class-fraction
+    # floor, see adaptive_threshold.py) — a barely-flooded AOI's unimodal
+    # histogram falls back to the fixed scheme with the reason recorded.
+    # Either way the derived value + method ride in the result so any run's
+    # classification can be re-derived. S2 calibrated water index only —
+    # the SAR path is Phase 3's change-detection work, not this.
+    threshold_method = None
+    derived_threshold = None
+    affected_cut = None
+    ki_diagnostics = None
+    ki_fallback_reason = None
+    if scheme_key == "NDWI" and index_calibrated:
+        try:
+            from adaptive_threshold import derive_water_threshold
+
+            fixed_affected_cut = scheme["bands"][0][0]  # 0.0, the legacy cut
+            decision = derive_water_threshold(index[valid], fixed_affected_cut)
+            threshold_method = decision["threshold_method"]
+            ki_fallback_reason = decision.get("fallback_reason")
+            ki_diagnostics = decision.get("ki")
+            affected_cut = decision["threshold"]
+            if threshold_method == "kittler_illingworth":
+                derived_threshold = decision["threshold"]
+                t = derived_threshold
+                scheme = {
+                    "order": "asc",
+                    "bands": [
+                        (t, 1, "wet_soil", (147, 197, 253), 150),
+                        (t + 0.3, 2, "water", (37, 99, 235), 200),
+                        (t + 0.5, 3, "deep_water", (30, 58, 138), 220),
+                    ],
+                }
+                logger.info(
+                    "Adaptive threshold: KI cut %.4f (ashman_d=%.2f, "
+                    "class_fractions=%s) replaces fixed %.2f",
+                    t,
+                    (ki_diagnostics or {}).get("ashman_d", float("nan")),
+                    (ki_diagnostics or {}).get("class_fractions"),
+                    fixed_affected_cut,
+                )
+            else:
+                logger.info(
+                    "Adaptive threshold fallback to fixed %.2f: %s",
+                    fixed_affected_cut,
+                    ki_fallback_reason,
+                )
+        except Exception as exc:  # noqa: BLE001 — adaptive is optional
+            logger.warning("Adaptive thresholding unavailable (%s)", exc)
+            threshold_method = "fixed_fallback"
+            ki_fallback_reason = f"error: {exc}"
+            affected_cut = scheme["bands"][0][0]
+
     classification = _classify(index, valid, scheme)
 
     # Phase 1c (science/full-pass): permanent-water masking. Flood means
@@ -2035,6 +2095,15 @@ def calculate_indices(
         "permanent_water_percent": permanent_water_percent,
         "permanent_water_occurrence_threshold": permanent_water_threshold,
         "permanent_water_source": permanent_water_source,
+        # Phase 2: adaptive-threshold audit trail — the applied affected/not
+        # cut, how it was derived, and the KI diagnostics, so any run's
+        # classification is re-derivable. None on paths KI doesn't cover
+        # (SAR, NDVI).
+        "threshold_method": threshold_method,
+        "derived_threshold": derived_threshold,
+        "affected_cut": affected_cut,
+        "ki_diagnostics": ki_diagnostics,
+        "ki_fallback_reason": ki_fallback_reason,
         "threshold_used": threshold,
         "class_counts": class_counts,
         # BUG 5 calibration contract (see the branch above).
@@ -2682,6 +2751,12 @@ def _render_clip(
         "permanent_water_percent": indices.get("permanent_water_percent"),
         "permanent_water_occurrence_threshold": indices.get("permanent_water_occurrence_threshold"),
         "permanent_water_source": indices.get("permanent_water_source"),
+        # Phase 2: adaptive-threshold audit trail.
+        "threshold_method": indices.get("threshold_method"),
+        "derived_threshold": indices.get("derived_threshold"),
+        "affected_cut": indices.get("affected_cut"),
+        "ki_diagnostics": indices.get("ki_diagnostics"),
+        "ki_fallback_reason": indices.get("ki_fallback_reason"),
         "class_counts": indices["class_counts"],
         "affected_area_km2": geojson["total_area"],
         # BUG 5 — calibration contract rides through to the result dict.

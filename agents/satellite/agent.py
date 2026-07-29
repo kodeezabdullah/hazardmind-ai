@@ -1094,6 +1094,13 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
             "permanent_water_percent": result.get("permanent_water_percent"),
             "permanent_water_occurrence_threshold": result.get("permanent_water_occurrence_threshold"),
             "permanent_water_source": result.get("permanent_water_source"),
+            # Phase 2 — adaptive-threshold audit trail (KI cut / method /
+            # diagnostics; any run's classification is re-derivable).
+            "threshold_method": result.get("threshold_method"),
+            "derived_threshold": result.get("derived_threshold"),
+            "affected_cut": result.get("affected_cut"),
+            "ki_diagnostics": result.get("ki_diagnostics"),
+            "ki_fallback_reason": result.get("ki_fallback_reason"),
             "class_counts": result.get("class_counts"),
             "affected_area_km2": result["affected_area_km2"],
             # The satellite_results INSERT names these columns; total_zones was
