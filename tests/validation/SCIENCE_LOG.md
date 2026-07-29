@@ -413,6 +413,70 @@ bounded scope — `forced_satellite_override` bypasses `select_satellite`,
 and the scene chosen downstream is not constrained to the frozen clock's
 window. Fixing it is the single next step to a scored S1 result.
 
+### Run 4 (`4d1dabd-dirty`, event `3535c675`, post-date-bound-fix) — right imagery era, wrong side of the flood
+
+| Field | Value |
+|---|---|
+| `index_calibrated` / `index_units` | **True / dB_change_ratio** (change detection ran) |
+| `scene_age_days` | **1062.1** — 2023 imagery, not 2026 |
+| post-event scene selected | **2023-09-01** 04:31 UTC, orbit 7 DESCENDING |
+| pre-event baseline | 2023-08-20 / 2023-08-08 / 2023-07-27, all orbit 7 |
+| `mean_index` | **-0.0312** (dB change, i.e. essentially no change) |
+| `affected_area_km2` | 0.0 |
+| confidence / basis | 0.0 / evidence_weak |
+| elapsed / downloaded | 1,876s / 2,449 MB (+~1.4 GB baseline) |
+
+**The date-bound fix worked.** `scene_age_days: 1062.1` confirms the search
+is now correctly confined to the 2023 window, and the same-orbit baseline
+resolved cleanly (three orbit-7 DESCENDING scenes, exactly as designed).
+
+**But the run still cannot be scored, for a NEW and simpler reason:
+Storm Daniel struck Thessaly on 2023-09-05/06, and the selected
+post-event scene is 2023-09-01 — five days BEFORE the flood.**
+
+The search window is `[as_of - date_range, as_of]` and ranks candidates by
+coverage/recency score, so with `date_range=7` and `as_of=2023-09-06` the
+eligible set spans 08-30 to 09-06 and the highest-scoring scene happened to
+be pre-flood. Change detection then compared **pre-flood against
+pre-flood** and correctly reported no change: `mean_index -0.0312` is
+essentially 0 dB, which is precisely what two unflooded acquisitions of the
+same ground should produce.
+
+So the zero is *correct behaviour on the inputs given*. It is not evidence
+about flood-detection accuracy in either direction, and must not be
+recorded as such.
+
+**The remaining gap, stated precisely.** This is the fifth distinct S1
+blocker and, again, it is scene SELECTION rather than science:
+
+- The harness pins `as_of` to the reference product's acquisition instant,
+  and the window looks *backwards* from it.
+- For a flood, the useful post-event scene is the first same-orbit pass
+  *after* peak — which for orbit 7 DESCENDING at this AOI would be
+  2023-09-13 (12-day revisit from 09-01), outside a backward-looking
+  7-day window.
+- Fixing it means letting the harness select the first same-orbit
+  acquisition at-or-after the event peak, rather than the best-scoring
+  scene in a backward window. That is a harness/selection change, not a
+  change-detection change.
+
+**What all four S1 runs together DO establish**, and it is not nothing:
+the change-detection path is now proven end-to-end on real CDSE data —
+same-orbit reference acquisition, grid alignment, Refined Lee filtering,
+log-ratio, tiled thresholding, and honest audit fields that made every one
+of these diagnoses possible. Each run failed for a *different* reason, and
+each reason was found and fixed rather than guessed at:
+
+1. CDSE infrastructure error.
+2. Grid-shape mismatch silently disabling change detection (**fixed**).
+3. Unbounded search window selecting 2026 imagery for a 2023 event
+   (**fixed**).
+4. Backward-looking window selecting a pre-flood post-event scene
+   (**identified, not yet fixed**).
+
+**What is still NOT established:** any S1 accuracy figure. No run has yet
+compared genuine flood-peak imagery against a pre-flood baseline.
+
 ---
 
 # FINAL REPORT — science/full-pass
@@ -481,7 +545,7 @@ unknown.** Three attempts:
    zero water always. Reporting that zero as "S1 found no flood" would have
    been the most misleading possible outcome; the audit fields are what
    prevented it. Root-caused and fixed (see Phase 3i above).
-3. **Post-fix rerun (`2a2b616-dirty`): change detection RAN** —
+3. **Grid-fix rerun (`2a2b616-dirty`): change detection RAN** —
    `index_calibrated: True`, `index_units: dB_change_ratio`, confidence
    **0.75 / evidence_supports** (up from 0.30 / weak). The grid fix worked
    and the S1 path produced a defensible answer for the first time ever.
@@ -492,12 +556,20 @@ unknown.** Three attempts:
    2023 EMS extent would measure a 2026 non-flood against a 2023 flood and
    report a false zero as detector failure.
 
-So the project has no scored S1 result for the fourth session running. The
-blocker is now the narrowest it has ever been and is in the HARNESS, not
-the science: `forced_satellite_override` bypasses `select_satellite`, and
-the post-event scene chosen downstream is not constrained to the frozen
-clock's window. Pinning that selection is the single next step to a scored
-S1 result.
+4. **Date-bound rerun (`4d1dabd-dirty`): correct 2023 imagery, wrong side
+   of the flood.** `scene_age_days: 1062.1` confirms the window fix worked,
+   and the same-orbit baseline resolved cleanly. But the selected
+   post-event scene is **2023-09-01** — five days BEFORE Storm Daniel's
+   09-05/06 peak — because the search window looks *backwards* from
+   `as_of`. Change detection compared pre-flood against pre-flood and
+   correctly returned ~0 dB change (`mean_index -0.0312`).
+
+So the project has no scored S1 result. The blocker is again scene
+SELECTION, not science: the harness needs the first same-orbit
+acquisition at-or-AFTER the event peak (orbit 7 DESCENDING's next pass is
+2023-09-13), not the best-scoring scene in a backward-looking 7-day
+window. Every S1 failure this session was a different, real, identified
+defect — three of the four are fixed.
 
 What DID change: the S1 path is no longer *structurally* incapable of an
 answer. The absolute `SAR_WATER_THRESHOLD_DB = -15.0` could never fire on
@@ -560,11 +632,13 @@ per-run table above.
 
 ## 8. What remains unaddressed, ranked
 
-1. **No scored S1 result** — the method is now PROVEN to run in production
-   (`dB_change_ratio`, confidence 0.75/supports); what is missing is a run
-   against flood-peak imagery. Concretely: pin the forced-S1 post-event
-   scene selection to the reference date, not just the catalogue query
-   window. Bounded harness fix, highest priority.
+1. **No scored S1 result** — the method is PROVEN to run end-to-end in
+   production on real 2023 imagery (`dB_change_ratio`, correct same-orbit
+   baseline). What is missing is a post-event scene from AFTER the flood
+   peak: the harness window looks backwards from `as_of`, so it selected
+   2023-09-01 for a 09-05/06 event. Fix: select the first same-orbit
+   acquisition at-or-after peak (2023-09-13 here). Bounded harness change,
+   highest priority.
 2. **Confidence calibration is unvalidated** — n=1 scoreable point. Needs
    more scoreable events before any calibration claim is defensible.
 3. **No urban-flood reference** — the EMS ceiling (Phase 7) means every
