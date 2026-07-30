@@ -2030,6 +2030,37 @@ def calculate_indices(
                     valid_mask=mask,
                     orbit_direction=orbit_direction or "DESCENDING",
                 )
+            except ImportError as exc:
+                # A MISSING DEPENDENCY IS A DEPLOYMENT FAULT, NOT A DATA
+                # CONDITION, and it must never be reported as one.
+                #
+                # Found live 2026-07-30 (Kosutarica, EMSR275): scipy was absent
+                # from the harness venv, `from scipy.ndimage import ...` inside
+                # sar_change_detection raised ImportError, this handler caught
+                # it as an ordinary failure, and the run fell through to the
+                # uncalibrated absolute-threshold path. It persisted
+                # `index_units: "dB_uncalibrated"`, `affected_area_km2: 0.0`,
+                # `total_zones: 0` and completed as `complete_zero_zones` — a
+                # zero that reads exactly like "no flood detected" but was
+                # really "the detector was never installed". Two hours and
+                # 2,636 MB produced a number that would have entered the paper
+                # as a scored result.
+                #
+                # Raising is correct here even though every other failure in
+                # this block degrades: a data problem (misaligned baseline, too
+                # few reference scenes) is a legitimate reason to fall back and
+                # say so, whereas a missing import means the deployment cannot
+                # perform the analysis it claims to perform, on ANY input. The
+                # audit fields alone were not enough — they recorded the
+                # fallback faithfully and it still took a log grep to notice.
+                raise RuntimeError(
+                    "SAR change detection is unavailable in this deployment: "
+                    f"{exc}. This is a missing dependency (see "
+                    "agents/satellite/requirements.txt), not a property of the "
+                    "imagery. Refusing to fall back to the uncalibrated "
+                    "absolute-threshold path, which would report a physically "
+                    "meaningless zero as a flood result."
+                ) from exc
             except Exception as exc:  # noqa: BLE001
                 logger.warning("SAR change detection failed (%s)", exc)
                 cd = None
