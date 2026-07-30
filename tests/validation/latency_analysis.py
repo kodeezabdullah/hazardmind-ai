@@ -112,45 +112,76 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
 
 
 def p_value_two_sided(r: float, n: int) -> float | None:
-    """Two-sided p for Pearson r via the t-distribution, computed from the
-    incomplete beta function so no scipy import is needed."""
-    if n < 3 or r is None or abs(r) >= 1.0:
+    """Two-sided p for Pearson r, from the exact Student-t survival function.
+
+    Uses scipy when available; otherwise falls back to a numerically integrated
+    t density. An EARLIER version of this function hand-rolled a continued
+    fraction for the incomplete beta and returned p == |r| on the real data —
+    a wrong p-value is worse than no p-value in a validation report, because it
+    launders a null result as a measured one. It is verified against known
+    reference values in `test_latency_stats.py` rather than trusted.
+    """
+    if n < 3 or r is None:
         return None
+    if abs(r) >= 1.0:
+        return 0.0
     df = n - 2
     t = abs(r) * math.sqrt(df / (1.0 - r * r))
-    x = df / (df + t * t)
-    return _betainc(df / 2.0, 0.5, x)
+    try:
+        from scipy import stats
+
+        return float(2.0 * stats.t.sf(t, df))
+    except Exception:
+        return _t_sf_two_sided(t, df)
 
 
-def _betainc(a: float, b: float, x: float) -> float:
-    """Regularised incomplete beta I_x(a,b) via continued fraction."""
-    if x <= 0:
-        return 0.0
-    if x >= 1:
+def _t_sf_two_sided(t: float, df: int) -> float:
+    """2 * P(T > t) for Student-t with `df` degrees of freedom, scipy-free.
+
+    Integrates on the substitution u = 1/x over (0, 1/t], which maps the
+    infinite tail onto a FINITE interval and so has no truncation error at
+    all. A first version integrated x over [t, t+60+10*sqrt(df)] and was wrong
+    in the 4th decimal at df=2 — Student-t tails decay only polynomially
+    (~x^-(df+1)), so at low df a large but finite cutoff still discards real
+    mass. Low df is exactly this analysis's regime (n=4 means df=2), i.e. the
+    error was worst precisely where it would be used.
+
+    Verified against scipy to 1e-9 in test_latency_stats.py.
+    """
+    if t <= 0:
         return 1.0
-    lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
-    front = math.exp(math.log(x) * a + math.log(1 - x) * b - lbeta) / a
-    f, c, d = 1.0, 1.0, 0.0
-    for i in range(0, 300):
-        m = i // 2
-        if i == 0:
-            num = 1.0
-        elif i % 2 == 0:
-            num = (m * (b - m) * x) / ((a + 2 * m - 1) * (a + 2 * m))
-        else:
-            num = -((a + m) * (a + b + m) * x) / ((a + 2 * m) * (a + 2 * m + 1))
-        d = 1.0 + num * d
-        if abs(d) < 1e-30:
-            d = 1e-30
-        d = 1.0 / d
-        c = 1.0 + num / c
-        if abs(c) < 1e-30:
-            c = 1e-30
-        f *= c * d
-        if abs(1.0 - c * d) < 1e-10:
-            break
-    r = front * (f - 1.0)
-    return r if x < (a + 1) / (a + b + 2) else 1.0 - r
+    lognorm = (
+        math.lgamma((df + 1) / 2.0)
+        - math.lgamma(df / 2.0)
+        - 0.5 * math.log(df * math.pi)
+    )
+
+    def integrand(u: float) -> float:
+        """density(1/u) / u^2 — the Jacobian of x = 1/u.
+
+        As u -> 0 this tends to df^((df+1)/2) * exp(lognorm) * u^(df-1), i.e.
+        it vanishes for df > 1 but is CONSTANT at df = 1 (Cauchy). Computing it
+        via the log form keeps that limit exact instead of evaluating 0 * inf.
+        """
+        if u <= 0.0:
+            # Exact u -> 0+ limit: 0 for df > 1, a finite constant at df == 1.
+            if df > 1:
+                return 0.0
+            return math.exp(lognorm + 0.5 * math.log(df) * (df + 1))
+        x2_over_df = 1.0 / (u * u * df)
+        # log[ density(1/u) / u^2 ] rearranged so no term overflows for small u:
+        #   = lognorm - ((df+1)/2)*log1p(1/(u^2 df)) - 2 log u
+        return math.exp(
+            lognorm - ((df + 1) / 2.0) * math.log1p(x2_over_df) - 2.0 * math.log(u)
+        )
+
+    hi = 1.0 / t
+    steps = 40000  # even, for Simpson
+    h = hi / steps
+    total = integrand(0.0) + integrand(hi)
+    for i in range(1, steps):
+        total += integrand(i * h) * (4 if i % 2 else 2)
+    return min(1.0, 2.0 * total * h / 3.0)
 
 
 def report_correlation(label: str, xs: list[float], ys: list[float]) -> str:
