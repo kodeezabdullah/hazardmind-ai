@@ -1799,3 +1799,74 @@ mean part of the delta pair's divergence is a property of the REFERENCE, not
 the detector. Flagged for a future session; not tested here, since it would be
 a fifth correlation on the same seven points.
 
+
+## Trimmu/Muzaffargarh-area (EMSR838 AOI05) — a third distinct failure mode, found this session
+
+Ran clean: 99.78% coverage, `index_calibrated: True`, `index_units:
+dB_change_ratio`, fresh 3.95-day scene (correctly frozen clock), no HIGH
+concerns, **confidence 0.773 / `evidence_supports`** — the single highest,
+most confident result of the whole session.
+
+**And it reported zero hazard zones.**
+
+This is neither the scipy-fallback failure (Kosutarica run 1) nor the
+no-signal-guard rejection (Kosutarica re-run, Žalgiriai). Both of those are
+the pipeline correctly declining to report a number it doesn't trust. This
+run trusts its number — and its own diagnostic text contradicts the
+zero-zone result:
+
+    "The mean index over the classified water pixels (0.0169) is
+    significantly lower than the whole-AOI mean (0.0589), which is
+    physically consistent with a high-water-fraction scenario (88.71%)..."
+
+    Featherless validation: "The results are consistent with a major flood
+    event. No further validation is required."
+
+**88.71% of the AOI was classified as water. `total_zones` persisted as 0.**
+Confidence 0.773 was computed from evidence that includes this classification
+succeeding — the confidence machinery has no visibility into the fact that
+every single polygon it produced was about to be discarded downstream.
+
+**Root cause, traced to two thresholds set for different jobs:**
+
+    sar_change_detection.py: MIN_FLOOD_PATCH_PIXELS = 50   (~0.005 km2 @ 10m)
+    processor.py:            MIN_ZONE_AREA_KM2       = 0.5
+
+The first is the detector's OWN speckle filter — a connected patch of at
+least 50 pixels survives morphological opening and is considered real
+change, not noise. The second is `vectorize_classification`'s reportable-zone
+floor, applied per CONTIGUOUS polygon after the fact — **100x larger** than
+the detector's own bar. A patch can clear speckle filtering as genuine signal
+and still be silently dropped at vectorization for being under 0.5 km2.
+
+On a confluence floodplain (Trimmu, where the Chenab and Jhelum meet) at 20 m
+reference resolution, inundation plausibly follows a scattered network of
+channels and low-lying patches rather than one solid blob — exactly the
+condition where a high aggregate percentage can consist entirely of
+sub-0.5-km2 fragments. That is the leading explanation, not yet independently
+confirmed against the raw classification raster (out of scope to verify
+mid-session without re-running with instrumentation added).
+
+**What this is, precisely: the SAME failure SHAPE as the scipy incident,
+found by the SAME method (read the diagnostic text, don't trust the summary
+row), but a DIFFERENT root cause.** Not a missing dependency — a threshold
+mismatch between two stages of the same pipeline, neither of which is wrong
+in isolation, that together can turn a confidently-detected majority-flooded
+scene into a reported "no flood found." Confidence 0.773/`evidence_supports`
+on a result whose own raw statistics say something else is the third time
+this session that a summary field and the underlying evidence have disagreed.
+
+**Not fixed this session** — flagged precisely rather than patched under
+time pressure, per the discipline that has held for every other finding here.
+The candidate fix (lowering `MIN_ZONE_AREA_KM2`, or reporting an aggregate
+"high-fraction, fragmented" state distinct from `complete_zero_zones` when
+the raw classification and the vectorized zone count diverge this far) needs
+its own measurement pass, not a same-session guess — exactly the lesson the
+-1.0 dB threshold and the two discarded signal guards already taught this
+project.
+
+**Consequence for this event's score:** cannot be scored as IoU/precision/
+recall — `metrics_including_permanent_water` and `metrics_excluding_permanent_water`
+are both `null`, same shape as every other zero-zone event, correctly
+reported as undefined rather than a false 0.
+
