@@ -1,0 +1,50 @@
+{
+  "commit": "795b070-dirty",
+  "commit_full": "795b070c7688e47fc3e8d77aad8089628c940a70",
+  "run_timestamp_utc": "2026-07-29T19:49:27.901106+00:00",
+  "events": [
+    {
+      "event_id": "5f27862b-ce97-40f6-9263-85016010b966",
+      "location": "Ko\u0161utarica, Croatia",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "no_s2_candidates",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": {
+        "iou": 0.3207,
+        "precision": 0.9742,
+        "recall": 0.3234,
+        "f1": 0.4856,
+        "predicted_area_km2": 0.537,
+        "reference_area_km2": 1.617,
+        "intersection_area_km2": 0.523,
+        "union_area_km2": 1.63
+      },
+      "metrics_excluding_permanent_water": {
+        "iou": 0.3207,
+        "precision": 0.9742,
+        "recall": 0.3234,
+        "f1": 0.4856,
+        "predicted_area_km2": 0.537,
+        "reference_area_km2": 1.617,
+        "intersection_area_km2": 0.523,
+        "union_area_km2": 1.63
+      },
+      "permanent_water_note": "excluding_permanent_water subtracts the supplied permanent-water polygon (JRC_GSW_occurrence_v1_4_2021 (occurrence >= 75%)) from both predicted and reference geometries before scoring.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 at 10 m \u2014 VERIFIED by reading the product's own source.dbf, not inferred from the activation page.",
+        "Reference clipped to the AOI is 1.617 km2 = 11.78% of 13.73 km2 \u2014 comfortably above the ~5% Paiporta floor where a perfect detector still scores near zero.",
+        "Layer of record is `observed_event_a` \u2014 the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumWaterExtentA`, which Kanalia/Insh use). A prediction from a different date will disagree partly for TIMING reasons, not only accuracy. State this whenever these numbers are compared against Kanalia's.",
+        "The only event in this set resolving to a REAL OSM POLYGON (13.73 km2) rather than a buffered point \u2014 no ~6 km disk approximation. Smallest AOI and smallest absolute reference (1.617 km2), so its metrics are the most sensitive to edge effects.",
+        "RURAL/open-terrain event. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section).",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 2961.8899999999994,
+      "bytes_downloaded": 2635542564
+    }
+  ]
+}

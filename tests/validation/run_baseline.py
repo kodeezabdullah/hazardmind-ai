@@ -23,6 +23,7 @@ return — see pipeline_runner.py's module docstring for why this matters.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import traceback
@@ -32,6 +33,22 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Found 2026-07-30: every `logger.info(...)` call anywhere in the pipeline
+# (agents/satellite/*.py) was SILENTLY DROPPED in this harness. Python's root
+# logger with no handler attached defaults to WARNING via
+# `logging.lastResort`, so only `logger.warning`/`logger.error` ever reached
+# the console — `logger.info` calls, including diagnostic instrumentation
+# added specifically to investigate a live finding (SCIENCE_LOG.md, the
+# Muzaffargarh/Trimmu dropped-zone counters), were invisible. Two full re-runs
+# (~5.2 GB) were spent chasing that instrumentation before this gap was
+# caught — this fix exists so that mistake is not repeated. INFO, not DEBUG:
+# loud enough to be useful, not so loud it drowns the summary table.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 
 def _fix_proj_lib() -> None:
@@ -96,6 +113,7 @@ def _run_one_path(
     product_cfg: dict,
     dry_run: bool,
     forced_satellite_type: str | None = None,
+    force_single_baseline_scene: bool = False,
 ) -> EventResult:
     event_key = event_cfg["event_key"]
     label = f"{event_key}::{path_key}"
@@ -288,6 +306,7 @@ def _run_one_path(
             max_search_seconds=BUDGET_MAX_SEARCH_SECONDS,
             forced_satellite_type=forced_satellite_type,
             event_peak_utc=event_peak_utc,
+            force_single_baseline_scene=force_single_baseline_scene,
         )
     except Exception as exc:
         return EventResult(
@@ -466,6 +485,17 @@ def main() -> int:
             "otherwise select the other satellite."
         ),
     )
+    parser.add_argument(
+        "--force-single-baseline-scene",
+        action="store_true",
+        help=(
+            "DIAGNOSTIC ONLY (2026-07-30). Forces the S1 SAR change-detection "
+            "path to use exactly ONE pre-event scene instead of the default "
+            "3-scene median baseline, so a low-signal detection can be "
+            "isolated as a baseline-depth effect vs. a threshold/scene "
+            "effect. See force_single_baseline_scene.py."
+        ),
+    )
     args = parser.parse_args()
 
     configs = _load_event_configs()
@@ -504,6 +534,7 @@ def main() -> int:
                 _run_one_path(
                     cfg, path_key, product_cfg, args.dry_run,
                     forced_satellite_type=args.force_satellite,
+                    force_single_baseline_scene=args.force_single_baseline_scene,
                 )
             )
 

@@ -102,6 +102,7 @@ def run_pipeline_for_event(
     max_search_seconds: Optional[float] = None,
     forced_satellite_type: Optional[str] = None,
     event_peak_utc=None,
+    force_single_baseline_scene: bool = False,
 ) -> dict:
     """Invoke the real satellite pipeline end to end:
 
@@ -144,11 +145,22 @@ def run_pipeline_for_event(
     from forced_satellite_override import forced_satellite  # local harness module
     from aoi_pin import pinned_aoi  # local harness module
     from post_peak_scene_floor import post_peak_floor  # local harness module
+    from force_single_baseline_scene import (  # local harness module
+        forced_single_baseline_scene,
+    )
     import contextlib
 
     satellite_override_cm = (
         forced_satellite(forced_satellite_type)
         if forced_satellite_type
+        else contextlib.nullcontext()
+    )
+    # DIAGNOSTIC ONLY (2026-07-30) — isolates whether a 3-scene median
+    # baseline dilutes signal vs. a simple 1-scene comparison. See
+    # force_single_baseline_scene.py's module docstring for why this exists.
+    baseline_scene_cm = (
+        forced_single_baseline_scene()
+        if force_single_baseline_scene
         else contextlib.nullcontext()
     )
     # Post-peak floor: for a flood the useful post-event scene is the first
@@ -219,7 +231,7 @@ def run_pipeline_for_event(
             # the AOI between runs of the same event — see aoi_pin.py for the
             # live confound this closed (Kanalia's reference area shifted
             # 16.082 -> 20.308 km² across two harness sessions).
-            with frozen_sentinel_clock(as_of), satellite_override_cm,                     peak_floor_cm, pinned_aoi():
+            with frozen_sentinel_clock(as_of), satellite_override_cm,                     peak_floor_cm, baseline_scene_cm, pinned_aoi():
                 # _run_pipeline_sync is blocking (it does its own internal
                 # asyncio.run() for the DB persist and synchronous I/O for
                 # everything else) — run it in a worker thread so it doesn't

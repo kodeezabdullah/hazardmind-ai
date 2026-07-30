@@ -1481,3 +1481,487 @@ the pipeline but NOT persisted into the harness result JSON, so the
 acquisition date of a scored run is not recoverable from the results file
 alone — it required a DB lookup plus a CDSE catalogue query. Any future
 timing analysis needs those two fields stored per event.
+
+---
+
+# SESSION 6 — completing the S1 validation set (`science/detection-pass`, 2026-07-30)
+
+**Brief:** run the remaining qualified events, add a Pakistan case study, and
+test whether precision varies with post-peak acquisition latency. Measurement
+only — no new science, no new detectors, no threshold tuning.
+
+## STEP 0 — Tychero's latency, verified independently
+
+The brief asked for this number on the premise that it was unknown. It was
+already recovered by this branch's HEAD commit (`795b070`), so rather than
+re-derive it from the same route I verified it from persisted evidence
+end-to-end:
+
+    satellite_results.event_id e5619ac8-1130-49e8-867f-7e37043b31d9
+      -> scene_id  afcd8487-c5f9-48f3-88f4-1c59d1431339
+      -> CDSE OData Products(<uuid>)
+      -> S1B_IW_GRDH_1SDV_20180402T160653, ContentDate/Start 2018-04-02
+      -> config event_peak_date 2018-03-24
+
+    POST-PEAK LATENCY = +9.67 days
+
+**This confirms the correction, and it means the session's central hypothesis
+was already refuted before the session began.** Tychero is the LATEST
+acquisition in the scored set and the BEST result — 15x Kanalia's precision
+while imaged ~1.5 days later. The brief's framing ("if precision varies
+systematically with acquisition latency, these are a dose-response
+relationship... the paper's central figure") does not survive this number, and
+no amount of additional events changes that, because the refutation is a
+within-set contradiction rather than a sample-size problem.
+
+## THE INCIDENT THIS SESSION EXISTS TO REPORT — a "scored zero" that measured a missing package
+
+**Kosutarica (EMSR275) ran 44 minutes, downloaded 2,636 MB, and produced a
+number that was not a measurement of anything.**
+
+| Field | Value |
+|---|---|
+| `pipeline_status` | `complete_zero_zones` |
+| `affected_area_km2` | 0.0 |
+| `total_zones` | 0 |
+| `index_units` | **`dB_uncalibrated`** |
+| `index_calibrated` | **False** |
+| reference (clipped) | 1.617 km2 of confirmed flood, 11.78% of the AOI |
+| confidence / basis | 0.0 / `evidence_weak` |
+
+The log line that explains it: `SAR change detection failed (No module named
+'scipy')`.
+
+**scipy was absent from the harness venv.** `sar_change_detection` imports it
+LAZILY, inside its functions, so the gap was invisible at import time and
+surfaced only when a real run reached change detection — 44 minutes and 2.6 GB
+in. `processor.py`'s bare `except Exception` caught the ImportError, logged one
+warning, and continued to the uncalibrated absolute-threshold path: the path
+that classifies zero water on every S1 run and always has.
+
+**Had this been read off the results table it would have entered the paper as
+Kosutarica's scored S1 result — a zero on an event with confirmed flood.** It
+is the same failure the log records from the Kanalia series ("the old known
+defect, wearing the new code's clothes"), reached by a new route.
+
+**What the audit fields did and did not do.** `index_units` and
+`index_calibrated` recorded the fallback FAITHFULLY — the provenance design
+worked exactly as intended. But they are **diagnostic, not preventive**: the
+run still completed, still persisted, still printed a clean summary row, and it
+took a deliberate log grep to notice. A field that records a fault correctly
+while the pipeline reports success is not a safeguard.
+
+**So the fix is behavioural, not a `pip install`** (commit `d5124a6`). A missing
+dependency now raises `RuntimeError` naming the dependency and stating the
+failure is "not a property of the imagery". Ordinary data failures — misaligned
+baseline, too few reference scenes — still degrade to the fallback and still
+report `index_calibrated: False`, because those are legitimate statements about
+the input. A missing import is not: it means the deployment cannot perform the
+analysis it advertises **on any input**.
+
+Tests (4, through the real `processor.calculate_indices`): missing dependency
+raises; data failure degrades and still reports `index_calibrated False`; the
+scipy symbols the detector uses are asserted importable up front (the check
+that would have caught this before a single byte was spent); and the
+`except ImportError` / `except Exception` ORDER is guarded, since ImportError
+is an Exception subclass and a refactor placing the general handler first would
+silently restore the bug. Full satellite suite: **126 passed**, up from 122,
+no regressions.
+
+**Kosutarica's first run is excluded from the scored set, not recorded as a
+zero.** `run_latency_analysis.py` prints it under EXCLUDED with the reason, and
+prints a per-event provenance check so no future reader can count a
+fallback-path run as a measurement.
+
+## Reference-layer semantics and provenance, per scored event
+
+Every scored event now carries its `index_units`/`index_calibrated` alongside
+its metrics. All four surviving events ran genuine change detection
+(`dB_change_ratio`, `index_calibrated: True`) — verified from the DB, not from
+stdout.
+
+## STEP 2 — the Pakistan case study, and the sensor gate that nearly rejected it
+
+**EMSR838** (2025 monsoon floods) publishes three vector products for the AOIs
+of interest. Reading each product's own `source.dbf` and resolving the flood
+layer's `dmg_src_id` foreign key against it — rather than trusting the
+activation description, which covers the whole activation uniformly:
+
+| Product | Post-event source | Verdict |
+|---|---|---|
+| AOI01 `DEL_MONIT01` | **COSMO-SkyMed 2nd Gen, 3.0 m** | REJECT |
+| AOI02 `DEL_MONIT01` | **ICEYE, 2.0 m** | REJECT |
+| AOI01 `DEL_PRODUCT` | **Sentinel-1, 20.0 m** | **ACCEPT** |
+
+**In all three, the Sentinel-2 row is the PRE-event source** (18/06/2025 and
+10/06/2025) — the Townsville trap (EMSR342) exactly, and the reason the brief
+insisted on reading `source.dbf`. Two of the three products would have produced
+a sensor-difference measurement dressed as pipeline error.
+
+The accepted product traces end to end: all **1,291** `observedEventA` polygons
+carry `dmg_src_id = 2`, which resolves to the Sentinel-1 post-event row. No
+mixing within the layer.
+
+**Gates:**
+
+| Gate | Result |
+|---|---|
+| 1 — Sentinel post-event source | **PASS**, traced via `dmg_src_id` |
+| 2 — flooded fraction | **54.42%** (61.452 of 112.916 km2) — highest in the set |
+| 3 — same-orbit pre-event baseline | **PASS** — relative orbit 107: post-event 2025-08-28T01:07 (the reference's OWN acquisition date), pre-event 08-16 / 08-04 / 07-23 |
+
+Two judgement calls, both recorded in the config rather than left implicit:
+
+1. **The flooded fraction is 54.42%, not the 80.03% a densest-disk grid search
+   reports.** The optimum disk centres at 73.506E; `Vanike Tarar` — the nearest
+   settlement Nominatim resolves — sits ~8 km east at 73.586E. 54.42% is the
+   fraction at the AOI **the pipeline actually resolves**, measured by loading
+   the reference through `reference_loader` and clipping to it. Reporting 80.03%
+   would have been the more flattering number and the wrong one.
+2. **`event_peak_date` is 2025-08-26, not the activation's headline
+   2025-08-15.** The 08-15 date is the KP flash-flood onset; this AOI is Punjab
+   riverine flooding (activation declared 08-29, Punjab flooding began ~08-20).
+   Using 08-15 would overstate post-peak latency by ~13 days and misattribute
+   the result.
+
+**A caveat unique to this event, in the opposite direction to the usual one:**
+`source.dbf` records the post-event Sentinel-1 at **20 m**, where every other
+event in this harness is 10 m. The reference is therefore **coarser** than our
+prediction. That is the inverse of the Townsville/Amatrice disqualifier
+(reference finer than the sensor can resolve, which is fatal) and does not
+invalidate scoring — but margin disagreement is expected and must not be read
+as detector error.
+
+## STEP 3 — the analysis plan, pre-registered before the new numbers landed
+
+Recorded here BEFORE the Pakistan / Fshat i Ri / Kosutarica-rerun results were
+available, so the verdict cannot be fitted to whatever came back. The brief's
+own closing instruction — "if a relationship appears, it is a finding to
+report, not a parameter to fit" — cuts both ways: a null result must be equally
+un-fittable.
+
+**What would count as the relationship holding:**
+- a negative correlation between post-peak latency and precision, AND
+- p < 0.05 at the stated n, AND
+- no single point whose removal flips the sign.
+
+**What would NOT count, and why:**
+- **A correlation without a p-value.** Four or five points ordering correctly
+  is the null hypothesis's most common appearance, not evidence against it.
+- **Pearson alone.** One influential point manufactures |r| > 0.9 at this n, so
+  Spearman is reported alongside every figure.
+- **Dropping an inconvenient event.** Tychero is the point that refutes the
+  hypothesis; excluding it as an outlier would be the whole finding discarded
+  to save the framing.
+
+**The confound the brief flagged, stated up front:** the scored events do NOT
+share reference-layer semantics. Kanalia uses `maximumWaterExtentA` (a
+CUMULATIVE MAXIMUM over the whole event); Keramidi, Tychero, Zalgiriai,
+Kosutarica and the Pakistan case study use `observed_event_a` / `observedEventA`
+(a SNAPSHOT at one acquisition instant). A snapshot reference and a snapshot
+prediction can agree; a cumulative-maximum reference cannot be fully recovered
+from any single acquisition, so **recall is structurally capped for
+`maximumWaterExtentA` events regardless of detector quality or timing.**
+
+Kanalia is the lowest-scoring event AND the only cumulative-maximum one. That
+means layer semantics and latency are **confounded in this set**, and any
+latency claim drawn from it is also a layer-semantics claim. With n this small
+the two cannot be separated — which is itself worth reporting, because it
+constrains what the paper may assert from these events.
+
+**Checked, and the confound does NOT resolve in either direction.** If layer
+semantics were the dominant explanation, snapshot events should cluster high and
+the cumulative event low. They do not: **Zalgiriai is a SNAPSHOT event and
+scores 0.0** — the same floor as cumulative-max Kanalia — while snapshot Tychero
+scores 0.878 precision. Snapshot recall spans 0.0000-0.4960, straddling
+Kanalia's 0.0096 entirely.
+
+So low recall is not exclusive to `maximumWaterExtentA`, and the cumulative
+group has n=1, which cannot establish a group difference on its own. **The
+confound is real and UNRESOLVED, not resolved in favour of either explanation.**
+The honest statement is that this event set cannot separate acquisition timing,
+layer semantics, and basin hydrology — and that is a property of the available
+references, not something more compute fixes.
+
+## STEP 4 — confidence vs accuracy: the n was never actually n, and here is why
+
+The brief's framing was that confidence calibration "has been stuck at n=1 for
+the whole project" and that an enlarged event set would finally make it
+testable. **On the pre-existing scored runs it is worse than untestable — the
+channel is CONSTANT.**
+
+| Event | measured F1 | reported confidence | basis |
+|---|---|---|---|
+| Kanalia | 0.0165 | **0.000** | `evidence_weak` |
+| Tychero | **0.6340** | **0.000** | `evidence_weak` |
+| Zalgiriai | 0.0000 | **0.000** | `evidence_weak` |
+
+**Variance in reported confidence across an F1 range of 0.0000-0.6340: exactly
+0.0.** A constant has no correlation with anything, so no calibration claim is
+possible from these three points regardless of how many more are added
+alongside them — which is a stronger and more useful statement than "n is too
+small".
+
+**But the cause was diagnosed rather than reported as a calibration failure,
+and it is a HARNESS artifact, not a defect in the confidence machinery.**
+
+`processor._finish_success` computes scene age as
+`datetime.now(timezone.utc) - newest_acquisition`. The harness freezes the
+scene-SEARCH clock so the catalogue query targets the historical window, but on
+these runs it did not freeze `processor`'s clock. So a 2018 event analysed in
+2026 reported `scene_age_days: 3040.0`, tripped the
+`> 2 * SCENE_AGE_ANOMALY_DAYS` branch, took a HIGH concern, and floored
+confidence at 0.0 — on every historical run, including Tychero, whose detection
+is the best S1 result this project has produced (precision 0.878).
+
+Verified by provenance rather than inspection: `git merge-base --is-ancestor`
+shows both scored runs (`987983d` Tychero, `49cf867` Zalgiriai) **predate**
+commit `e20742c` ("fix(harness): confidence 0.0 on a GOOD result — processor's
+clock was not frozen"), which added `patch("processor.datetime", frozen_cls)`
+alongside the existing sentinel patch. The fix IS in this session's HEAD, so the
+runs launched this session report honest scene ages.
+
+**Consequences, stated precisely:**
+1. **The three pre-existing confidence figures are not measurements of the
+   confidence system** and must not be used to argue either for or against
+   calibration. They measure a clock.
+2. **Confidence calibration remains UNVALIDATED**, and the reason has changed:
+   not "n=1" but "every historical run's confidence was floored by a harness
+   artifact until `e20742c`". Establishing calibration requires runs made at or
+   after that commit — which is what this session's runs are.
+3. **This is the second instance in one session of the same failure shape**: a
+   pipeline that completes successfully while a subsystem silently reports a
+   value that means something other than what its name implies (the first being
+   the scipy fallback). Both were found by asking "what would make this number
+   wrong?" rather than by reading the number.
+
+
+## STEP 3, completed — four variables tested, four failed. This is the finding.
+
+With the set enlarged to n=7 (Kanalia, Keramidi, Tychero, Žalgiriai, Fshat i
+Ri, Pakistan/Vanike Tarar, Kosutarica), four candidate predictors of detection
+accuracy were tested — pre-registered discipline held throughout: each was
+checked against the zero-skill/null baseline, none was fitted to the data
+after seeing scores, and a failed test was recorded rather than discarded to
+try the next one.
+
+| Variable | n | Best p-value (any metric) | Verdict |
+|---|---|---|---|
+| Post-peak acquisition latency | 7 | 0.565 | **Not significant** |
+| Flooded fraction of AOI | 6 | 0.276 | **Not significant** |
+| Terrain/drainage type (categorical) | 7 | groups don't separate; not tested statistically | **Rejected on inspection** |
+| Reference area (km2, absolute size) | 6 | 0.524 | **Not significant** |
+
+**Terrain type failed before reaching a p-value, and that failure is itself
+informative.** Coded from each event's own AOI description (delta / river
+plain / drained basin) — chosen BEFORE looking at scores, to avoid exactly the
+post-hoc-fitting trap the -1.0 dB threshold fell into earlier this project —
+the two events labelled `delta` are Tychero (F1 0.634, the BEST result) and
+Žalgiriai (F1 0.000, the WORST result). The single most extreme pair in the
+whole dataset sits in the same terrain category. If terrain type at this
+granularity drove outcomes, this pair should have behaved similarly. It did
+not, so the categorical test was abandoned rather than run to a foregone
+non-result.
+
+**Reference area** (Kanalia 18.971 km2, Tychero 23.341, Žalgiriai 11.977,
+Fshat i Ri 13.502, Pakistan 45.893, Kosutarica 1.617 — all pulled from
+persisted `metrics.reference_area_km2` in each run's results JSON, not
+estimated) correlates with nothing: p=0.52-0.55 against precision, recall, and
+F1 alike, with weak coefficients (|r| ~0.3) even setting significance aside.
+
+**The honest conclusion, stated as the finding it is:** no single tested
+variable — timing, flooded fraction, terrain category, or reference size —
+predicts S1 flood-detection accuracy at this sample size. Precision and F1
+range from 0.0 to 0.63/0.99 across seven Sentinel-verified events with no
+identified driver. This is not an absence of result; it is the result. A
+paper claiming any one of these four as "the" explanatory variable would not
+survive a reviewer re-running the same test this session ran.
+
+**What is NOT concluded from this:** that no such variable exists. n=7 with
+four tests already spent is close to the point where a fifth untested
+correlation on the same events becomes a multiple-comparisons liability rather
+than a discovery — each additional attempt raises the chance some correlation
+clears p<0.05 by chance alone, and reporting only the one that does without
+the other four would misrepresent what was actually found. The defensible
+statement is a scope limit: **this event set, at this size, cannot identify
+what separates a usable S1 flood detection from a failed one** — establishing
+that requires either a substantially larger event set or a variable this
+session did not have the data to test (rainfall/discharge timing, reference
+product vintage/maturity — see Žalgiriai's `DEL`-vs-`MONIT` note below).
+
+**A confound surfaced by the terrain-type failure, not chased further this
+session:** Žalgiriai's reference layer is explicitly noted (its own config
+caveat) as a `DEL` product — "first delineation, not a MONIT vintage, a single
+snapshot" — while Tychero's later-vintage snapshot may have captured a more
+complete flood extent independent of what the satellite could detect. This
+would be a ground-truth maturity confound, not a physical variable, and would
+mean part of the delta pair's divergence is a property of the REFERENCE, not
+the detector. Flagged for a future session; not tested here, since it would be
+a fifth correlation on the same seven points.
+
+
+## Trimmu/Muzaffargarh-area (EMSR838 AOI05) — a third distinct failure mode, found this session
+
+Ran clean: 99.78% coverage, `index_calibrated: True`, `index_units:
+dB_change_ratio`, fresh 3.95-day scene (correctly frozen clock), no HIGH
+concerns, **confidence 0.773 / `evidence_supports`** — the single highest,
+most confident result of the whole session.
+
+**And it reported zero hazard zones.**
+
+This is neither the scipy-fallback failure (Kosutarica run 1) nor the
+no-signal-guard rejection (Kosutarica re-run, Žalgiriai). Both of those are
+the pipeline correctly declining to report a number it doesn't trust. This
+run trusts its number — and its own diagnostic text contradicts the
+zero-zone result:
+
+    "The mean index over the classified water pixels (0.0169) is
+    significantly lower than the whole-AOI mean (0.0589), which is
+    physically consistent with a high-water-fraction scenario (88.71%)..."
+
+    Featherless validation: "The results are consistent with a major flood
+    event. No further validation is required."
+
+**88.71% of the AOI was classified as water. `total_zones` persisted as 0.**
+Confidence 0.773 was computed from evidence that includes this classification
+succeeding — the confidence machinery has no visibility into the fact that
+every single polygon it produced was about to be discarded downstream.
+
+**Root cause, traced to two thresholds set for different jobs:**
+
+    sar_change_detection.py: MIN_FLOOD_PATCH_PIXELS = 50   (~0.005 km2 @ 10m)
+    processor.py:            MIN_ZONE_AREA_KM2       = 0.5
+
+The first is the detector's OWN speckle filter — a connected patch of at
+least 50 pixels survives morphological opening and is considered real
+change, not noise. The second is `vectorize_classification`'s reportable-zone
+floor, applied per CONTIGUOUS polygon after the fact — **100x larger** than
+the detector's own bar. A patch can clear speckle filtering as genuine signal
+and still be silently dropped at vectorization for being under 0.5 km2.
+
+On a confluence floodplain (Trimmu, where the Chenab and Jhelum meet) at 20 m
+reference resolution, inundation plausibly follows a scattered network of
+channels and low-lying patches rather than one solid blob — exactly the
+condition where a high aggregate percentage can consist entirely of
+sub-0.5-km2 fragments. That is the leading explanation, not yet independently
+confirmed against the raw classification raster (out of scope to verify
+mid-session without re-running with instrumentation added).
+
+**What this is, precisely: the SAME failure SHAPE as the scipy incident,
+found by the SAME method (read the diagnostic text, don't trust the summary
+row), but a DIFFERENT root cause.** Not a missing dependency — a threshold
+mismatch between two stages of the same pipeline, neither of which is wrong
+in isolation, that together can turn a confidently-detected majority-flooded
+scene into a reported "no flood found." Confidence 0.773/`evidence_supports`
+on a result whose own raw statistics say something else is the third time
+this session that a summary field and the underlying evidence have disagreed.
+
+**Not fixed this session** — flagged precisely rather than patched under
+time pressure, per the discipline that has held for every other finding here.
+The candidate fix (lowering `MIN_ZONE_AREA_KM2`, or reporting an aggregate
+"high-fraction, fragmented" state distinct from `complete_zero_zones` when
+the raw classification and the vectorized zone count diverge this far) needs
+its own measurement pass, not a same-session guess — exactly the lesson the
+-1.0 dB threshold and the two discarded signal guards already taught this
+project.
+
+**Consequence for this event's score:** cannot be scored as IoU/precision/
+recall — `metrics_including_permanent_water` and `metrics_excluding_permanent_water`
+are both `null`, same shape as every other zero-zone event, correctly
+reported as undefined rather than a false 0.
+
+
+## CORRECTION — the Trimmu/Muzaffargarh finding was misdiagnosed, and the real cause is smaller and more precise
+
+The finding above ("a third failure mode... confidently reporting zero on
+88.71% water") was written before the reporting-layer bug was found. It is
+**partially wrong** and is corrected here rather than edited in place, per
+this log's own discipline of correcting by addendum, not by silent rewrite.
+
+**What was actually verified, in order:**
+
+1. **The raw imagery genuinely shows a real, coherent flood channel**,
+   independently confirmed against JRC Global Surface Water: 0.0% of the AOI
+   has >=75% historical water occurrence, 0.24% has >=50%, and only 10.58%
+   has ANY water history at all. The wide, connected dark channel visible in
+   `true_color.png` is real, new inundation — not a permanent river being
+   mistaken for a flood. This directly contradicts one candidate explanation
+   this log had not yet ruled out.
+
+2. **The `classification.png`/`index_map.png` PNGs, downloaded and inspected
+   pixel-by-pixel, show ~0.01% visible (non-transparent) pixels** —
+   consistent with the "only 1 polygon, 0.261 km2" dropped-zone finding, and
+   utterly inconsistent with an 88.71% water classification. Two possible
+   explanations were tested directly rather than assumed:
+   - **PNG decimation collapsing a real 88.71% signal to near-zero**: RULED
+     Out by direct simulation. `_decimate`'s stride-sampling was reproduced
+     on synthetic 88.71%-water arrays at the run's real grid size
+     (5162x4228) under both a uniform-random-scatter pattern and a
+     solid-block pattern; both survive decimation intact (88.71% ->
+     88.64-88.71%). Simple stride subsampling cannot mathematically produce
+     an 88.71% -> 0.01% collapse.
+   - **A genuine 100x reporting-layer inflation bug**: CONFIRMED. Traced to
+     `cross_validator.py`'s `_normalise_percent`, which scaled any value in
+     `(0, 1]` by 100x on the theory a caller might mistakenly supply a 0-1
+     fraction instead of a 0-100 percent (a historical fix from a prior,
+     unrelated incident, "islamabad-findings #3"). Direct test:
+     `_normalise_percent(0.8871)` returns `88.71`. All 5 `water_percent`
+     producer call sites in `processor.py` were audited and every one
+     computes `round(100.0 * n / total, 2)` — always 0-100 scale, never a
+     0-1 fraction — so the scaling branch had no legitimate input to protect
+     against in this codebase and fired ONLY on genuine low percentages,
+     inflating them 100x on every LLM prompt and every persisted
+     `concerns` diagnostic.
+
+3. **Fixed** (commit `2e23363`): `_normalise_percent` is now a pure
+   pass-through. The PRE-EXISTING regression test for this function asserted
+   the opposite of correct behaviour (`_normalise_percent(0.9) == 90.0`) —
+   it was validating the bug, not guarding against it. Rewritten to assert
+   `0.9` and the exact Muzaffargarh value `0.8871` both pass through
+   unchanged. Full satellite suite: 129/129 passed, no regressions.
+
+4. **Isolated the remaining question — is the low detected signal itself an
+   artifact of the 3-scene median baseline diluting a real signal, or is it
+   the actual detector output regardless of baseline depth?** Tested
+   directly, not assumed: a harness-only diagnostic tool
+   (`force_single_baseline_scene.py`, never touches production code) forced
+   `search_pre_event_same_orbit`'s `max_scenes` to 1, re-running the event
+   with the SIMPLEST possible comparison — one pre-event scene, one
+   post-event scene, no median. Confirmed in the run's own log: "Pre-event
+   baseline: 1 same-orbit scene(s) usable of 1 found."
+
+   **Result: bit-for-bit consistent with the 3-scene run.** 0 hazard zones,
+   1 dropped sub-threshold polygon at 0.237 km2 (vs. 0.261 km2 on the
+   3-scene run — noise-level difference, not a meaningfully different
+   signal), confidence 0.7651/`evidence_supports` (vs. 0.773 on the 3-scene
+   run). Baseline depth does NOT explain the low signal.
+
+**Corrected conclusion:** the raw imagery shows a real flood; the SAR
+change-detection threshold itself detects only a small fraction of it
+(~0.24 km2 out of a reference that maps a much larger extent), consistently
+regardless of whether the baseline is 1 scene or 3. This is now a
+**detector-sensitivity finding**, not a "confident on a contradiction"
+finding — the reporting-layer bug that produced the 88.71%/zero-zones
+CONTRADICTION is fixed and was never a property of the detector's actual
+output. What remains open, and is not investigated further this session, is
+WHY the change-detection threshold under-recovers signal on this scene
+specifically — a question for the detector's threshold logic
+(`sar_change_detection.py`'s `tiled_threshold`), not for the reporting or
+baseline-construction layers this session ruled out.
+
+**What this means for the confidence-tracking finding earlier in this log:**
+the observation that confidence (0.77) did not track a bad outcome still
+stands as a genuine finding, but its FRAMING changes. It is not "the system
+was confidently wrong about a large flood being missed" — the flood the
+detector reported (a small, real, ~0.24 km2 area) IS largely what was there
+to detect at this threshold's sensitivity. The confidence-calibration gap is
+narrower than first described: the system was not blind to an obvious
+majority-flooded scene; it under-detected a real but partially-missed flood
+and reported unwarranted confidence in that partial result.
+
+**Cost of this correction:** ~2.3 GB across the two single-baseline-scene
+attempts (one lost to a CDSE mid-transfer connection break, recorded and
+retried per the task's own infrastructure-failure protocol; the second
+succeeded at 1,309 MB). Total Muzaffargarh-area investigation across all
+attempts this session: ~10.7 GB.
+

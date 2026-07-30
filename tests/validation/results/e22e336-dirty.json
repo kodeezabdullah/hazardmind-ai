@@ -1,0 +1,51 @@
+{
+  "commit": "e22e336-dirty",
+  "commit_full": "e22e336b6bdda22c5676c4717967d2bb6b12c139",
+  "run_timestamp_utc": "2026-07-30T08:20:39.973934+00:00",
+  "events": [
+    {
+      "event_id": "9863d77c-10c4-4ceb-8918-1ce0e52668b6",
+      "location": "Kanalia, Magnesia, Greece",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "harness_forced_selection",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.1523,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": {
+        "iou": 0.0162,
+        "precision": 0.0565,
+        "recall": 0.0222,
+        "f1": 0.0318,
+        "predicted_area_km2": 3.016,
+        "reference_area_km2": 7.683,
+        "intersection_area_km2": 0.17,
+        "union_area_km2": 10.528
+      },
+      "metrics_excluding_permanent_water": {
+        "iou": 0.0174,
+        "precision": 0.0565,
+        "recall": 0.0246,
+        "f1": 0.0343,
+        "predicted_area_km2": 3.016,
+        "reference_area_km2": 6.926,
+        "intersection_area_km2": 0.17,
+        "union_area_km2": 9.772
+      },
+      "permanent_water_note": "excluding_permanent_water subtracts the supplied permanent-water polygon (JRC_GSW_occurrence_v1_4_2021 (occurrence >= 75%)) from both predicted and reference geometries before scoring.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Rescoped from the full Magnesia regional-unit AOI to Kanalia (a village on the drained Lake Karla basin) for the same reason Valencia was rescoped to Paiporta -- production-representative city-scale runtime, not a 100+ km multi-tile search.",
+        "Karla basin itself (the densest flood-polygon cluster, ~19.7 km^2 in one 0.05deg grid cell) has no OSM settlement polygon -- it is farmland/former lakebed, not a town. Kanalia is the nearest actual village and is the harness's best available city-scale anchor for this cluster.",
+        "Kanalia resolves as a zero-area OSM Point; boundary.py's own _ensure_areal buffers it to a ~6km-radius disk -- this is the SAME fallback the production pipeline already uses for other point-only cities (e.g. Davao, per agents/satellite/CLAUDE.md Step 10), not a harness-specific approximation.",
+        "DEL_MONIT01 is ~1 day post-event-peak -- closest-to-peak reference product found for this activation.",
+        "No permanent-water mask available for this AOI in this pass -- Lake Karla itself was historically a real lake (drained mid-20th century, periodically reflooded), so a 'permanent water' vs 'flood' distinction is UNUSUALLY blurry here specifically -- worth flagging prominently in the report, not just the generic caveat.",
+        "No Sentinel-2 product exists for this AOI/activation -- this event scores the S1/SAR path only, same as the original emsr692_magnesia.yaml.",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 3138.3589999999967,
+      "bytes_downloaded": 2594370597
+    }
+  ]
+}

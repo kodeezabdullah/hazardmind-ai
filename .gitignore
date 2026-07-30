@@ -176,3 +176,5 @@ tests/e2e/*.out
 # BASELINE_REPORT.md are NOT ignored — those are the actual deliverable.
 tests/validation/cache/
 tests/validation/*.out
+tests/validation/cache/pk/
+tests/validation/s6_*.out

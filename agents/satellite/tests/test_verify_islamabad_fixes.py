@@ -494,15 +494,27 @@ def test_low_nonzero_water_percent_raises_no_contradiction():
         bad(f"misleading percent-scale concern text present: {concern_texts}")
 
 
-def test_fractional_water_percent_normalised_not_misread_as_100x():
-    print("\n[Fix 3] _normalise_percent scales a 0-1 fraction to 0-100, "
-          "doesn't leave a real percent untouched incorrectly")
+def test_water_percent_passed_through_never_rescaled():
+    print("\n[Fix 3, REVISED 2026-07-30] _normalise_percent must NOT scale a "
+          "0<v<=1 value by 100x — every producer (processor.py, verified "
+          "2026-07-30) always computes water_percent/coverage_percent/"
+          "cloud_cover on a 0-100 scale, so a value like 0.9 is a genuine "
+          "0.9%, not a 0.9 fraction meaning 90%. The original version of this "
+          "test asserted the OPPOSITE (that 0.9 -> 90.0), which was itself "
+          "the Muzaffargarh/Trimmu bug (SCIENCE_LOG.md): a scene with a "
+          "genuine 0.8871% flooded fraction was reported to the confidence "
+          "tracker and every downstream LLM prompt as '88.71% flooded'.")
     from cross_validator import _normalise_percent
 
-    if _normalise_percent(0.9) == 90.0:
-        ok("0.9 (a fraction) normalises to 90.0")
+    if _normalise_percent(0.9) == 0.9:
+        ok("0.9 (a genuine low percent, e.g. 0.9% flooded) is left unchanged")
     else:
-        bad(f"0.9 normalised incorrectly: {_normalise_percent(0.9)}")
+        bad(f"0.9 was incorrectly rescaled: {_normalise_percent(0.9)}")
+
+    if _normalise_percent(0.8871) == 0.8871:
+        ok("0.8871 (the exact Muzaffargarh regression value) is left unchanged")
+    else:
+        bad(f"0.8871 was incorrectly rescaled: {_normalise_percent(0.8871)}")
 
     if _normalise_percent(30.0) == 30.0:
         ok("30.0 (already 0-100 scale) is left unchanged")
@@ -510,7 +522,7 @@ def test_fractional_water_percent_normalised_not_misread_as_100x():
         bad(f"30.0 was incorrectly rescaled: {_normalise_percent(30.0)}")
 
     if _normalise_percent(0.0) == 0.0:
-        ok("0.0 stays 0.0 (not treated as an ambiguous fraction)")
+        ok("0.0 stays 0.0")
     else:
         bad(f"0.0 was incorrectly rescaled: {_normalise_percent(0.0)}")
 

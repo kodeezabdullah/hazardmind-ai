@@ -2030,6 +2030,37 @@ def calculate_indices(
                     valid_mask=mask,
                     orbit_direction=orbit_direction or "DESCENDING",
                 )
+            except ImportError as exc:
+                # A MISSING DEPENDENCY IS A DEPLOYMENT FAULT, NOT A DATA
+                # CONDITION, and it must never be reported as one.
+                #
+                # Found live 2026-07-30 (Kosutarica, EMSR275): scipy was absent
+                # from the harness venv, `from scipy.ndimage import ...` inside
+                # sar_change_detection raised ImportError, this handler caught
+                # it as an ordinary failure, and the run fell through to the
+                # uncalibrated absolute-threshold path. It persisted
+                # `index_units: "dB_uncalibrated"`, `affected_area_km2: 0.0`,
+                # `total_zones: 0` and completed as `complete_zero_zones` — a
+                # zero that reads exactly like "no flood detected" but was
+                # really "the detector was never installed". Two hours and
+                # 2,636 MB produced a number that would have entered the paper
+                # as a scored result.
+                #
+                # Raising is correct here even though every other failure in
+                # this block degrades: a data problem (misaligned baseline, too
+                # few reference scenes) is a legitimate reason to fall back and
+                # say so, whereas a missing import means the deployment cannot
+                # perform the analysis it claims to perform, on ANY input. The
+                # audit fields alone were not enough — they recorded the
+                # fallback faithfully and it still took a log grep to notice.
+                raise RuntimeError(
+                    "SAR change detection is unavailable in this deployment: "
+                    f"{exc}. This is a missing dependency (see "
+                    "agents/satellite/requirements.txt), not a property of the "
+                    "imagery. Refusing to fall back to the uncalibrated "
+                    "absolute-threshold path, which would report a physically "
+                    "meaningless zero as a flood result."
+                ) from exc
             except Exception as exc:  # noqa: BLE001
                 logger.warning("SAR change detection failed (%s)", exc)
                 cd = None
@@ -2752,6 +2783,20 @@ def vectorize_classification(
     total_area = 0.0
     permanent_water_area = 0.0
 
+    # OBSERVATION ONLY — added 2026-07-30 to diagnose the Muzaffargarh/Trimmu
+    # finding (SCIENCE_LOG.md, "a third failure mode"): a scene diagnostically
+    # described as 88.71% water reported total_zones=0. The candidate cause is
+    # MIN_ZONE_AREA_KM2 (0.5 km2, ~100x the detector's own 50-pixel/~0.005 km2
+    # speckle floor) discarding every individual contiguous patch of a
+    # genuinely fragmented flood. This counter changes NO discard behaviour —
+    # it only records what would have been kept vs dropped, and at what size,
+    # so a real noise event (Kanalia, ROC AUC 0.487, proven signal-free) can
+    # be compared against Muzaffargarh's pattern before any threshold is
+    # touched. Read via `vectorize_classification`'s return value
+    # (`_dropped_zone_diagnostics`), never logged by itself, so it cannot
+    # silently change downstream behaviour by existing.
+    dropped_diagnostics = {"count": 0, "total_area_km2": 0.0, "sizes_km2": []}
+
     def _polys_for(value):
         """Yield (polygon, area_km2) for every zone of one class value."""
         sel = (arr == value).astype("uint8")
@@ -2766,6 +2811,9 @@ def vectorize_classification(
                 continue
             area_km2 = round(_polygon_area_km2(poly, "EPSG:4326"), 3)
             if area_km2 < MIN_ZONE_AREA_KM2:
+                dropped_diagnostics["count"] += 1
+                dropped_diagnostics["total_area_km2"] += area_km2
+                dropped_diagnostics["sizes_km2"].append(area_km2)
                 continue
             yield poly, area_km2
 
@@ -2827,6 +2875,15 @@ def vectorize_classification(
         len(features), total_area, len(permanent_water_features),
         permanent_water_area,
     )
+    if dropped_diagnostics["count"]:
+        logger.info(
+            "Dropped %d sub-%.3f-km2 polygon(s) at vectorization, %.3f km2 "
+            "aggregate (never counted as flood; see "
+            "_dropped_zone_diagnostics for the size distribution — this is "
+            "observation only, it changed no discard decision)",
+            dropped_diagnostics["count"], MIN_ZONE_AREA_KM2,
+            dropped_diagnostics["total_area_km2"],
+        )
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -2841,6 +2898,15 @@ def vectorize_classification(
         },
         "permanent_water_area_km2": round(permanent_water_area, 3),
         "total_water_area_km2": round(total_area + permanent_water_area, 3),
+        # OBSERVATION ONLY (2026-07-30) — see the comment at
+        # dropped_diagnostics's definition above. Additive field; every
+        # existing key and value in this dict is unchanged.
+        "_dropped_zone_diagnostics": {
+            "count": dropped_diagnostics["count"],
+            "total_area_km2": round(dropped_diagnostics["total_area_km2"], 3),
+            "sizes_km2": sorted(dropped_diagnostics["sizes_km2"], reverse=True),
+            "min_zone_area_km2_threshold": MIN_ZONE_AREA_KM2,
+        },
     }
 
 

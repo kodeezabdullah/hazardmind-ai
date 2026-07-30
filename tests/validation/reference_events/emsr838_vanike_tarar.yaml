@@ -1,0 +1,68 @@
+event_key: emsr838_vanike_tarar
+activation_code: EMSR838
+aoi_number: 1
+aoi_name: "Vanike Tarar (Hafizabad / Chenab plain) — Pakistan monsoon flood, Aug 2025"
+country: Pakistan
+disaster_type: flood
+status: confirmed
+
+# ---------------------------------------------------------------------------
+# THE PAKISTAN CASE STUDY — and the qualification that nearly rejected it.
+#
+# This activation FAILS the sensor gate on two of its three products and
+# PASSES on the third. The distinction was found by reading each product's
+# own `source.dbf` and resolving the flood polygons' `dmg_src_id` foreign key
+# against it — NOT by reading the activation page, which describes the whole
+# activation uniformly.
+#
+#   EMSR838 AOI01 DEL_MONIT01  post-event = COSMO-SkyMed 2nd Gen, 3.0 m   REJECT
+#   EMSR838 AOI02 DEL_MONIT01  post-event = ICEYE, 2.0 m                  REJECT
+#   EMSR838 AOI01 DEL_PRODUCT  post-event = Sentinel-1, 20.0 m            ACCEPT
+#
+# In every one of those products the Sentinel-2 entry is the PRE-event
+# source (18/06/2025 and 10/06/2025) — exactly the Townsville trap
+# (EMSR342), where a Sentinel-2 row in source.dbf was mistaken for post-event
+# provenance and cost a full multi-GB run before the disqualifier surfaced.
+#
+# The accepted product's flood layer is traced end-to-end:
+#   observedEventA_v1.shp -> all 1,291 polygons carry dmg_src_id = 2
+#   source_v1.dbf         -> src_id 2 = Sentinel-1, 28/08/2025, Post-event
+# so every polygon scored against is Sentinel-delineated, with no mixing.
+#
+#   GATE 1  POST-EVENT SENSOR is Sentinel-1. PASS (traced via dmg_src_id).
+#   GATE 2  FLOODED FRACTION at the pipeline's OWN resolved AOI = 54.42%
+#           (61.452 km2 of 112.916 km2) — the HIGHEST in the whole qualified
+#           set (previous best: Tychero 31.87%). Measured by loading the
+#           reference through reference_loader and clipping it to the AOI the
+#           pipeline actually resolves, NOT at the theoretical densest-disk
+#           position (which reads 80.03% but is not where the run will look).
+#   GATE 3  SAME-ORBIT PRE-EVENT BASELINE: relative orbit 107 gives
+#           post-event 2025-08-28T01:07 (the reference's OWN acquisition
+#           date) with pre-event same-orbit passes 2025-08-16, 2025-08-04
+#           and 2025-07-23. Verified by direct CDSE catalogue query.
+# ---------------------------------------------------------------------------
+
+pipeline_location: "Vanike Tarar, Hafizabad District, Punjab, Pakistan"
+
+clip_reference_to_pipeline_boundary: true
+
+event_peak_date: "2025-08-26"
+
+reference_products:
+  sentinel1:
+    product_id: "DEL_PRODUCT"
+    sensor: "Sentinel-1"
+    acquisition_datetime_utc: "2025-08-28T01:07:44Z"
+    download_url: "https://rapidmapping.emergency.copernicus.eu/backend/EMSR838/AOI01/DEL_PRODUCT/EMSR838_AOI01_DEL_PRODUCT_v1.zip"
+    vector_layer_of_record: "observedEventA"
+    search_window_center_utc: "2025-08-28T01:07:44Z"
+    search_window_days: 5
+
+caveats:
+  - "Post-event sensor is Sentinel-1 — VERIFIED by reading the product's own source.dbf AND resolving the flood layer's dmg_src_id (=2) against it, not inferred from the activation page. Two SIBLING products of this same activation fail this gate (COSMO-SkyMed 3 m on AOI01 DEL_MONIT01, ICEYE 2 m on AOI02 DEL_MONIT01); their Sentinel-2 rows are PRE-event, the Townsville trap exactly."
+  - "SENSOR RESOLUTION CAVEAT, unique to this event: source.dbf records the post-event Sentinel-1 at 20.0 m, not the 10 m that every other event in this harness uses. The reference is therefore delineated at COARSER resolution than our own 10 m prediction. This is the OPPOSITE direction of the Townsville/Amatrice disqualifier (reference finer than prediction) and does not invalidate scoring, but it does mean fine-scale disagreement at flood margins is expected and should not be read as detector error. State this whenever these numbers are compared."
+  - "Layer of record is `observedEventA` — the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumFloodExtentA`, which Kanalia/Insh use). Same snapshot semantics as Keramidi/Tychero/Fshat i Ri/Kosutarica. A prediction from a different date will disagree partly for TIMING reasons, not only accuracy."
+  - "Flooded fraction at the AOI the pipeline actually resolves is 54.42% (61.452 km2 of 112.916 km2) — the highest in the qualified set, and far above the ~5% Paiporta floor. Verified by loading the reference through reference_loader.load_reference_geometry and clipping to the resolved AOI, not by assuming the densest-disk figure (80.03%), which sits ~8 km west of where 'Vanike Tarar' resolves and is therefore not the fraction this run will be scored against. Total mapped flood across the whole AOI01 product is 875.92 km2."
+  - "event_peak_date 2025-08-26 is the Chenab/Ravi riverine peak in Hafizabad District, set 2 days before the reference acquisition. The activation's own headline date (15 August 2025) refers to the FLASH-FLOOD onset in KP/upper Punjab, which is a different, earlier phase of the same monsoon season and a different part of the country — using it would overstate post-peak latency by ~13 days and misattribute the result."
+  - "DISAMBIGUATION: 'Vanike Tarar' resolves as a zero-area Point at 32.2179,73.5855 (the pipeline's _ensure_areal buffer makes it areal, same as Kanalia); it is the nearest Nominatim-resolvable settlement to the densest-cluster centre (32.22001,73.50592). Pinned via aoi_pin.py so Nominatim drift cannot move it between runs."
+  - "RURAL/open-terrain event on the Chenab flood plain. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section)."
