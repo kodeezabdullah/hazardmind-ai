@@ -23,6 +23,7 @@ return — see pipeline_runner.py's module docstring for why this matters.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import traceback
@@ -32,6 +33,22 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Found 2026-07-30: every `logger.info(...)` call anywhere in the pipeline
+# (agents/satellite/*.py) was SILENTLY DROPPED in this harness. Python's root
+# logger with no handler attached defaults to WARNING via
+# `logging.lastResort`, so only `logger.warning`/`logger.error` ever reached
+# the console — `logger.info` calls, including diagnostic instrumentation
+# added specifically to investigate a live finding (SCIENCE_LOG.md, the
+# Muzaffargarh/Trimmu dropped-zone counters), were invisible. Two full re-runs
+# (~5.2 GB) were spent chasing that instrumentation before this gap was
+# caught — this fix exists so that mistake is not repeated. INFO, not DEBUG:
+# loud enough to be useful, not so loud it drowns the summary table.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 
 
 def _fix_proj_lib() -> None:
