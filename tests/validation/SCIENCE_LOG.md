@@ -1683,3 +1683,55 @@ The honest statement is that this event set cannot separate acquisition timing,
 layer semantics, and basin hydrology — and that is a property of the available
 references, not something more compute fixes.
 
+## STEP 4 — confidence vs accuracy: the n was never actually n, and here is why
+
+The brief's framing was that confidence calibration "has been stuck at n=1 for
+the whole project" and that an enlarged event set would finally make it
+testable. **On the pre-existing scored runs it is worse than untestable — the
+channel is CONSTANT.**
+
+| Event | measured F1 | reported confidence | basis |
+|---|---|---|---|
+| Kanalia | 0.0165 | **0.000** | `evidence_weak` |
+| Tychero | **0.6340** | **0.000** | `evidence_weak` |
+| Zalgiriai | 0.0000 | **0.000** | `evidence_weak` |
+
+**Variance in reported confidence across an F1 range of 0.0000-0.6340: exactly
+0.0.** A constant has no correlation with anything, so no calibration claim is
+possible from these three points regardless of how many more are added
+alongside them — which is a stronger and more useful statement than "n is too
+small".
+
+**But the cause was diagnosed rather than reported as a calibration failure,
+and it is a HARNESS artifact, not a defect in the confidence machinery.**
+
+`processor._finish_success` computes scene age as
+`datetime.now(timezone.utc) - newest_acquisition`. The harness freezes the
+scene-SEARCH clock so the catalogue query targets the historical window, but on
+these runs it did not freeze `processor`'s clock. So a 2018 event analysed in
+2026 reported `scene_age_days: 3040.0`, tripped the
+`> 2 * SCENE_AGE_ANOMALY_DAYS` branch, took a HIGH concern, and floored
+confidence at 0.0 — on every historical run, including Tychero, whose detection
+is the best S1 result this project has produced (precision 0.878).
+
+Verified by provenance rather than inspection: `git merge-base --is-ancestor`
+shows both scored runs (`987983d` Tychero, `49cf867` Zalgiriai) **predate**
+commit `e20742c` ("fix(harness): confidence 0.0 on a GOOD result — processor's
+clock was not frozen"), which added `patch("processor.datetime", frozen_cls)`
+alongside the existing sentinel patch. The fix IS in this session's HEAD, so the
+runs launched this session report honest scene ages.
+
+**Consequences, stated precisely:**
+1. **The three pre-existing confidence figures are not measurements of the
+   confidence system** and must not be used to argue either for or against
+   calibration. They measure a clock.
+2. **Confidence calibration remains UNVALIDATED**, and the reason has changed:
+   not "n=1" but "every historical run's confidence was floored by a harness
+   artifact until `e20742c`". Establishing calibration requires runs made at or
+   after that commit — which is what this session's runs are.
+3. **This is the second instance in one session of the same failure shape**: a
+   pipeline that completes successfully while a subsystem silently reports a
+   value that means something other than what its name implies (the first being
+   the scipy fallback). Both were found by asking "what would make this number
+   wrong?" rather than by reading the number.
+
