@@ -1,0 +1,50 @@
+{
+  "commit": "40e7131-dirty",
+  "commit_full": "40e7131960525fb5dd4a679435aa3891b6884510",
+  "run_timestamp_utc": "2026-07-30T06:06:24.925949+00:00",
+  "events": [
+    {
+      "event_id": "4d206e30-9cb9-42d1-872a-792101b827d1",
+      "location": "Fshat i Ri, Northern Albania, Albania",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "harness_forced_selection",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.7408,
+      "confidence_basis": "evidence_supports",
+      "metrics_including_permanent_water": {
+        "iou": 0.2756,
+        "precision": 0.4001,
+        "recall": 0.4697,
+        "f1": 0.4321,
+        "predicted_area_km2": 15.854,
+        "reference_area_km2": 13.502,
+        "intersection_area_km2": 6.342,
+        "union_area_km2": 23.014
+      },
+      "metrics_excluding_permanent_water": {
+        "iou": 0.2756,
+        "precision": 0.4001,
+        "recall": 0.4697,
+        "f1": 0.4321,
+        "predicted_area_km2": 15.854,
+        "reference_area_km2": 13.502,
+        "intersection_area_km2": 6.342,
+        "union_area_km2": 23.014
+      },
+      "permanent_water_note": "excluding_permanent_water subtracts the supplied permanent-water polygon (JRC_GSW_occurrence_v1_4_2021 (occurrence >= 75%)) from both predicted and reference geometries before scoring.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 at 10 m \u2014 VERIFIED by reading the product's own source.dbf, not inferred from the activation page.",
+        "Reference clipped to the AOI is 13.502 km2 = 18.69% of 72.23 km2 \u2014 comfortably above the ~5% Paiporta floor where a perfect detector still scores near zero.",
+        "Layer of record is `observed_event_a` \u2014 the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumWaterExtentA`, which Kanalia/Insh use). A prediction from a different date will disagree partly for TIMING reasons, not only accuracy. State this whenever these numbers are compared against Kanalia's.",
+        "DISAMBIGUATION REQUIRED, same trap as Kanalia/Keramidi: bare 'Fshat i Ri, Albania' resolves elsewhere and clips the reference to 0.000 km2 (0.00%), which would have been reported as a detector failure. 'Fshat i Ri, Northern Albania, Albania' gives 13.502 km2. Verified by direct Nominatim query 2026-07-29.",
+        "RURAL/open-terrain event. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section).",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 4782.047000000006,
+      "bytes_downloaded": 3174443146
+    }
+  ]
+}

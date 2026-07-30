@@ -1,0 +1,24 @@
+{
+  "event": "Keramidi",
+  "drop_threshold_db": -4.2,
+  "rise_threshold_db": 2.816,
+  "drop_px_count": 2500,
+  "rise_px_count": 47045,
+  "drop_only_score": {
+    "tp": 459,
+    "fp": 2041,
+    "fn": 119916,
+    "precision": 0.1836,
+    "recall": 0.0038,
+    "f1": 0.0075
+  },
+  "bidirectional_score": {
+    "tp": 26695,
+    "fp": 18853,
+    "fn": 93680,
+    "precision": 0.5861,
+    "recall": 0.2218,
+    "f1": 0.3218
+  },
+  "f1_improvement_factor": 42.91
+}

@@ -1,0 +1,43 @@
+{
+  "commit": "40e7131-dirty",
+  "commit_full": "40e7131960525fb5dd4a679435aa3891b6884510",
+  "run_timestamp_utc": "2026-07-30T06:04:04.298462+00:00",
+  "events": [
+    {
+      "event_id": "19cf60bd-5d01-4da6-bb74-2f56a7e8be5d",
+      "location": "Vanike Tarar, Hafizabad District, Punjab, Pakistan",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "no_s2_candidates",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.6367,
+      "confidence_basis": "evidence_weak",
+      "metrics_including_permanent_water": {
+        "iou": 0.0297,
+        "precision": 0.9944,
+        "recall": 0.0297,
+        "f1": 0.0576,
+        "predicted_area_km2": 1.37,
+        "reference_area_km2": 45.893,
+        "intersection_area_km2": 1.362,
+        "union_area_km2": 45.901
+      },
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "No permanent-water mask supplied for this event \u2014 excluding-permanent-water metrics could not be computed. Treat the including-permanent-water numbers as an upper bound, not the real flood-detection accuracy.",
+      "pipeline_status": "complete",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 \u2014 VERIFIED by reading the product's own source.dbf AND resolving the flood layer's dmg_src_id (=2) against it, not inferred from the activation page. Two SIBLING products of this same activation fail this gate (COSMO-SkyMed 3 m on AOI01 DEL_MONIT01, ICEYE 2 m on AOI02 DEL_MONIT01); their Sentinel-2 rows are PRE-event, the Townsville trap exactly.",
+        "SENSOR RESOLUTION CAVEAT, unique to this event: source.dbf records the post-event Sentinel-1 at 20.0 m, not the 10 m that every other event in this harness uses. The reference is therefore delineated at COARSER resolution than our own 10 m prediction. This is the OPPOSITE direction of the Townsville/Amatrice disqualifier (reference finer than prediction) and does not invalidate scoring, but it does mean fine-scale disagreement at flood margins is expected and should not be read as detector error. State this whenever these numbers are compared.",
+        "Layer of record is `observedEventA` \u2014 the extent delineated at the acquisition INSTANT, not a cumulative maximum (`maximumFloodExtentA`, which Kanalia/Insh use). Same snapshot semantics as Keramidi/Tychero/Fshat i Ri/Kosutarica. A prediction from a different date will disagree partly for TIMING reasons, not only accuracy.",
+        "Flooded fraction at the AOI the pipeline actually resolves is 54.42% (61.452 km2 of 112.916 km2) \u2014 the highest in the qualified set, and far above the ~5% Paiporta floor. Verified by loading the reference through reference_loader.load_reference_geometry and clipping to the resolved AOI, not by assuming the densest-disk figure (80.03%), which sits ~8 km west of where 'Vanike Tarar' resolves and is therefore not the fraction this run will be scored against. Total mapped flood across the whole AOI01 product is 875.92 km2.",
+        "event_peak_date 2025-08-26 is the Chenab/Ravi riverine peak in Hafizabad District, set 2 days before the reference acquisition. The activation's own headline date (15 August 2025) refers to the FLASH-FLOOD onset in KP/upper Punjab, which is a different, earlier phase of the same monsoon season and a different part of the country \u2014 using it would overstate post-peak latency by ~13 days and misattribute the result.",
+        "DISAMBIGUATION: 'Vanike Tarar' resolves as a zero-area Point at 32.2179,73.5855 (the pipeline's _ensure_areal buffer makes it areal, same as Kanalia); it is the nearest Nominatim-resolvable settlement to the densest-cluster centre (32.22001,73.50592). Pinned via aoi_pin.py so Nominatim drift cannot move it between runs.",
+        "RURAL/open-terrain event on the Chenab flood plain. Like every other scoreable event in this harness, it does NOT close the urban-validation gap (see SCIENCE_LOG's EMS reference-ceiling section).",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result."
+      ],
+      "elapsed_seconds": 4662.656000000003,
+      "bytes_downloaded": 2624337564
+    }
+  ]
+}

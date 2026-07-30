@@ -1,0 +1,35 @@
+{
+  "commit": "03ac738-dirty",
+  "commit_full": "03ac7387802f21e168f324900186059b472be899",
+  "run_timestamp_utc": "2026-07-30T09:01:36.902453+00:00",
+  "events": [
+    {
+      "event_id": "fb59d242-a7ef-4e54-b87b-eeedaac69ae5",
+      "location": "Ahmedpur Sial, Jhang District, Punjab, Pakistan",
+      "satellite_type": "sentinel-1",
+      "satellite_type_reason": "harness_forced_selection",
+      "coverage_tier": 1,
+      "temporal_spread_days": 0,
+      "reported_confidence": 0.773,
+      "confidence_basis": "evidence_supports",
+      "metrics_including_permanent_water": null,
+      "metrics_excluding_permanent_water": null,
+      "permanent_water_note": "",
+      "pipeline_status": "complete_zero_zones",
+      "pipeline_error": null,
+      "harness_notes": [
+        "Post-event sensor is Sentinel-1 \u2014 VERIFIED by reading the product's own source.dbf AND resolving observedEventA's dmg_src_id (=6, all 1,338 polygons) against it, not inferred from the activation page. As with Vanike Tarar (same activation), the Sentinel-2 row is PRE-event (13/06/2025) \u2014 the Townsville trap, checked and cleared a second time within EMSR838.",
+        "GEOGRAPHIC NOTE, stated plainly: this AOI is the Chenab-Jhelum confluence flood zone near the Trimmu Barrage, which the requester referred to by the nearby district name 'Muzaffargarh'. The densest flood cluster and the nearest Nominatim-resolvable areal settlement ('Ahmedpur Sial') both sit in Jhang District, on the district boundary \u2014 this is NOT Muzaffargarh city itself, and the AOI should be described as 'the Trimmu/Chenab-Jhelum confluence area near Muzaffargarh', not 'Muzaffargarh city'.",
+        "SENSOR RESOLUTION CAVEAT, shared with Vanike Tarar: source.dbf records the post-event Sentinel-1 at 20.0 m, coarser than this harness's usual 10 m. Opposite direction of the Townsville/Amatrice disqualifier; margin disagreement is expected, not detector error.",
+        "Layer of record is `observedEventA` (snapshot at the acquisition instant), not `maximumFloodExtentA` (cumulative maximum, dmg_src_id=997/unattributed). Same snapshot semantics as Keramidi/Tychero/Fshat i Ri/Kosutarica/Vanike Tarar.",
+        "Flooded fraction 29.91-40.86% depending on exact AOI centring (buffer vs. densest-disk) \u2014 second-highest in the qualified set. Verify the ACTUAL run's reference_loader-clipped fraction against the pipeline's real resolved AOI before interpreting scores, per the Vanike Tarar precedent (theoretical vs. actual differed there too).",
+        "event_peak_date 2025-08-30 is estimated from the activation's own timeline (declared 2025-08-29, this AOI's first DEL product and 4 MONIT revisions through early September) rather than read off a single authoritative source \u2014 record any better-sourced peak date if found.",
+        "RURAL/open-terrain event on the Chenab-Jhelum confluence floodplain. Does not close the urban-validation gap.",
+        "SATELLITE SELECTION FORCED to sentinel-1 for this run (tests/validation/forced_satellite_override.py) \u2014 this bypasses select_satellite's real cloud-aware decision entirely; the DB row's selection_reason will read 'harness_forced_selection', never a real selection_reason value, so this cannot be mistaken for an organically-selected result.",
+        "Pipeline completed but produced zero hazard zones \u2014 IoU/precision/recall against the EMS reference are undefined (0/0), not a score of 0."
+      ],
+      "elapsed_seconds": 2106.436999999991,
+      "bytes_downloaded": 2605476730
+    }
+  ]
+}
