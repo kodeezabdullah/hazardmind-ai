@@ -1632,3 +1632,54 @@ prediction. That is the inverse of the Townsville/Amatrice disqualifier
 invalidate scoring — but margin disagreement is expected and must not be read
 as detector error.
 
+## STEP 3 — the analysis plan, pre-registered before the new numbers landed
+
+Recorded here BEFORE the Pakistan / Fshat i Ri / Kosutarica-rerun results were
+available, so the verdict cannot be fitted to whatever came back. The brief's
+own closing instruction — "if a relationship appears, it is a finding to
+report, not a parameter to fit" — cuts both ways: a null result must be equally
+un-fittable.
+
+**What would count as the relationship holding:**
+- a negative correlation between post-peak latency and precision, AND
+- p < 0.05 at the stated n, AND
+- no single point whose removal flips the sign.
+
+**What would NOT count, and why:**
+- **A correlation without a p-value.** Four or five points ordering correctly
+  is the null hypothesis's most common appearance, not evidence against it.
+- **Pearson alone.** One influential point manufactures |r| > 0.9 at this n, so
+  Spearman is reported alongside every figure.
+- **Dropping an inconvenient event.** Tychero is the point that refutes the
+  hypothesis; excluding it as an outlier would be the whole finding discarded
+  to save the framing.
+
+**The confound the brief flagged, stated up front:** the scored events do NOT
+share reference-layer semantics. Kanalia uses `maximumWaterExtentA` (a
+CUMULATIVE MAXIMUM over the whole event); Keramidi, Tychero, Zalgiriai,
+Kosutarica and the Pakistan case study use `observed_event_a` / `observedEventA`
+(a SNAPSHOT at one acquisition instant). A snapshot reference and a snapshot
+prediction can agree; a cumulative-maximum reference cannot be fully recovered
+from any single acquisition, so **recall is structurally capped for
+`maximumWaterExtentA` events regardless of detector quality or timing.**
+
+Kanalia is the lowest-scoring event AND the only cumulative-maximum one. That
+means layer semantics and latency are **confounded in this set**, and any
+latency claim drawn from it is also a layer-semantics claim. With n this small
+the two cannot be separated — which is itself worth reporting, because it
+constrains what the paper may assert from these events.
+
+**Checked, and the confound does NOT resolve in either direction.** If layer
+semantics were the dominant explanation, snapshot events should cluster high and
+the cumulative event low. They do not: **Zalgiriai is a SNAPSHOT event and
+scores 0.0** — the same floor as cumulative-max Kanalia — while snapshot Tychero
+scores 0.878 precision. Snapshot recall spans 0.0000-0.4960, straddling
+Kanalia's 0.0096 entirely.
+
+So low recall is not exclusive to `maximumWaterExtentA`, and the cumulative
+group has n=1, which cannot establish a group difference on its own. **The
+confound is real and UNRESOLVED, not resolved in favour of either explanation.**
+The honest statement is that this event set cannot separate acquisition timing,
+layer semantics, and basin hydrology — and that is a property of the available
+references, not something more compute fixes.
+
