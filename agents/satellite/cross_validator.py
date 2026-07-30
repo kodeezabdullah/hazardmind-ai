@@ -650,29 +650,45 @@ def _coerce_float(value: Any) -> Optional[float]:
 
 
 def _normalise_percent(value: Any) -> Optional[float]:
-    """Coerce a percent-contract field (water_percent/coverage_percent/
-    cloud_cover — all documented as 0-100 by their producers in
-    processor.py/sentinel.py) to that 0-100 scale, tolerating a caller that
-    mistakenly supplies a 0-1 fraction instead.
+    """Pass a percent-contract field (water_percent/coverage_percent/
+    cloud_cover) through unchanged — every producer in processor.py/
+    sentinel.py is verified (2026-07-30 audit, all 5 `water_percent` call
+    sites) to always compute `round(100.0 * n / total, 2)`, i.e. always
+    0-100, never a 0-1 fraction.
 
-    islamabad-findings #3 — a value in (0, 1] read as though it were already
-    0-100 renders as e.g. "90% classified wet_soil" when the real figure was
-    a fraction (0.9, i.e. genuinely 90%, or worse, 0.09 meaning 9% read as
-    "9%" — coincidentally correct-looking but for the wrong reason) or, more
-    dangerously, silently fails every `> 20`/`> 60` threshold check for a
-    real low-but-nonzero reading, masking a genuine partial result as "no
-    evidence" instead of raising the false-contradiction alarm this was
-    previously producing. Any 0 < value <= 1 is treated as a fraction and
-    scaled up; 0 and values > 1 are assumed already on the 0-100 scale (a
-    genuine 0% needs no conversion, and no valid percent contract in this
-    codebase produces a fraction greater than 1).
+    REGRESSION FIXED 2026-07-30 (Muzaffargarh/Trimmu, EMSR838 AOI05). This
+    function used to scale any `0 < v <= 1` by 100x on the theory that a
+    caller might mistakenly supply a fraction (islamabad-findings #3, see
+    git history for the original rationale). That heuristic could not
+    distinguish "a genuine fraction miscalled in" from "a genuine LOW
+    percentage, which is numerically indistinguishable from a fraction in
+    the (0, 1] range" — and no real caller in this codebase has ever sent a
+    fraction, so it fired ONLY on genuine low percentages. A scene where SAR
+    change detection genuinely classified 0.8871% of the AOI as water
+    (visually confirmed: the exported classification.png rendered ~0.01% of
+    pixels, matching 0.8871% at PNG decimation precision) was reported to
+    every downstream consumer — the confidence-tracker prompt, the LLM
+    cross-check, and the persisted `concerns` diagnostic — as "88.71%
+    flooded," a 100x inflation that read as a major flood in a scene the
+    actual classification barely touched.
+
+    Proven by direct measurement, not assumption: `_normalise_percent(0.8871)`
+    returned `88.71`; simple array-stride decimation (`_decimate` in
+    processor.py) was independently ruled out as the cause by reproducing it
+    on synthetic 88.71%-water arrays, which survive decimation intact
+    (88.71% -> 88.64-88.71%, never collapsing to 0.01%) — see
+    test_normalise_percent_no_fraction_scaling.py for both proofs.
+
+    No caller in this codebase has EVER been observed to supply a genuine
+    0-1 fraction (verified: every `water_percent`/`coverage_percent`/
+    `cloud_cover` producer uses `round(100.0 * n / total, 2)`), so the
+    scaling branch protected against a defect that does not exist in this
+    codebase while actively corrupting every genuine low-percentage
+    reading — which, for a life-safety flood-extent tool, is exactly the
+    reading that most needs to stay accurate (a small real flood must never
+    be reported as if it were a large one).
     """
-    v = _coerce_float(value)
-    if v is None:
-        return None
-    if 0 < v <= 1:
-        return v * 100.0
-    return v
+    return _coerce_float(value)
 
 
 if __name__ == "__main__":
