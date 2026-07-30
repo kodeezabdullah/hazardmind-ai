@@ -966,7 +966,21 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # the temp dir. The downloaded .zip product archives are kept (see
         # cleanup_event_temp) so a re-process reuses the cached download. Runs
         # from this sync pipeline via asyncio.run; failures are non-fatal.
-        asyncio.run(cleanup_event_temp(event_id))
+        #
+        # DIAGNOSTIC OVERRIDE (2026-07-30, HAZARDMIND_KEEP_TEMP=1): several
+        # figure-generation scripts for the paper (phase0_detectability_ceiling.py
+        # and its Fig-2 bidirectional-comparison sibling) need the raw clipped
+        # VV arrays AFTER a run completes, and re-downloading the same scenes
+        # 3+ times already happened this session because cleanup ran before
+        # the arrays were exported. Gated by an env var, not a permanent
+        # behaviour change — production runs are unaffected.
+        if os.environ.get("HAZARDMIND_KEEP_TEMP") != "1":
+            asyncio.run(cleanup_event_temp(event_id))
+        else:
+            logger.info(
+                "[Cleanup] SKIPPED for %s — HAZARDMIND_KEEP_TEMP=1 (diagnostic mode)",
+                event_id,
+            )
 
         # Phase 3b (science/detection-pass) — name the permanent water bodies
         # in the AOI, so downstream agents/prompts know the baseline water is
@@ -1340,12 +1354,21 @@ def _run_pipeline_sync(params: ProcessDisasterInput) -> str:
         # cleaned above and kept the .zip cache; here we catch the failure and
         # exception paths, which previously left the multi-GB working tree on
         # disk). cleanup_event_temp is safe to call when the dir is already gone.
-        try:
-            asyncio.run(cleanup_event_temp(event_id))
-        except Exception as _cleanup_exc:  # noqa: BLE001 - never mask the result
-            logger.warning(
-                "[Cleanup] finally-path cleanup failed for %s: %s",
-                event_id, _cleanup_exc,
+        #
+        # DIAGNOSTIC OVERRIDE (2026-07-30, HAZARDMIND_KEEP_TEMP=1) — same
+        # reasoning as the success-path skip above.
+        if os.environ.get("HAZARDMIND_KEEP_TEMP") != "1":
+            try:
+                asyncio.run(cleanup_event_temp(event_id))
+            except Exception as _cleanup_exc:  # noqa: BLE001 - never mask the result
+                logger.warning(
+                    "[Cleanup] finally-path cleanup failed for %s: %s",
+                    event_id, _cleanup_exc,
+                )
+        else:
+            logger.info(
+                "[Cleanup] finally-path SKIPPED for %s — HAZARDMIND_KEEP_TEMP=1",
+                event_id,
             )
         try:
             mr = _processor_memory_report()
