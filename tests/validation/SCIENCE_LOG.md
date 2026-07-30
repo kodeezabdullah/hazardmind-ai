@@ -1481,3 +1481,154 @@ the pipeline but NOT persisted into the harness result JSON, so the
 acquisition date of a scored run is not recoverable from the results file
 alone — it required a DB lookup plus a CDSE catalogue query. Any future
 timing analysis needs those two fields stored per event.
+
+---
+
+# SESSION 6 — completing the S1 validation set (`science/detection-pass`, 2026-07-30)
+
+**Brief:** run the remaining qualified events, add a Pakistan case study, and
+test whether precision varies with post-peak acquisition latency. Measurement
+only — no new science, no new detectors, no threshold tuning.
+
+## STEP 0 — Tychero's latency, verified independently
+
+The brief asked for this number on the premise that it was unknown. It was
+already recovered by this branch's HEAD commit (`795b070`), so rather than
+re-derive it from the same route I verified it from persisted evidence
+end-to-end:
+
+    satellite_results.event_id e5619ac8-1130-49e8-867f-7e37043b31d9
+      -> scene_id  afcd8487-c5f9-48f3-88f4-1c59d1431339
+      -> CDSE OData Products(<uuid>)
+      -> S1B_IW_GRDH_1SDV_20180402T160653, ContentDate/Start 2018-04-02
+      -> config event_peak_date 2018-03-24
+
+    POST-PEAK LATENCY = +9.67 days
+
+**This confirms the correction, and it means the session's central hypothesis
+was already refuted before the session began.** Tychero is the LATEST
+acquisition in the scored set and the BEST result — 15x Kanalia's precision
+while imaged ~1.5 days later. The brief's framing ("if precision varies
+systematically with acquisition latency, these are a dose-response
+relationship... the paper's central figure") does not survive this number, and
+no amount of additional events changes that, because the refutation is a
+within-set contradiction rather than a sample-size problem.
+
+## THE INCIDENT THIS SESSION EXISTS TO REPORT — a "scored zero" that measured a missing package
+
+**Kosutarica (EMSR275) ran 44 minutes, downloaded 2,636 MB, and produced a
+number that was not a measurement of anything.**
+
+| Field | Value |
+|---|---|
+| `pipeline_status` | `complete_zero_zones` |
+| `affected_area_km2` | 0.0 |
+| `total_zones` | 0 |
+| `index_units` | **`dB_uncalibrated`** |
+| `index_calibrated` | **False** |
+| reference (clipped) | 1.617 km2 of confirmed flood, 11.78% of the AOI |
+| confidence / basis | 0.0 / `evidence_weak` |
+
+The log line that explains it: `SAR change detection failed (No module named
+'scipy')`.
+
+**scipy was absent from the harness venv.** `sar_change_detection` imports it
+LAZILY, inside its functions, so the gap was invisible at import time and
+surfaced only when a real run reached change detection — 44 minutes and 2.6 GB
+in. `processor.py`'s bare `except Exception` caught the ImportError, logged one
+warning, and continued to the uncalibrated absolute-threshold path: the path
+that classifies zero water on every S1 run and always has.
+
+**Had this been read off the results table it would have entered the paper as
+Kosutarica's scored S1 result — a zero on an event with confirmed flood.** It
+is the same failure the log records from the Kanalia series ("the old known
+defect, wearing the new code's clothes"), reached by a new route.
+
+**What the audit fields did and did not do.** `index_units` and
+`index_calibrated` recorded the fallback FAITHFULLY — the provenance design
+worked exactly as intended. But they are **diagnostic, not preventive**: the
+run still completed, still persisted, still printed a clean summary row, and it
+took a deliberate log grep to notice. A field that records a fault correctly
+while the pipeline reports success is not a safeguard.
+
+**So the fix is behavioural, not a `pip install`** (commit `d5124a6`). A missing
+dependency now raises `RuntimeError` naming the dependency and stating the
+failure is "not a property of the imagery". Ordinary data failures — misaligned
+baseline, too few reference scenes — still degrade to the fallback and still
+report `index_calibrated: False`, because those are legitimate statements about
+the input. A missing import is not: it means the deployment cannot perform the
+analysis it advertises **on any input**.
+
+Tests (4, through the real `processor.calculate_indices`): missing dependency
+raises; data failure degrades and still reports `index_calibrated False`; the
+scipy symbols the detector uses are asserted importable up front (the check
+that would have caught this before a single byte was spent); and the
+`except ImportError` / `except Exception` ORDER is guarded, since ImportError
+is an Exception subclass and a refactor placing the general handler first would
+silently restore the bug. Full satellite suite: **126 passed**, up from 122,
+no regressions.
+
+**Kosutarica's first run is excluded from the scored set, not recorded as a
+zero.** `run_latency_analysis.py` prints it under EXCLUDED with the reason, and
+prints a per-event provenance check so no future reader can count a
+fallback-path run as a measurement.
+
+## Reference-layer semantics and provenance, per scored event
+
+Every scored event now carries its `index_units`/`index_calibrated` alongside
+its metrics. All four surviving events ran genuine change detection
+(`dB_change_ratio`, `index_calibrated: True`) — verified from the DB, not from
+stdout.
+
+## STEP 2 — the Pakistan case study, and the sensor gate that nearly rejected it
+
+**EMSR838** (2025 monsoon floods) publishes three vector products for the AOIs
+of interest. Reading each product's own `source.dbf` and resolving the flood
+layer's `dmg_src_id` foreign key against it — rather than trusting the
+activation description, which covers the whole activation uniformly:
+
+| Product | Post-event source | Verdict |
+|---|---|---|
+| AOI01 `DEL_MONIT01` | **COSMO-SkyMed 2nd Gen, 3.0 m** | REJECT |
+| AOI02 `DEL_MONIT01` | **ICEYE, 2.0 m** | REJECT |
+| AOI01 `DEL_PRODUCT` | **Sentinel-1, 20.0 m** | **ACCEPT** |
+
+**In all three, the Sentinel-2 row is the PRE-event source** (18/06/2025 and
+10/06/2025) — the Townsville trap (EMSR342) exactly, and the reason the brief
+insisted on reading `source.dbf`. Two of the three products would have produced
+a sensor-difference measurement dressed as pipeline error.
+
+The accepted product traces end to end: all **1,291** `observedEventA` polygons
+carry `dmg_src_id = 2`, which resolves to the Sentinel-1 post-event row. No
+mixing within the layer.
+
+**Gates:**
+
+| Gate | Result |
+|---|---|
+| 1 — Sentinel post-event source | **PASS**, traced via `dmg_src_id` |
+| 2 — flooded fraction | **54.42%** (61.452 of 112.916 km2) — highest in the set |
+| 3 — same-orbit pre-event baseline | **PASS** — relative orbit 107: post-event 2025-08-28T01:07 (the reference's OWN acquisition date), pre-event 08-16 / 08-04 / 07-23 |
+
+Two judgement calls, both recorded in the config rather than left implicit:
+
+1. **The flooded fraction is 54.42%, not the 80.03% a densest-disk grid search
+   reports.** The optimum disk centres at 73.506E; `Vanike Tarar` — the nearest
+   settlement Nominatim resolves — sits ~8 km east at 73.586E. 54.42% is the
+   fraction at the AOI **the pipeline actually resolves**, measured by loading
+   the reference through `reference_loader` and clipping to it. Reporting 80.03%
+   would have been the more flattering number and the wrong one.
+2. **`event_peak_date` is 2025-08-26, not the activation's headline
+   2025-08-15.** The 08-15 date is the KP flash-flood onset; this AOI is Punjab
+   riverine flooding (activation declared 08-29, Punjab flooding began ~08-20).
+   Using 08-15 would overstate post-peak latency by ~13 days and misattribute
+   the result.
+
+**A caveat unique to this event, in the opposite direction to the usual one:**
+`source.dbf` records the post-event Sentinel-1 at **20 m**, where every other
+event in this harness is 10 m. The reference is therefore **coarser** than our
+prediction. That is the inverse of the Townsville/Amatrice disqualifier
+(reference finer than the sensor can resolve, which is fatal) and does not
+invalidate scoring — but margin disagreement is expected and must not be read
+as detector error.
+
