@@ -1870,3 +1870,98 @@ recall — `metrics_including_permanent_water` and `metrics_excluding_permanent_
 are both `null`, same shape as every other zero-zone event, correctly
 reported as undefined rather than a false 0.
 
+
+## CORRECTION — the Trimmu/Muzaffargarh finding was misdiagnosed, and the real cause is smaller and more precise
+
+The finding above ("a third failure mode... confidently reporting zero on
+88.71% water") was written before the reporting-layer bug was found. It is
+**partially wrong** and is corrected here rather than edited in place, per
+this log's own discipline of correcting by addendum, not by silent rewrite.
+
+**What was actually verified, in order:**
+
+1. **The raw imagery genuinely shows a real, coherent flood channel**,
+   independently confirmed against JRC Global Surface Water: 0.0% of the AOI
+   has >=75% historical water occurrence, 0.24% has >=50%, and only 10.58%
+   has ANY water history at all. The wide, connected dark channel visible in
+   `true_color.png` is real, new inundation — not a permanent river being
+   mistaken for a flood. This directly contradicts one candidate explanation
+   this log had not yet ruled out.
+
+2. **The `classification.png`/`index_map.png` PNGs, downloaded and inspected
+   pixel-by-pixel, show ~0.01% visible (non-transparent) pixels** —
+   consistent with the "only 1 polygon, 0.261 km2" dropped-zone finding, and
+   utterly inconsistent with an 88.71% water classification. Two possible
+   explanations were tested directly rather than assumed:
+   - **PNG decimation collapsing a real 88.71% signal to near-zero**: RULED
+     Out by direct simulation. `_decimate`'s stride-sampling was reproduced
+     on synthetic 88.71%-water arrays at the run's real grid size
+     (5162x4228) under both a uniform-random-scatter pattern and a
+     solid-block pattern; both survive decimation intact (88.71% ->
+     88.64-88.71%). Simple stride subsampling cannot mathematically produce
+     an 88.71% -> 0.01% collapse.
+   - **A genuine 100x reporting-layer inflation bug**: CONFIRMED. Traced to
+     `cross_validator.py`'s `_normalise_percent`, which scaled any value in
+     `(0, 1]` by 100x on the theory a caller might mistakenly supply a 0-1
+     fraction instead of a 0-100 percent (a historical fix from a prior,
+     unrelated incident, "islamabad-findings #3"). Direct test:
+     `_normalise_percent(0.8871)` returns `88.71`. All 5 `water_percent`
+     producer call sites in `processor.py` were audited and every one
+     computes `round(100.0 * n / total, 2)` — always 0-100 scale, never a
+     0-1 fraction — so the scaling branch had no legitimate input to protect
+     against in this codebase and fired ONLY on genuine low percentages,
+     inflating them 100x on every LLM prompt and every persisted
+     `concerns` diagnostic.
+
+3. **Fixed** (commit `2e23363`): `_normalise_percent` is now a pure
+   pass-through. The PRE-EXISTING regression test for this function asserted
+   the opposite of correct behaviour (`_normalise_percent(0.9) == 90.0`) —
+   it was validating the bug, not guarding against it. Rewritten to assert
+   `0.9` and the exact Muzaffargarh value `0.8871` both pass through
+   unchanged. Full satellite suite: 129/129 passed, no regressions.
+
+4. **Isolated the remaining question — is the low detected signal itself an
+   artifact of the 3-scene median baseline diluting a real signal, or is it
+   the actual detector output regardless of baseline depth?** Tested
+   directly, not assumed: a harness-only diagnostic tool
+   (`force_single_baseline_scene.py`, never touches production code) forced
+   `search_pre_event_same_orbit`'s `max_scenes` to 1, re-running the event
+   with the SIMPLEST possible comparison — one pre-event scene, one
+   post-event scene, no median. Confirmed in the run's own log: "Pre-event
+   baseline: 1 same-orbit scene(s) usable of 1 found."
+
+   **Result: bit-for-bit consistent with the 3-scene run.** 0 hazard zones,
+   1 dropped sub-threshold polygon at 0.237 km2 (vs. 0.261 km2 on the
+   3-scene run — noise-level difference, not a meaningfully different
+   signal), confidence 0.7651/`evidence_supports` (vs. 0.773 on the 3-scene
+   run). Baseline depth does NOT explain the low signal.
+
+**Corrected conclusion:** the raw imagery shows a real flood; the SAR
+change-detection threshold itself detects only a small fraction of it
+(~0.24 km2 out of a reference that maps a much larger extent), consistently
+regardless of whether the baseline is 1 scene or 3. This is now a
+**detector-sensitivity finding**, not a "confident on a contradiction"
+finding — the reporting-layer bug that produced the 88.71%/zero-zones
+CONTRADICTION is fixed and was never a property of the detector's actual
+output. What remains open, and is not investigated further this session, is
+WHY the change-detection threshold under-recovers signal on this scene
+specifically — a question for the detector's threshold logic
+(`sar_change_detection.py`'s `tiled_threshold`), not for the reporting or
+baseline-construction layers this session ruled out.
+
+**What this means for the confidence-tracking finding earlier in this log:**
+the observation that confidence (0.77) did not track a bad outcome still
+stands as a genuine finding, but its FRAMING changes. It is not "the system
+was confidently wrong about a large flood being missed" — the flood the
+detector reported (a small, real, ~0.24 km2 area) IS largely what was there
+to detect at this threshold's sensitivity. The confidence-calibration gap is
+narrower than first described: the system was not blind to an obvious
+majority-flooded scene; it under-detected a real but partially-missed flood
+and reported unwarranted confidence in that partial result.
+
+**Cost of this correction:** ~2.3 GB across the two single-baseline-scene
+attempts (one lost to a CDSE mid-transfer connection break, recorded and
+retried per the task's own infrastructure-failure protocol; the second
+succeeded at 1,309 MB). Total Muzaffargarh-area investigation across all
+attempts this session: ~10.7 GB.
+

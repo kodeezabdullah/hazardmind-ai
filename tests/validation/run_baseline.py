@@ -113,6 +113,7 @@ def _run_one_path(
     product_cfg: dict,
     dry_run: bool,
     forced_satellite_type: str | None = None,
+    force_single_baseline_scene: bool = False,
 ) -> EventResult:
     event_key = event_cfg["event_key"]
     label = f"{event_key}::{path_key}"
@@ -305,6 +306,7 @@ def _run_one_path(
             max_search_seconds=BUDGET_MAX_SEARCH_SECONDS,
             forced_satellite_type=forced_satellite_type,
             event_peak_utc=event_peak_utc,
+            force_single_baseline_scene=force_single_baseline_scene,
         )
     except Exception as exc:
         return EventResult(
@@ -483,6 +485,17 @@ def main() -> int:
             "otherwise select the other satellite."
         ),
     )
+    parser.add_argument(
+        "--force-single-baseline-scene",
+        action="store_true",
+        help=(
+            "DIAGNOSTIC ONLY (2026-07-30). Forces the S1 SAR change-detection "
+            "path to use exactly ONE pre-event scene instead of the default "
+            "3-scene median baseline, so a low-signal detection can be "
+            "isolated as a baseline-depth effect vs. a threshold/scene "
+            "effect. See force_single_baseline_scene.py."
+        ),
+    )
     args = parser.parse_args()
 
     configs = _load_event_configs()
@@ -521,6 +534,7 @@ def main() -> int:
                 _run_one_path(
                     cfg, path_key, product_cfg, args.dry_run,
                     forced_satellite_type=args.force_satellite,
+                    force_single_baseline_scene=args.force_single_baseline_scene,
                 )
             )
 
