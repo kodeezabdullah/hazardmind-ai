@@ -1735,3 +1735,67 @@ runs launched this session report honest scene ages.
    the scipy fallback). Both were found by asking "what would make this number
    wrong?" rather than by reading the number.
 
+
+## STEP 3, completed — four variables tested, four failed. This is the finding.
+
+With the set enlarged to n=7 (Kanalia, Keramidi, Tychero, Žalgiriai, Fshat i
+Ri, Pakistan/Vanike Tarar, Kosutarica), four candidate predictors of detection
+accuracy were tested — pre-registered discipline held throughout: each was
+checked against the zero-skill/null baseline, none was fitted to the data
+after seeing scores, and a failed test was recorded rather than discarded to
+try the next one.
+
+| Variable | n | Best p-value (any metric) | Verdict |
+|---|---|---|---|
+| Post-peak acquisition latency | 7 | 0.565 | **Not significant** |
+| Flooded fraction of AOI | 6 | 0.276 | **Not significant** |
+| Terrain/drainage type (categorical) | 7 | groups don't separate; not tested statistically | **Rejected on inspection** |
+| Reference area (km2, absolute size) | 6 | 0.524 | **Not significant** |
+
+**Terrain type failed before reaching a p-value, and that failure is itself
+informative.** Coded from each event's own AOI description (delta / river
+plain / drained basin) — chosen BEFORE looking at scores, to avoid exactly the
+post-hoc-fitting trap the -1.0 dB threshold fell into earlier this project —
+the two events labelled `delta` are Tychero (F1 0.634, the BEST result) and
+Žalgiriai (F1 0.000, the WORST result). The single most extreme pair in the
+whole dataset sits in the same terrain category. If terrain type at this
+granularity drove outcomes, this pair should have behaved similarly. It did
+not, so the categorical test was abandoned rather than run to a foregone
+non-result.
+
+**Reference area** (Kanalia 18.971 km2, Tychero 23.341, Žalgiriai 11.977,
+Fshat i Ri 13.502, Pakistan 45.893, Kosutarica 1.617 — all pulled from
+persisted `metrics.reference_area_km2` in each run's results JSON, not
+estimated) correlates with nothing: p=0.52-0.55 against precision, recall, and
+F1 alike, with weak coefficients (|r| ~0.3) even setting significance aside.
+
+**The honest conclusion, stated as the finding it is:** no single tested
+variable — timing, flooded fraction, terrain category, or reference size —
+predicts S1 flood-detection accuracy at this sample size. Precision and F1
+range from 0.0 to 0.63/0.99 across seven Sentinel-verified events with no
+identified driver. This is not an absence of result; it is the result. A
+paper claiming any one of these four as "the" explanatory variable would not
+survive a reviewer re-running the same test this session ran.
+
+**What is NOT concluded from this:** that no such variable exists. n=7 with
+four tests already spent is close to the point where a fifth untested
+correlation on the same events becomes a multiple-comparisons liability rather
+than a discovery — each additional attempt raises the chance some correlation
+clears p<0.05 by chance alone, and reporting only the one that does without
+the other four would misrepresent what was actually found. The defensible
+statement is a scope limit: **this event set, at this size, cannot identify
+what separates a usable S1 flood detection from a failed one** — establishing
+that requires either a substantially larger event set or a variable this
+session did not have the data to test (rainfall/discharge timing, reference
+product vintage/maturity — see Žalgiriai's `DEL`-vs-`MONIT` note below).
+
+**A confound surfaced by the terrain-type failure, not chased further this
+session:** Žalgiriai's reference layer is explicitly noted (its own config
+caveat) as a `DEL` product — "first delineation, not a MONIT vintage, a single
+snapshot" — while Tychero's later-vintage snapshot may have captured a more
+complete flood extent independent of what the satellite could detect. This
+would be a ground-truth maturity confound, not a physical variable, and would
+mean part of the delta pair's divergence is a property of the REFERENCE, not
+the detector. Flagged for a future session; not tested here, since it would be
+a fifth correlation on the same seven points.
+
